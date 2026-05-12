@@ -1,0 +1,31 @@
+name: orb
+display_name: Opening Range Breakout
+description: |
+  First-N-bars range breakout. Goes long on a close above the opening range
+  high (with VWAP and volume confirmation); goes short on a close below the
+  opening range low. Designed for the first 60-90 minutes of the NSE session.
+
+keywords:
+  - orb
+  - opening range breakout
+  - opening range breakdown
+  - opening range break
+  - opening range
+  - first 15 minutes breakout
+  - first 15-min breakout
+
+supported_timeframes: [1m, 3m, 5m, 10m, 15m]
+
+bullish:
+  entry_trigger: opening_range_breakout
+  entry_filters:
+    - vwap_bullish
+    - volume_spike
+  exit_trigger: vwap_bearish
+
+bearish:
+  entry_trigger: opening_range_breakdown
+  entry_filters:
+    - vwap_bearish
+    - volume_spike
+  exit_trigger: vwap_bullish

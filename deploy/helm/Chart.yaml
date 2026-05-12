@@ -1,0 +1,6 @@
+apiVersion: v2
+name: python-ai
+description: Stretus Python AI service — FastAPI + Quant Engine (port 8000/8001)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

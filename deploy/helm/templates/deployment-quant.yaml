@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "python-ai.fullname" . }}-quant
+  labels:
+    {{- include "python-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: quant
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "python-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/subcomponent: quant
+  template:
+    metadata:
+      labels:
+        {{- include "python-ai.labels" . | nindent 8 }}
+        app.kubernetes.io/subcomponent: quant
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "python-ai.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: quant
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ include "python-ai.quantImage" . }}"
+          imagePullPolicy: {{ .Values.quant.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8001
+              protocol: TCP
+          env:
+            {{- toYaml .Values.quantEnv | nindent 12 }}
+            # Allow quant engine to call back into the API service.
+            - name: FASTAPI_URL
+              value: "http://{{ include "python-ai.fullname" . }}-api:{{ .Values.apiService.port }}"
+          livenessProbe:
+            {{- toYaml .Values.quant.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.quant.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.quant.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      # EBS (gp3) is ReadWriteOnce — cannot be shared across pods on different
+      # nodes. The quant engine receives strategy data from the API via HTTP;
+      # it does not need a shared filesystem mount.
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

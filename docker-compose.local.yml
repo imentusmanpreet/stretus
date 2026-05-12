@@ -1,0 +1,27 @@
+# ── Use this file when running FastAPI on a remote SSH server ──────────────
+# This starts ONLY PostgreSQL on your local machine.
+# Run with:  docker compose -f docker-compose.local.yml up -d
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    container_name: stretus_postgres
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-stretus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stretus_ai_password}
+      POSTGRES_DB:       ${POSTGRES_DB:-stretus}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

@@ -1,0 +1,16 @@
+# Closed vocabulary the LLM intent extractor MUST emit.
+# Anything outside this taxonomy is rejected and falls back to defaults.
+fields:
+  hold_horizon:  [seconds, minutes, hours, days, weeks]
+  frequency:     [very_low, low, medium, high, very_high]
+  profit_size:   [small, medium, large]
+  style:         [trend, momentum, breakout, reversal, scalping, mean_reversion, confirmation]
+  risk_appetite: [conservative, moderate, aggressive]
+
+# Used when LLM extraction fails or returns invalid values.
+defaults:
+  hold_horizon:  hours
+  frequency:     medium
+  profit_size:   medium
+  style:         trend
+  risk_appetite: moderate

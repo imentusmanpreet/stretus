@@ -1,0 +1,28 @@
+name: vwap_reversal
+display_name: VWAP Reversal
+description: |
+  Mean-reversion entry around VWAP. Goes long when price reclaims VWAP from
+  below with a bullish rejection candle and an oversold momentum reading.
+  Reverse for shorts.
+
+keywords:
+  - vwap reversal
+  - vwap reclaim
+  - vwap revert
+  - vwap mean reversion
+
+supported_timeframes: [1m, 3m, 5m, 10m, 15m, 30m]
+
+bullish:
+  entry_trigger: vwap_reclaim_bullish
+  entry_filters:
+    - bullish_rejection_candle
+    - rsi_oversold
+  exit_trigger: vwap_bearish
+
+bearish:
+  entry_trigger: vwap_reclaim_bearish
+  entry_filters:
+    - bearish_rejection_candle
+    - rsi_overbought
+  exit_trigger: vwap_bullish

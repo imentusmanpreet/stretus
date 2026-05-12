@@ -1,0 +1,43 @@
+name: sma_cross_up
+category: trend
+direction: bullish
+kind: crossover
+roles: [entry_trigger]
+formula: "SMA({window_fast}) > SMA({window_slow})"
+description: "Golden cross — slow SMA crossed by faster SMA from below."
+
+works_best_on: [1h, 1d]
+weak_on: [1m, 3m, 5m]
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bearish
+  - frequency: very_high
+  - frequency: high
+
+pairs_well_with: [is_above_sma, volume_spike]
+contradicts: [sma_cross_down, price_below_ema]
+
+params_by_timeframe:
+  1m:   {window_fast: 10, window_slow: 30}
+  3m:   {window_fast: 10, window_slow: 30}
+  5m:   {window_fast: 20, window_slow: 50}
+  10m:  {window_fast: 20, window_slow: 50}
+  15m:  {window_fast: 20, window_slow: 50}
+  30m:  {window_fast: 20, window_slow: 50}
+  1h:   {window_fast: 20, window_slow: 50}
+  1d:   {window_fast: 20, window_slow: 100}
+
+experience_fit:
+  beginner: 0.7
+  intermediate: 0.9
+  expert: 0.6
+
+intent_fit:
+  trend: 1.0
+  momentum: 0.5
+  breakout: 0.5
+  reversal: 0.0
+  scalping: 0.0
+  mean_reversion: 0.0
+  confirmation: 0.6

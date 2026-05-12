@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "python-ai.fullname" . }}-quant
+  labels:
+    {{- include "python-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: quant
+spec:
+  type: {{ .Values.quantService.type }}
+  ports:
+    - port: {{ .Values.quantService.port }}
+      targetPort: http
+      name: http
+      protocol: TCP
+  selector:
+    {{- include "python-ai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: quant

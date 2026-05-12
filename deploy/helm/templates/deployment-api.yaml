@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "python-ai.fullname" . }}-api
+  labels:
+    {{- include "python-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: api
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  # Recreate: terminate the old pod before starting the new one so the
+  # ReadWriteOnce PVCs (chromadb, strategies) are released first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "python-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/subcomponent: api
+  template:
+    metadata:
+      labels:
+        {{- include "python-ai.labels" . | nindent 8 }}
+        app.kubernetes.io/subcomponent: api
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "python-ai.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ include "python-ai.apiImage" . }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            {{- toYaml .Values.env | nindent 12 }}
+            # Injected by the chart so the URL tracks the release name automatically.
+            - name: QUANT_ENGINE_URL
+              value: "http://{{ include "python-ai.fullname" . }}-quant:{{ .Values.quantService.port }}"
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.api.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.api.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: chromadb
+              mountPath: /app/stretus_knowledge_base/data
+            - name: strategies
+              mountPath: /app/strategies
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: chromadb
+          {{- if .Values.persistence.chromadb.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "python-ai.fullname" . }}-chromadb
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: strategies
+          {{- if .Values.persistence.strategies.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "python-ai.fullname" . }}-strategies
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

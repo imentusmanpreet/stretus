@@ -1,0 +1,28 @@
+name: opening_drive
+display_name: Opening Drive
+description: |
+  Aggressive gap-and-go open: enters in the gap direction when the open bar
+  closes in the gap's favor with a volume spike, and price holds the VWAP-side
+  of the trend.
+
+keywords:
+  - opening drive
+  - gap and go
+  - gap and go strategy
+  - opening momentum
+
+supported_timeframes: [1m, 3m, 5m, 10m, 15m]
+
+bullish:
+  entry_trigger: gap_and_go_bullish
+  entry_filters:
+    - volume_spike
+    - vwap_bullish
+  exit_trigger: vwap_bearish
+
+bearish:
+  entry_trigger: gap_and_go_bearish
+  entry_filters:
+    - volume_spike
+    - vwap_bearish
+  exit_trigger: vwap_bullish

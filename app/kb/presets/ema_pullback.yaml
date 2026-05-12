@@ -1,0 +1,30 @@
+name: ema_pullback
+display_name: 20 EMA Pullback
+description: |
+  Trend-following pullback entry. Identifies an established trend (price on
+  the trend side of the EMA), waits for a pullback that touches the EMA, then
+  enters on a bullish/bearish rejection candle with volume confirmation.
+
+keywords:
+  - 20 ema pullback
+  - ema pullback
+  - 20 ema
+  - 20-ema pullback
+  - moving average pullback
+  - trend pullback
+
+supported_timeframes: [3m, 5m, 10m, 15m, 30m, 1h, 1d]
+
+bullish:
+  entry_trigger: ema_pullback_bullish
+  entry_filters:
+    - ema_sloping_up        # confirms the trend is genuinely up, not flat
+    - volume_spike
+  exit_trigger: price_below_ema
+
+bearish:
+  entry_trigger: ema_pullback_bearish
+  entry_filters:
+    - ema_sloping_down      # confirms the trend is genuinely down, not flat
+    - volume_spike
+  exit_trigger: price_above_ema

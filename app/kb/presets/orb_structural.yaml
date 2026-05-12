@@ -1,0 +1,41 @@
+name: orb_structural
+display_name: Opening Range Breakout (structural SL)
+description: |
+  Same signal stack as the standard ORB preset but with the stop loss
+  anchored at the opening range low (with a small padding) instead of a
+  flat percent. This is the textbook ORB execution: "SL at the opposite
+  side of the ORB candle" — the move is only valid as long as price holds
+  above the breakout level's anchor.
+
+keywords:
+  - orb structural
+  - orb with structural sl
+  - orb sl at orb low
+  - orb with structural stop
+
+supported_timeframes: [1m, 3m, 5m, 10m, 15m]
+
+bullish:
+  entry_trigger: opening_range_breakout
+  entry_filters:
+    - vwap_bullish
+    - volume_spike
+  exit_trigger: vwap_bearish
+
+bearish:
+  entry_trigger: opening_range_breakdown
+  entry_filters:
+    - vwap_bearish
+    - volume_spike
+  exit_trigger: vwap_bullish
+
+stop_loss:
+  type: structural
+  anchor: opening_range_low
+  opening_bars: 3
+  padding_pct: 0.1                 # 10 bps below the ORB low — wick-tolerance buffer
+
+trailing_stop:
+  type: percent
+  distance_pct: 0.8                # ratchet SL up by 0.8% from highest_high
+  activate_after_pct: 0.5          # only start trailing once trade is up >= 0.5%

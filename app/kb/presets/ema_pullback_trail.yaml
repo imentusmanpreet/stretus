@@ -1,0 +1,39 @@
+name: ema_pullback_trail
+display_name: 20 EMA Pullback (trail with EMA)
+description: |
+  20-EMA pullback entry with the canonical "trail with the 20 EMA" exit logic.
+  The static SL is a tighter percent (pullback low has already been tested by
+  the trigger), and the trailing SL rides the EMA upward — when price closes
+  below the EMA the trade exits.
+
+keywords:
+  - ema pullback trail
+  - 20 ema trail
+  - ema pullback trailing
+  - trail with 20 ema
+
+supported_timeframes: [5m, 10m, 15m, 30m, 1h, 1d]
+
+bullish:
+  entry_trigger: ema_pullback_bullish
+  entry_filters:
+    - ema_sloping_up
+    - volume_spike
+  exit_trigger: price_below_ema
+
+bearish:
+  entry_trigger: ema_pullback_bearish
+  entry_filters:
+    - ema_sloping_down
+    - volume_spike
+  exit_trigger: price_above_ema
+
+stop_loss:
+  type: atr
+  multiplier: 1.5
+  window: 14
+
+trailing_stop:
+  type: ema
+  window: 20
+  activate_after_pct: 0.3

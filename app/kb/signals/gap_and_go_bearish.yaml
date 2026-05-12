@@ -1,0 +1,38 @@
+name: gap_and_go_bearish
+category: india
+direction: bearish
+kind: pattern
+roles: [entry_trigger]
+formula: "OPEN < PREV(CLOSE, 1) * {gap_factor} AND CLOSE < OPEN"
+description: "Opening Drive (short): gap-down open with continuation (close < open) — institutional opening rejection."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m]
+weak_on: []
+unsupported_on: [1h, 1d]
+
+contraindicated_when:
+  - sentiment: bullish
+
+pairs_well_with: [volume_spike, vwap_bearish, opening_range_breakdown]
+contradicts: [gap_and_go_bullish, gap_up_open]
+
+params_by_timeframe:
+  1m:   {gap_factor: 0.995}
+  3m:   {gap_factor: 0.995}
+  5m:   {gap_factor: 0.995}
+  10m:  {gap_factor: 0.995}
+  15m:  {gap_factor: 0.995}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+
+intent_fit:
+  trend: 0.6
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.0
+  scalping: 1.0
+  mean_reversion: 0.0
+  confirmation: 0.7

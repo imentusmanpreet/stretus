@@ -1,0 +1,44 @@
+name: rsi_above_50
+category: momentum
+direction: bullish
+kind: regime
+roles: [entry_trigger, entry_filter, exit_trigger]
+formula: "RSI({window}) > {threshold}"
+description: "RSI is above 50 (bullish momentum regime) — fires on every bar in the regime, not only at crossover."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d]
+weak_on: []
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bearish
+    role: entry_trigger
+  - sentiment: bearish
+    role: entry_filter
+
+pairs_well_with: [price_above_ema, ema_above, vwap_bullish, volume_spike]
+contradicts: [rsi_below_50, rsi_overbought]
+
+params_by_timeframe:
+  1m:   {window: 14, threshold: 50.0}
+  3m:   {window: 14, threshold: 50.0}
+  5m:   {window: 14, threshold: 50.0}
+  10m:  {window: 14, threshold: 50.0}
+  15m:  {window: 14, threshold: 50.0}
+  30m:  {window: 14, threshold: 50.0}
+  1h:   {window: 14, threshold: 50.0}
+  1d:   {window: 14, threshold: 50.0}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+
+intent_fit:
+  trend: 0.7
+  momentum: 1.0
+  breakout: 0.5
+  reversal: 0.2
+  scalping: 1.0
+  mean_reversion: 0.2
+  confirmation: 0.8

@@ -1,0 +1,29 @@
+# Risk tiers keyed by user-stated experience.
+# base_sl_pct/base_tp_pct are baselines; the planner scales them by realized ATR%.
+beginner:
+  per_trade_risk_pct: 1.0
+  daily_loss_cap_pct: 1.0
+  max_open_positions: 2
+  base_sl_pct: 1.0
+  base_tp_pct: 2.0
+
+intermediate:
+  per_trade_risk_pct: 2.0
+  daily_loss_cap_pct: 2.0
+  max_open_positions: 3
+  base_sl_pct: 1.5
+  base_tp_pct: 3.0
+
+expert:
+  per_trade_risk_pct: 3.0
+  daily_loss_cap_pct: 3.0
+  max_open_positions: 5
+  base_sl_pct: 2.0
+  base_tp_pct: 4.0
+
+default:
+  per_trade_risk_pct: 2.0
+  daily_loss_cap_pct: 2.0
+  max_open_positions: 3
+  base_sl_pct: 1.5
+  base_tp_pct: 3.0

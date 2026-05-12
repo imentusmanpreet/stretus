@@ -1,0 +1,77 @@
+services:
+
+
+
+  # ── FastAPI Backend ───────────────────────────────────────────────────────
+  # On every `docker compose up` (including --build) the entrypoint:
+  #   1. Waits for Postgres to be healthy
+  #   2. Runs `alembic upgrade head`   ← industry-standard migration step
+  #   3. Starts the Uvicorn server
+  api:
+    build: .
+    restart: always
+    container_name: stretus_api
+    env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      APP_ENV: ${APP_ENV:-development}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-change-me}
+      APP_DEBUG: ${APP_DEBUG:-true}
+      # Inside Docker the DB host is the service name, not localhost
+      POSTGRES_HOST: stretus-postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-stretus}
+      POSTGRES_USER: ${POSTGRES_USER:-stretus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stretus_db}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-stretus}
+      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-stretus}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      USE_GROQ: ${USE_GROQ:-false}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      STRATEGY_FOLDER: ${STRATEGY_FOLDER:-./strategies}
+      QUANT_ENGINE_URL: ${QUANT_ENGINE_URL:-http://quant_engine:8001}
+      HISTORICAL_DATA_URL: ${HISTORICAL_DATA_URL:-}
+      MARKET_DATA_URL: ${MARKET_DATA_URL:-https://api.upstox.com/v2}
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY:-}
+      UPSTOX_ACCESS_TOKEN: ${UPSTOX_ACCESS_TOKEN:-}
+      MARKET_DATA_CACHE_TTL_SECONDS: ${MARKET_DATA_CACHE_TTL_SECONDS:-60}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./strategies:/app/strategies
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # CMD is inherited from Dockerfile: scripts/entrypoint.sh
+    # No command override needed here.
+
+  # ── Quant Engine ──────────────────────────────────────────────────────────
+  quant_engine:
+    build: ./quant_engine
+    restart: always
+    container_name: stretus_quant_engine
+    depends_on:
+      - api
+    environment:
+      PYTHONUNBUFFERED: "1"
+      FASTAPI_URL: ${FASTAPI_URL:-http://api:8000}
+    ports:
+      - "8001:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ./quant_engine:/app
+      - ./strategies:/app/strategies:ro
+      - ./data:/app/data:ro
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+networks:
+  default:
+    external: true
+    name: shared_net

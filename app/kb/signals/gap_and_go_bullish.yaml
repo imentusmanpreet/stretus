@@ -1,0 +1,38 @@
+name: gap_and_go_bullish
+category: india
+direction: bullish
+kind: pattern
+roles: [entry_trigger]
+formula: "OPEN > PREV(CLOSE, 1) * {gap_factor} AND CLOSE > OPEN"
+description: "Opening Drive: gap-up open with continuation (close > open) — institutional opening momentum."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m]
+weak_on: []
+unsupported_on: [1h, 1d]
+
+contraindicated_when:
+  - sentiment: bearish
+
+pairs_well_with: [volume_spike, vwap_bullish, opening_range_breakout]
+contradicts: [gap_and_go_bearish, gap_down_open]
+
+params_by_timeframe:
+  1m:   {gap_factor: 1.005}
+  3m:   {gap_factor: 1.005}
+  5m:   {gap_factor: 1.005}
+  10m:  {gap_factor: 1.005}
+  15m:  {gap_factor: 1.005}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+
+intent_fit:
+  trend: 0.6
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.0
+  scalping: 1.0
+  mean_reversion: 0.0
+  confirmation: 0.7

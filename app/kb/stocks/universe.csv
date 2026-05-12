@@ -1,0 +1,20 @@
+symbol,display_name,exchange,upstox_key,sector,enabled
+HDFCBANK.NS,HDFC Bank,NSE,NSE_EQ|INE040A01034,banking,true
+RELIANCE.NS,Reliance Industries,NSE,NSE_EQ|INE002A01018,energy,true
+TCS.NS,Tata Consultancy Services,NSE,NSE_EQ|INE467B01029,it,true
+INFY.NS,Infosys,NSE,NSE_EQ|INE009A01021,it,true
+ADANIENT.NS,Adani Enterprises,NSE,NSE_EQ|INE423A01024,conglomerate,true
+NHPC.NS,NHPC,NSE,NSE_EQ|INE848E01016,power,true
+SUZLON.NS,Suzlon Energy,NSE,NSE_EQ|INE040H01021,energy,true
+GMRAIRPORT.NS,GMR Airports,NSE,NSE_EQ|INE776C01039,infrastructure,true
+IDEA.NS,Vodafone Idea,NSE,NSE_EQ|INE669E01016,telecom,true
+ICICIBANK.NS,ICICI Bank,NSE,NSE_EQ|INE090A01021,banking,true
+SBIN.NS,State Bank of India,NSE,NSE_EQ|INE062A01020,banking,true
+AXISBANK.NS,Axis Bank,NSE,NSE_EQ|INE238A01034,banking,true
+KOTAKBANK.NS,Kotak Mahindra Bank,NSE,NSE_EQ|INE237A01028,banking,true
+BHARTIARTL.NS,Bharti Airtel,NSE,NSE_EQ|INE397D01024,telecom,true
+ITC.NS,ITC,NSE,NSE_EQ|INE154A01025,fmcg,true
+LT.NS,Larsen & Toubro,NSE,NSE_EQ|INE018A01030,construction,true
+MARUTI.NS,Maruti Suzuki India,NSE,NSE_EQ|INE585B01010,auto,true
+SUNPHARMA.NS,Sun Pharmaceutical Industries,NSE,NSE_EQ|INE044A01036,pharma,true
+HCLTECH.NS,HCL Technologies,NSE,NSE_EQ|INE860A01027,it,true

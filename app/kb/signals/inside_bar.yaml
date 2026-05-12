@@ -1,0 +1,40 @@
+name: inside_bar
+category: pattern
+direction: neutral
+kind: pattern
+roles: [entry_trigger]
+formula: "HIGH <= PREV(HIGH, 1) AND LOW >= PREV(LOW, 1)"
+description: "Inside-bar pattern (compression) — direction comes from the prevailing bias."
+
+works_best_on: [5m, 15m, 30m, 1h, 1d]
+weak_on: [1m]
+unsupported_on: []
+
+contraindicated_when: []
+
+pairs_well_with: [vwap_bullish, vwap_bearish, volume_spike]
+contradicts: []
+
+params_by_timeframe:
+  1m:   {}
+  3m:   {}
+  5m:   {}
+  10m:  {}
+  15m:  {}
+  30m:  {}
+  1h:   {}
+  1d:   {}
+
+experience_fit:
+  beginner: 0.5
+  intermediate: 0.9
+  expert: 1.0
+
+intent_fit:
+  trend: 0.4
+  momentum: 0.5
+  breakout: 1.0
+  reversal: 0.4
+  scalping: 0.5
+  mean_reversion: 0.5
+  confirmation: 0.6

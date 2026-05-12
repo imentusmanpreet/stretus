@@ -1,0 +1,148 @@
+name: Build, Push to ECR & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev2, stage, prod]
+        default: dev2
+      image_platform:
+        description: 'Docker TARGETPLATFORM — must match EKS nodes (amd64 = fast native CI).'
+        required: true
+        type: choice
+        options: [linux/amd64, linux/arm64]
+        default: linux/amd64
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 396608799734.dkr.ecr.ap-south-1.amazonaws.com
+
+concurrency:
+  group: stretus-python-ai-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # needed to commit the new image tag back into this repo
+  id-token: write   # OIDC for AWS
+
+jobs:
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    env:
+      # Push → amd64 (no QEMU). Manual run → pick arm64 if EKS is Graviton.
+      IMAGE_PLATFORM: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_platform || 'linux/amd64' }}
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use GITHUB_TOKEN so the tag-bump commit can be pushed back.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHORT_SHA="$(echo ${{ github.sha }} | cut -c1-7)"
+          TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
+          TAG="${SHORT_SHA}-${TIMESTAMP}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+      # QEMU only when building non-amd64 on GHA (cross-arch is 3–10× slower).
+      - name: Set up QEMU
+        if: ${{ contains(env.IMAGE_PLATFORM, 'arm') }}
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: ${{ env.IMAGE_PLATFORM }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-PythonAI-${{ github.run_id }}
+          role-duration-seconds: 3600
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: true
+
+      - name: Create ECR repositories (idempotent)
+        run: |
+          for REPO in stretus/python-ai-api stretus/python-ai-quant; do
+            aws ecr describe-repositories --repository-names "${REPO}" 2>/dev/null && continue
+            aws ecr create-repository \
+              --repository-name "${REPO}" \
+              --image-tag-mutability MUTABLE \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256
+          done
+
+      - name: Build & push — API image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ env.IMAGE_PLATFORM }}
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/stretus/python-ai-api:${{ steps.meta.outputs.tag }}
+            ${{ env.ECR_REGISTRY }}/stretus/python-ai-api:latest
+          cache-from: type=gha,scope=python-ai-api-${{ env.IMAGE_PLATFORM }}
+          cache-to: type=gha,mode=max,scope=python-ai-api-${{ env.IMAGE_PLATFORM }}
+
+      - name: Build & push — Quant Engine image
+        uses: docker/build-push-action@v5
+        with:
+          context: quant_engine
+          file: quant_engine/Dockerfile
+          platforms: ${{ env.IMAGE_PLATFORM }}
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/stretus/python-ai-quant:${{ steps.meta.outputs.tag }}
+            ${{ env.ECR_REGISTRY }}/stretus/python-ai-quant:latest
+          cache-from: type=gha,scope=python-ai-quant-${{ env.IMAGE_PLATFORM }}
+          cache-to: type=gha,mode=max,scope=python-ai-quant-${{ env.IMAGE_PLATFORM }}
+
+      # ── GitOps: update the image tag in OUR OWN repo ──────────────────────
+      # No GITOPS_PAT or cross-repo writes needed.
+      # Argo CD watches this repo (deploy/helm/) and picks up the commit.
+      - name: Bump image tags in deploy/helm/values.yaml
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          # The values.yaml has exactly two `tag:` lines — one under api.image
+          # and one under quant.image. A global replace of all `tag: "..."` values
+          # is safe and unambiguous because no other key in the file is named `tag`.
+          sed -i "s|tag: \"[^\"]*\"|tag: \"${TAG}\"|g" deploy/helm/values.yaml
+          echo "Updated image tags to ${TAG}"
+          grep "tag:" deploy/helm/values.yaml
+
+      - name: Commit & push tag bump
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add deploy/helm/values.yaml
+          if git diff --cached --quiet; then
+            echo "No tag change to commit."
+            exit 0
+          fi
+          git commit -m "chore(deploy): bump image tags to ${TAG} [skip ci]"
+          git push

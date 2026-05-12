@@ -1,0 +1,189 @@
+{
+  "sma_cross_down:TCS.NS:15m": {
+    "signal_name": "sma_cross_down",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window_fast": 30,
+      "window_slow": 200
+    },
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
+  },
+  "supertrend_bearish:TCS.NS:15m": {
+    "signal_name": "supertrend_bearish",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
+    "best_params": {},
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
+  },
+  "ema_cross_up:TCS.NS:15m": {
+    "signal_name": "ema_cross_up",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window_fast": 30,
+      "window_slow": 64
+    },
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
+  },
+  "rsi_above_50:IDEA.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1328,
+    "total_trades": 3254,
+    "last_updated": "2026-05-01"
+  },
+  "vwap_bullish:IDEA.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1328,
+    "total_trades": 3254,
+    "last_updated": "2026-05-01"
+  },
+  "vwap_bearish:IDEA.NS:1m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1328,
+    "total_trades": 3254,
+    "last_updated": "2026-05-01"
+  },
+  "rsi_above_50:NHPC.NS:30m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "vwap_bullish:NHPC.NS:30m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "vwap_bearish:NHPC.NS:30m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "ema_above:NHPC.NS:15m": {
+    "signal_name": "ema_above",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "price_above_ema:NHPC.NS:15m": {
+    "signal_name": "price_above_ema",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 29
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "price_below_ema:NHPC.NS:15m": {
+    "signal_name": "price_below_ema",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 29
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "rsi_above_50:NHPC.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "vwap_bullish:NHPC.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "vwap_bearish:NHPC.NS:1m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "rsi_above_50:TCS.NS:5m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  },
+  "vwap_bullish:TCS.NS:5m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  },
+  "vwap_bearish:TCS.NS:5m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  }
+}

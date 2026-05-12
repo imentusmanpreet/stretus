@@ -1,0 +1,41 @@
+name: bullish_fvg_signal
+category: pattern
+direction: bullish
+kind: pattern
+roles: [entry_trigger, entry_filter]
+formula: "IS_BULLISH_FVG > 0"
+description: "Bullish Fair Value Gap: 3-bar imbalance where bar i's low > bar (i-2)'s high — institutional aggression that often gets revisited (ICT)."
+
+works_best_on: [5m, 10m, 15m, 30m, 1h]
+weak_on: [1m, 3m]
+unsupported_on: [1d]
+
+contraindicated_when:
+  - sentiment: bearish
+
+pairs_well_with: [bullish_market_structure_break, volume_spike, uptrend_structure]
+contradicts: [bearish_fvg_signal]
+
+params_by_timeframe:
+  1m:   {}
+  3m:   {}
+  5m:   {}
+  10m:  {}
+  15m:  {}
+  30m:  {}
+  1h:   {}
+  1d:   {}
+
+experience_fit:
+  beginner: 0.5
+  intermediate: 1.0
+  expert: 1.0
+
+intent_fit:
+  trend: 0.5
+  momentum: 1.0
+  breakout: 0.8
+  reversal: 0.4
+  scalping: 0.7
+  mean_reversion: 0.3
+  confirmation: 0.9

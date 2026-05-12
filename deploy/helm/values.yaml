@@ -1,0 +1,185 @@
+replicaCount: 1
+
+global:
+  imageRegistry: ""
+
+# ── API (FastAPI) ──────────────────────────────────────────────────────────
+api:
+  image:
+    repository: stretus/python-ai-api
+    pullPolicy: IfNotPresent
+    tag: "4cfdb48-20260508-113412"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+  # FastAPI exposes /docs by default; use it as a cheap health gate.
+  # The app runs Alembic migrations before starting Uvicorn, so
+  # initialDelaySeconds must be generous for cold starts.
+  livenessProbe:
+    httpGet:
+      path: /docs
+      port: 8000
+    initialDelaySeconds: 90
+    periodSeconds: 30
+    timeoutSeconds: 30
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /docs
+      port: 8000
+    initialDelaySeconds: 60
+    periodSeconds: 10
+    timeoutSeconds: 30
+    failureThreshold: 6
+
+# ── Quant Engine (FastAPI) ─────────────────────────────────────────────────
+quant:
+  image:
+    repository: stretus/python-ai-quant
+    pullPolicy: IfNotPresent
+    tag: "4cfdb48-20260508-113412"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 3Gi
+  livenessProbe:
+    tcpSocket:
+      port: 8001
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    tcpSocket:
+      port: 8001
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  # Don't auto-mount the k8s API token; this service has no need for it.
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # Python needs to write ChromaDB data, Alembic tmp files, and strategies;
+  # readOnlyRootFilesystem is intentionally false.
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+apiService:
+  type: ClusterIP
+  port: 8000
+
+quantService:
+  type: ClusterIP
+  port: 8001
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+# ── Persistent storage ─────────────────────────────────────────────────────
+persistence:
+  chromadb:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 5Gi
+  strategies:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 1Gi
+
+# ── Non-sensitive env vars for the API container ───────────────────────────
+# All secrets (GROQ_API_KEY, APP_SECRET_KEY, DATABASE_URL, UPSTOX_*)
+# are injected via envFrom referencing the k8s Secrets listed below.
+env:
+  - name: APP_ENV
+    value: "production"
+  - name: APP_DEBUG
+    value: "false"
+  - name: PYTHONUNBUFFERED
+    value: "1"
+  - name: LLM_PROVIDER
+    value: "auto"
+  - name: USE_GROQ
+    value: "true"
+  - name: GROQ_MODEL
+    value: "llama-3.3-70b-versatile"
+  - name: OLLAMA_MODEL
+    value: "qwen2.5:7b"
+  - name: CHROMA_DB_PATH
+    value: "/app/stretus_knowledge_base/data/vector_db"
+  - name: STRATEGY_FOLDER
+    value: "/app/strategies"
+  - name: MARKET_DATA_URL
+    value: "https://api.upstox.com/v2"
+  - name: MARKET_DATA_CACHE_TTL_SECONDS
+    value: "60"
+  - name: HISTORICAL_DATA_URL
+    value: "https://dev-api.stretus.com"
+  - name: QUANT_ENGINE_TIMEOUT_SECONDS
+    value: "600"
+  - name: ROOT_PATH
+    value: "/python-ai"
+
+# Secrets referenced by name; created out-of-band via scripts/create-required-secrets.sh.
+# postgres-credentials  → POSTGRES_HOST/PORT/DB/USER/PASSWORD (used by entrypoint.sh)
+# stretus-ai-credentials → APP_SECRET_KEY, GROQ_API_KEY, UPSTOX_*, DATABASE_URL, DATABASE_URL_SYNC
+envFrom:
+  - secretRef:
+      name: postgres-credentials
+  - secretRef:
+      name: stretus-ai-credentials
+
+# ── Env vars for the Quant Engine container ────────────────────────────────
+quantEnv:
+  - name: PYTHONUNBUFFERED
+    value: "1"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Ingress ────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: dev-api.stretus.com
+  tls:
+    - hosts:
+        - dev-api.stretus.com
+      secretName: tls-dev-api-stretus-com

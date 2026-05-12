@@ -1,0 +1,44 @@
+name: price_below_ema
+category: trend
+direction: bearish
+kind: regime
+roles: [entry_filter, entry_trigger, exit_trigger]
+formula: "CLOSE < EMA({window})"
+description: "Price is below an EMA — bearish confirmation; valid bullish-position exit."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d]
+weak_on: []
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bullish
+    role: entry_trigger
+  - sentiment: bullish
+    role: entry_filter
+
+pairs_well_with: [ema_cross_down, ema_below, vwap_bearish, volume_spike]
+contradicts: [price_above_ema, ema_above]
+
+params_by_timeframe:
+  1m:   {window: 20}
+  3m:   {window: 20}
+  5m:   {window: 20}
+  10m:  {window: 20}
+  15m:  {window: 20}
+  30m:  {window: 20}
+  1h:   {window: 34}
+  1d:   {window: 50}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.8
+
+intent_fit:
+  trend: 1.0
+  momentum: 0.7
+  breakout: 0.6
+  reversal: 0.1
+  scalping: 0.8
+  mean_reversion: 0.2
+  confirmation: 1.0

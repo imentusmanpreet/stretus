@@ -1,0 +1,41 @@
+name: reference_below_sma
+category: trend
+direction: bearish
+kind: regime
+roles: [entry_filter]
+formula: "REF_CLOSE < AVG(REF_CLOSE, {window})"
+description: "Reference benchmark (e.g. Nifty 50) is below its N-period SMA — broad-market downtrend filter. Requires reference_symbol on the strategy."
+
+works_best_on: [15m, 30m, 1h, 1d]
+weak_on: [1m, 3m, 5m]
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bullish
+
+pairs_well_with: [price_below_ema, ema_below, supertrend_bearish, rs_underperforms_reference]
+contradicts: [reference_above_sma]
+
+params_by_timeframe:
+  1m:   {window: 50}
+  3m:   {window: 50}
+  5m:   {window: 50}
+  10m:  {window: 50}
+  15m:  {window: 50}
+  30m:  {window: 50}
+  1h:   {window: 50}
+  1d:   {window: 50}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+
+intent_fit:
+  trend: 1.0
+  momentum: 0.6
+  breakout: 0.5
+  reversal: 0.0
+  scalping: 0.3
+  mean_reversion: 0.2
+  confirmation: 1.0

@@ -1,0 +1,29 @@
+name: volatility_squeeze
+display_name: Volatility Squeeze Breakout
+description: |
+  Volatility-expansion play: enters when a Bollinger-Band squeeze releases via
+  a Keltner-channel breakout with volume confirmation. The thesis is that
+  compression precedes expansion and explosive directional moves.
+
+keywords:
+  - volatility squeeze
+  - bb squeeze breakout
+  - bollinger squeeze
+  - squeeze breakout
+  - volatility expansion
+
+supported_timeframes: [10m, 15m, 30m, 1h, 1d]
+
+bullish:
+  entry_trigger: keltner_breakout_up
+  entry_filters:
+    - bb_squeeze
+    - volume_spike
+  exit_trigger: ema_cross_down
+
+bearish:
+  entry_trigger: keltner_breakout_down
+  entry_filters:
+    - bb_squeeze
+    - volume_spike
+  exit_trigger: ema_cross_up

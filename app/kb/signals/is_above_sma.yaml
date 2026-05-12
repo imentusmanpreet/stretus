@@ -1,0 +1,41 @@
+name: is_above_sma
+category: trend
+direction: bullish
+kind: regime
+roles: [entry_filter]
+formula: "CLOSE > SMA({window})"
+description: "Price above a long SMA — broad uptrend filter (slow, conservative)."
+
+works_best_on: [1h, 1d]
+weak_on: [1m, 3m]
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bearish
+
+pairs_well_with: [sma_cross_up, ema_cross_up]
+contradicts: [price_below_ema]
+
+params_by_timeframe:
+  1m:   {window: 50}
+  3m:   {window: 50}
+  5m:   {window: 50}
+  10m:  {window: 50}
+  15m:  {window: 50}
+  30m:  {window: 50}
+  1h:   {window: 100}
+  1d:   {window: 100}
+
+experience_fit:
+  beginner: 0.8
+  intermediate: 1.0
+  expert: 0.7
+
+intent_fit:
+  trend: 1.0
+  momentum: 0.4
+  breakout: 0.4
+  reversal: 0.1
+  scalping: 0.2
+  mean_reversion: 0.2
+  confirmation: 0.9

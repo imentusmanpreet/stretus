@@ -1,0 +1,38 @@
+name: opening_range_breakout
+category: india
+direction: bullish
+kind: pattern
+roles: [entry_trigger]
+formula: "CLOSE > OPENING_RANGE_HIGH({opening_bars})"
+description: "Price breaks above the opening-range high — classic Indian intraday momentum entry."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m]
+weak_on: []
+unsupported_on: [1h, 1d]
+
+contraindicated_when:
+  - sentiment: bearish
+
+pairs_well_with: [vwap_bullish, volume_spike, price_above_ema]
+contradicts: [gap_down_open]
+
+params_by_timeframe:
+  1m:   {opening_bars: 15}
+  3m:   {opening_bars: 5}
+  5m:   {opening_bars: 3}
+  10m:  {opening_bars: 2}
+  15m:  {opening_bars: 2}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 1.0
+
+intent_fit:
+  trend: 0.7
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.0
+  scalping: 0.7
+  mean_reversion: 0.0
+  confirmation: 0.6

@@ -1,0 +1,40 @@
+name: volume_spike
+category: volume
+direction: neutral
+kind: threshold
+roles: [entry_filter]
+formula: "VOL > AVG(VOL, {window}) * {multiplier}"
+description: "Current volume well above its rolling average — confirms participation in any direction."
+
+works_best_on: [1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d]
+weak_on: []
+unsupported_on: []
+
+contraindicated_when: []
+
+pairs_well_with: [price_above_ema, vwap_bullish, ema_above, opening_range_breakout]
+contradicts: []
+
+params_by_timeframe:
+  1m:   {window: 20, multiplier: 1.5}
+  3m:   {window: 20, multiplier: 1.5}
+  5m:   {window: 20, multiplier: 1.5}
+  10m:  {window: 20, multiplier: 1.5}
+  15m:  {window: 20, multiplier: 1.5}
+  30m:  {window: 20, multiplier: 1.5}
+  1h:   {window: 20, multiplier: 1.5}
+  1d:   {window: 20, multiplier: 1.5}
+
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+
+intent_fit:
+  trend: 0.6
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.5
+  scalping: 0.8
+  mean_reversion: 0.4
+  confirmation: 1.0

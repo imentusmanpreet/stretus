@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stretus chat API tester</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --user: #2563eb;
+      --assistant: #334155;
+      --danger: #f87171;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+    }
+    * { box-sizing: border-box; }
+    html {
+      height: 100%;
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100%;
+      min-height: 100vh;
+      min-height: 100dvh;
+      max-height: 100vh;
+      max-height: 100dvh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .app-shell {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+    .sidebar {
+      width: 260px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .sidebar-head {
+      padding: 0.65rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.35rem;
+    }
+    .sidebar-head span {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .sidebar-head button { padding: 0.3rem 0.5rem; font-size: 0.75rem; }
+    .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.35rem;
+    }
+    .chat-item {
+      padding: 0.5rem 0.55rem;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 0.25rem;
+      border: 1px solid transparent;
+      font-size: 0.8rem;
+    }
+    .chat-item:hover { background: rgba(255,255,255,0.06); }
+    .chat-item.active {
+      background: rgba(37, 99, 235, 0.2);
+      border-color: var(--user);
+    }
+    .chat-item .t { font-weight: 600; color: var(--text); }
+    .chat-item .sub { font-size: 0.7rem; color: var(--muted); margin-top: 0.2rem; }
+    .main-col {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .debug-panel {
+      width: 0;
+      overflow: hidden;
+      border-left: 1px solid transparent;
+      background: #0c1018;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: width 0.15s ease;
+    }
+    .app-shell.debug-open .debug-panel {
+      width: min(380px, 42vw);
+      border-left-color: var(--border);
+    }
+    .debug-panel-inner {
+      width: min(380px, 42vw);
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+    }
+    .debug-head {
+      padding: 0.5rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.35rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .debug-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem;
+      font-family: ui-monospace, monospace;
+      font-size: 0.68rem;
+    }
+    .debug-entry {
+      margin-bottom: 0.85rem;
+      padding-bottom: 0.85rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .debug-entry .meta-line { color: var(--warn); margin-bottom: 0.25rem; }
+    .debug-entry pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+    }
+    .toolbar {
+      flex-shrink: 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+      align-items: center;
+      padding: 0.75rem 1rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .toolbar label { font-size: 0.8rem; color: var(--muted); }
+    .toolbar input[type="url"] {
+      width: min(280px, 100%);
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    button {
+      padding: 0.45rem 0.9rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    button:hover { border-color: var(--muted); }
+    button.primary {
+      background: var(--user);
+      border-color: var(--user);
+      color: #fff;
+    }
+    button.primary:hover { filter: brightness(1.08); }
+    button.toggle-on {
+      background: rgba(251, 191, 36, 0.15);
+      border-color: var(--warn);
+      color: var(--warn);
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .meta {
+      flex: 1;
+      min-width: 160px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .meta strong { color: var(--text); }
+    .hint {
+      flex-shrink: 0;
+      font-size: 0.75rem;
+      color: var(--muted);
+      padding: 0 1rem 0.5rem;
+    }
+    .messages {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      max-width: 900px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .row {
+      max-width: 85%;
+      padding: 0.65rem 0.9rem;
+      border-radius: 12px;
+      line-height: 1.45;
+      font-size: 0.9rem;
+    }
+    .row.user {
+      align-self: flex-end;
+      background: var(--user);
+      color: #fff;
+    }
+    .row.assistant {
+      align-self: flex-start;
+      background: var(--assistant);
+      border: 1px solid var(--border);
+    }
+    .row .role {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      opacity: 0.85;
+      margin-bottom: 0.35rem;
+    }
+    .row.user .role { color: rgba(255,255,255,0.85); }
+    .row.assistant .role { color: var(--muted); }
+    .state-pill {
+      display: inline-block;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      background: rgba(0,0,0,0.25);
+      margin-top: 0.35rem;
+    }
+    .processing { color: var(--warn); }
+    .failed { color: var(--danger); }
+    .completed { color: var(--ok); }
+    .spinner {
+      display: inline-block;
+      width: 0.9em;
+      height: 0.9em;
+      border: 2px solid var(--muted);
+      border-top-color: var(--warn);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: -0.1em;
+      margin-right: 0.35rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error-box {
+      margin-top: 0.5rem;
+      padding: 0.5rem;
+      background: rgba(248,113,113,0.12);
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--danger);
+    }
+    details {
+      margin-top: 0.6rem;
+      font-size: 0.8rem;
+    }
+    details summary {
+      cursor: pointer;
+      color: var(--muted);
+      user-select: none;
+    }
+    pre {
+      margin: 0.4rem 0 0;
+      padding: 0.5rem;
+      background: var(--bg);
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 0.72rem;
+      border: 1px solid var(--border);
+    }
+    .composer {
+      flex-shrink: 0;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+      max-width: 900px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .composer textarea {
+      flex: 1;
+      min-height: 44px;
+      max-height: 160px;
+      resize: vertical;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    .toast {
+      position: fixed;
+      bottom: 5.5rem;
+      padding: 0.5rem 0.85rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.85rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+      max-width: 320px;
+      z-index: 10;
+      right: 1rem;
+    }
+    .app-shell.debug-open .toast { right: calc(min(380px, 42vw) + 1rem); }
+    .toast.show { opacity: 1; }
+    .toast.err { border-color: var(--danger); color: var(--danger); }
+    .empty {
+      text-align: center;
+      color: var(--muted);
+      padding: 2rem;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <!-- CORS: requires APP_DEBUG=true (default) in API .env so allow_origins is "*". -->
+  <div class="toolbar">
+    <div>
+      <label for="baseUrl">API base</label><br />
+      <input id="baseUrl" type="url" value="http://ec2-15-206-69-208.ap-south-1.compute.amazonaws.com:8000/" autocomplete="off" />
+    </div>
+    <div style="align-self:flex-end;display:flex;gap:0.35rem;flex-wrap:wrap;">
+      <button type="button" id="btnDebug" title="Toggle raw API response log">Debug</button>
+      <button type="button" id="btnNew">New session</button>
+    </div>
+    <div class="meta" id="sessionMeta">No session — New session or pick one in the sidebar.</div>
+  </div>
+  <div class="hint">Sidebar: all chats from <code>GET /chats</code>. Polls <code>GET …/messages</code> every 3s for the active session.</div>
+
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span>Sessions</span>
+        <button type="button" id="btnRefreshChats">Refresh</button>
+      </div>
+      <div class="chat-list" id="chatList"></div>
+    </aside>
+
+    <div class="main-col">
+      <div class="messages" id="messages"></div>
+      <div class="composer">
+        <textarea id="input" placeholder="Message…" rows="2"></textarea>
+        <button type="button" class="primary" id="btnSend" disabled>Send</button>
+      </div>
+    </div>
+
+    <aside class="debug-panel" aria-hidden="true">
+      <div class="debug-panel-inner">
+        <div class="debug-head">
+          <span title="Only requests made while Debug is on are logged">Raw log</span>
+          <button type="button" id="btnClearDebug">Clear</button>
+        </div>
+        <div class="debug-body" id="debugBody"></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    (function () {
+      const POLL_MS = 3000;
+      const DEBUG_MAX = 80;
+      const $ = (id) => document.getElementById(id);
+
+      const baseUrlEl = $("baseUrl");
+      const messagesEl = $("messages");
+      const sessionMetaEl = $("sessionMeta");
+      const inputEl = $("input");
+      const btnSend = $("btnSend");
+      const btnNew = $("btnNew");
+      const btnDebug = $("btnDebug");
+      const btnClearDebug = $("btnClearDebug");
+      const btnRefreshChats = $("btnRefreshChats");
+      const chatListEl = $("chatList");
+      const debugBodyEl = $("debugBody");
+      const appShellEl = $("appShell");
+      const toastEl = $("toast");
+
+      let sessionId = null;
+      let pollTimer = null;
+      let lastHistoryJson = "";
+      let debugOpen = false;
+      let debugEntries = [];
+      let listedChats = [];
+
+      function apiPrefix() {
+        const b = baseUrlEl.value.replace(/\/$/, "");
+        return b + "/api/v1/strategy";
+      }
+
+      function showToast(text, isError) {
+        toastEl.textContent = text;
+        toastEl.classList.toggle("err", !!isError);
+        toastEl.classList.add("show");
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => toastEl.classList.remove("show"), 3200);
+      }
+
+      function formatRawBody(text) {
+        const t = (text || "").trim();
+        if (!t) return "(empty body)";
+        try {
+          return JSON.stringify(JSON.parse(t), null, 2);
+        } catch {
+          return t;
+        }
+      }
+
+      function pushDebug(label, status, rawText) {
+        if (!debugOpen) return;
+        const entry = {
+          t: new Date().toISOString(),
+          label,
+          status,
+          body: formatRawBody(rawText),
+        };
+        debugEntries.push(entry);
+        if (debugEntries.length > DEBUG_MAX) debugEntries.shift();
+        renderDebug();
+      }
+
+      function renderDebug() {
+        debugBodyEl.innerHTML = debugEntries
+          .map(
+            (e) =>
+              `<div class="debug-entry"><div class="meta-line">${escapeHtml(e.t)} · ${escapeHtml(e.label)} · HTTP ${escapeHtml(String(e.status))}</div><pre>${escapeHtml(e.body)}</pre></div>`
+          )
+          .join("");
+        debugBodyEl.scrollTop = debugBodyEl.scrollHeight;
+      }
+
+      function setDebug(open) {
+        debugOpen = open;
+        appShellEl.classList.toggle("debug-open", open);
+        btnDebug.classList.toggle("toggle-on", open);
+        appShellEl.querySelector(".debug-panel").setAttribute("aria-hidden", open ? "false" : "true");
+        if (open) renderDebug();
+      }
+
+      function stopPoll() {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+
+      function startPoll() {
+        stopPoll();
+        if (!sessionId) return;
+        pollTimer = setInterval(fetchHistory, POLL_MS);
+        fetchHistory();
+      }
+
+      function updateMeta(data) {
+        if (!data) {
+          sessionMetaEl.innerHTML = sessionId
+            ? `<strong>session_id</strong> ${escapeHtml(sessionId)}`
+            : "No session — New session or pick one in the sidebar.";
+          return;
+        }
+        sessionMetaEl.innerHTML =
+          `<strong>${escapeHtml(data.title || "Untitled")}</strong> · ` +
+          `<span>mode: <code>${escapeHtml(data.current_mode || "—")}</code></span> · ` +
+          `<span>${data.message_count ?? 0} msgs</span> · ` +
+          `<span style="opacity:.8">${escapeHtml(sessionId)}</span>`;
+      }
+
+      function scrollMessagesToBottom() {
+        requestAnimationFrame(() => {
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          requestAnimationFrame(() => {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          });
+        });
+      }
+
+      function escapeHtml(s) {
+        if (s == null) return "";
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
+      }
+
+      function prettyJson(obj) {
+        try {
+          return JSON.stringify(obj, null, 2);
+        } catch {
+          return String(obj);
+        }
+      }
+
+      function renderChatList() {
+        chatListEl.innerHTML = "";
+        if (!listedChats.length) {
+          chatListEl.innerHTML = '<div class="empty" style="padding:1rem;font-size:.75rem">No sessions. Create one or Refresh.</div>';
+          return;
+        }
+        for (const c of listedChats) {
+          const el = document.createElement("div");
+          el.className = "chat-item" + (c.session_id === sessionId ? " active" : "");
+          el.dataset.sid = c.session_id;
+          const title = c.title || "Untitled";
+          el.innerHTML =
+            `<div class="t">${escapeHtml(title)}</div>` +
+            `<div class="sub">${c.message_count ?? 0} msgs · ${escapeHtml(String(c.session_id).slice(0, 8))}…</div>`;
+          el.addEventListener("click", () => selectSession(c.session_id));
+          chatListEl.appendChild(el);
+        }
+      }
+
+      async function fetchChatList() {
+        try {
+          const res = await fetch(`${apiPrefix()}/chats`, {
+            method: "GET",
+            headers: { Accept: "application/json" },
+          });
+          const text = await res.text();
+          pushDebug("GET /chats", res.status, text);
+          if (!res.ok) {
+            let err = res.statusText;
+            try {
+              const j = JSON.parse(text);
+              if (j.detail !== undefined) err = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+              else err = text || err;
+            } catch {
+              err = text || err;
+            }
+            showToast("GET /chats: " + err, true);
+            return;
+          }
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            showToast("GET /chats: invalid JSON", true);
+            return;
+          }
+          listedChats = data.chats || [];
+          listedChats.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+          renderChatList();
+        } catch (e) {
+          showToast("GET /chats: " + (e.message || String(e)), true);
+        }
+      }
+
+      function selectSession(id) {
+        if (!id) return;
+        sessionId = id;
+        lastHistoryJson = "";
+        btnSend.disabled = false;
+        messagesEl.innerHTML = '<div class="empty">Loading messages…</div>';
+        renderChatList();
+        updateMeta(null);
+        startPoll();
+      }
+
+      function renderMessage(m) {
+        const role = m.role || "unknown";
+        const isUser = role === "user";
+        const div = document.createElement("div");
+        div.className = "row " + (isUser ? "user" : "assistant");
+
+        let inner = `<div class="role">${escapeHtml(role)}</div>`;
+
+        if (m.state) {
+          inner += `<div class="state-pill">${escapeHtml(m.state)}</div>`;
+        }
+
+        if (isUser) {
+          inner += `<div>${escapeHtml(m.content || "")}</div>`;
+        } else {
+          const st = m.status || "completed";
+          if (st === "processing") {
+            inner += `<div class="processing"><span class="spinner"></span>AI working…</div>`;
+            if (m.content) {
+              inner += `<div style="margin-top:.5rem;opacity:.75">${escapeHtml(m.content)}</div>`;
+            }
+          } else if (st === "failed") {
+            inner += `<div class="failed">Assistant failed</div>`;
+            if (m.error_message) {
+              inner += `<div class="error-box">${escapeHtml(m.error_message)}</div>`;
+            }
+            if (m.content) {
+              inner += `<div style="margin-top:.5rem">${escapeHtml(m.content)}</div>`;
+            }
+          } else {
+            inner += `<div>${escapeHtml(m.content || "")}</div>`;
+          }
+
+          if (m.strategy_draft && Object.keys(m.strategy_draft).length) {
+            inner += `<details><summary>strategy_draft</summary><pre>${escapeHtml(prettyJson(m.strategy_draft))}</pre></details>`;
+          }
+          if (m.strategy_json && Object.keys(m.strategy_json).length) {
+            inner += `<details><summary>strategy_json</summary><pre>${escapeHtml(prettyJson(m.strategy_json))}</pre></details>`;
+          }
+
+          if (m.created_at) {
+            inner += `<div style="margin-top:.4rem;font-size:.7rem;color:var(--muted)">${escapeHtml(m.created_at)}</div>`;
+          }
+        }
+
+        div.innerHTML = inner;
+        return div;
+      }
+
+      function renderHistory(data) {
+        const sig = JSON.stringify(data);
+        if (sig === lastHistoryJson) return;
+        lastHistoryJson = sig;
+
+        updateMeta(data);
+        messagesEl.innerHTML = "";
+        const list = data.messages || [];
+        if (!list.length) {
+          messagesEl.innerHTML = '<div class="empty">No messages yet. Send one below.</div>';
+          scrollMessagesToBottom();
+          return;
+        }
+        for (const m of list) {
+          messagesEl.appendChild(renderMessage(m));
+        }
+        scrollMessagesToBottom();
+      }
+
+      async function fetchHistory() {
+        if (!sessionId) return;
+        const url = `${apiPrefix()}/chats/${encodeURIComponent(sessionId)}/messages`;
+        try {
+          const res = await fetch(url, {
+            method: "GET",
+            headers: { Accept: "application/json" },
+          });
+          const text = await res.text();
+          pushDebug("GET …/messages", res.status, text);
+          if (!res.ok) {
+            let err = res.statusText;
+            try {
+              const j = JSON.parse(text);
+              if (j.detail !== undefined) err = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+              else err = text || err;
+            } catch {
+              err = text || err;
+            }
+            showToast("GET messages: " + err, true);
+            return;
+          }
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            showToast("GET messages: invalid JSON", true);
+            return;
+          }
+          renderHistory(data);
+          const item = listedChats.find((c) => c.session_id === sessionId);
+          if (item && data.message_count != null) {
+            item.message_count = data.message_count;
+            renderChatList();
+          }
+        } catch (e) {
+          showToast("GET messages: " + (e.message || String(e)), true);
+        }
+      }
+
+      async function createSession() {
+        stopPoll();
+        sessionId = null;
+        lastHistoryJson = "";
+        btnSend.disabled = true;
+        messagesEl.innerHTML = '<div class="empty">Creating session…</div>';
+        updateMeta(null);
+        renderChatList();
+
+        try {
+          const res = await fetch(`${apiPrefix()}/chats`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({}),
+          });
+          const text = await res.text();
+          pushDebug("POST /chats", res.status, text);
+          if (!res.ok) {
+            let err = res.statusText;
+            try {
+              const j = JSON.parse(text);
+              if (j.detail !== undefined) err = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+              else err = text || err;
+            } catch {
+              err = text || err;
+            }
+            showToast("POST /chats: " + err, true);
+            messagesEl.innerHTML = '<div class="empty">Failed to create session.</div>';
+            await fetchChatList();
+            return;
+          }
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            showToast("POST /chats: invalid JSON", true);
+            messagesEl.innerHTML = '<div class="empty">Failed to create session.</div>';
+            await fetchChatList();
+            return;
+          }
+          sessionId = data.session_id;
+          btnSend.disabled = false;
+          showToast("Session created");
+          await fetchChatList();
+          selectSession(sessionId);
+        } catch (e) {
+          showToast("POST /chats: " + (e.message || String(e)), true);
+          messagesEl.innerHTML = '<div class="empty">Network error.</div>';
+        }
+      }
+
+      async function sendMessage() {
+        const content = (inputEl.value || "").trim();
+        if (!content || !sessionId) return;
+
+        try {
+          const res = await fetch(
+            `${apiPrefix()}/chats/${encodeURIComponent(sessionId)}/messages`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({ content }),
+            }
+          );
+          const text = await res.text();
+          pushDebug("POST …/messages", res.status, text);
+          if (res.status !== 202 && !res.ok) {
+            let err = res.statusText;
+            try {
+              const j = JSON.parse(text);
+              if (j.detail !== undefined) err = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+              else err = text || err;
+            } catch {
+              err = text || err;
+            }
+            showToast("POST message: " + err, true);
+            return;
+          }
+          inputEl.value = "";
+          showToast("Message accepted (202) — polling for reply");
+          lastHistoryJson = "";
+          fetchHistory();
+        } catch (e) {
+          showToast("POST message: " + (e.message || String(e)), true);
+        }
+      }
+
+      btnNew.addEventListener("click", createSession);
+      btnSend.addEventListener("click", sendMessage);
+      btnDebug.addEventListener("click", () => setDebug(!debugOpen));
+      btnClearDebug.addEventListener("click", () => {
+        debugEntries = [];
+        renderDebug();
+      });
+      btnRefreshChats.addEventListener("click", fetchChatList);
+      baseUrlEl.addEventListener("change", () => {
+        fetchChatList();
+      });
+      inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      window.addEventListener("beforeunload", stopPoll);
+
+      fetchChatList();
+      messagesEl.innerHTML = '<div class="empty">Select a session from the left or create a new one.</div>';
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+name: range_breakout
+display_name: Range Breakout
+description: |
+  N-bar Donchian-style range breakout with volume confirmation and a volatility
+  squeeze pre-condition. Strongest when prior bars were compressed (BB squeeze).
+
+keywords:
+  - range breakout
+  - n bar breakout
+  - donchian breakout
+  - breakout strategy
+  - all time high breakout
+  - ath breakout
+
+supported_timeframes: [5m, 10m, 15m, 30m, 1h, 1d]
+
+bullish:
+  entry_trigger: n_bar_high_breakout
+  entry_filters:
+    - volume_spike
+    - bb_squeeze
+  exit_trigger: ema_cross_down
+
+bearish:
+  entry_trigger: n_bar_low_breakdown
+  entry_filters:
+    - volume_spike
+    - bb_squeeze
+  exit_trigger: ema_cross_up

@@ -1,0 +1,35 @@
+{{- if .Values.persistence.chromadb.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "python-ai.fullname" . }}-chromadb
+  labels:
+    {{- include "python-ai.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.chromadb.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.chromadb.size }}
+  {{- if .Values.persistence.chromadb.storageClass }}
+  storageClassName: {{ .Values.persistence.chromadb.storageClass }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.persistence.strategies.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "python-ai.fullname" . }}-strategies
+  labels:
+    {{- include "python-ai.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.strategies.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.strategies.size }}
+  {{- if .Values.persistence.strategies.storageClass }}
+  storageClassName: {{ .Values.persistence.strategies.storageClass }}
+  {{- end }}
+{{- end }}

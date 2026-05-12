@@ -1,0 +1,29 @@
+name: vwap_zscore_reversion
+display_name: VWAP Z-Score Reversion
+description: |
+  Institutional intraday mean reversion: enters when price has stretched N
+  standard deviations away from VWAP, with a confirming rejection candle and
+  volume spike. Exits when price reclaims the opposite VWAP regime.
+
+keywords:
+  - vwap zscore
+  - vwap z-score
+  - vwap z score
+  - vwap mean reversion
+  - vwap deviation
+
+supported_timeframes: [1m, 3m, 5m, 10m, 15m, 30m]
+
+bullish:
+  entry_trigger: vwap_zscore_oversold
+  entry_filters:
+    - bullish_rejection_candle
+    - volume_spike
+  exit_trigger: vwap_bearish
+
+bearish:
+  entry_trigger: vwap_zscore_overbought
+  entry_filters:
+    - bearish_rejection_candle
+    - volume_spike
+  exit_trigger: vwap_bullish

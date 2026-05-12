@@ -1,0 +1,76 @@
+# Manual aliases. Most matches are auto-derived from display_name tokens.
+# Use this file for ambiguous tickers ("adani" → ADANIENT or ADANIPORTS?) or
+# common spellings the auto-deriver wouldn't find.
+hdfc:               HDFCBANK.NS
+hdfc bank:          HDFCBANK.NS
+hdfcbank:           HDFCBANK.NS
+
+ril:                RELIANCE.NS
+reliance:           RELIANCE.NS
+reliance industries: RELIANCE.NS
+
+tcs:                TCS.NS
+tata consultancy:   TCS.NS
+
+infy:               INFY.NS
+infosys:            INFY.NS
+
+adani:              ADANIENT.NS
+adani enterprises:  ADANIENT.NS
+adanient:           ADANIENT.NS
+
+nhpc:               NHPC.NS
+
+suzlon:             SUZLON.NS
+suzlon energy:      SUZLON.NS
+
+gmr:                GMRAIRPORT.NS
+gmr airport:        GMRAIRPORT.NS
+gmr airports:       GMRAIRPORT.NS
+gmrairport:         GMRAIRPORT.NS
+
+idea:               IDEA.NS
+vi:                 IDEA.NS
+vodafone:           IDEA.NS
+vodafone idea:      IDEA.NS
+
+icici:              ICICIBANK.NS
+icici bank:         ICICIBANK.NS
+icicibank:          ICICIBANK.NS
+
+sbi:                SBIN.NS
+sbin:               SBIN.NS
+state bank:         SBIN.NS
+state bank of india: SBIN.NS
+
+axis:               AXISBANK.NS
+axis bank:          AXISBANK.NS
+axisbank:           AXISBANK.NS
+
+kotak:              KOTAKBANK.NS
+kotak bank:         KOTAKBANK.NS
+kotak mahindra:     KOTAKBANK.NS
+kotakbank:          KOTAKBANK.NS
+
+airtel:             BHARTIARTL.NS
+bharti:             BHARTIARTL.NS
+bharti airtel:      BHARTIARTL.NS
+bhartiartl:         BHARTIARTL.NS
+
+itc:                ITC.NS
+
+lt:                 LT.NS
+l&t:                LT.NS
+larsen:             LT.NS
+larsen & toubro:    LT.NS
+
+maruti:             MARUTI.NS
+maruti suzuki:      MARUTI.NS
+
+sun pharma:         SUNPHARMA.NS
+sunpharma:          SUNPHARMA.NS
+
+hcl:                HCLTECH.NS
+hcltech:            HCLTECH.NS
+hcl tech:           HCLTECH.NS
+hcl technologies:   HCLTECH.NS

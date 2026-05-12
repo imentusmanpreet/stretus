@@ -1,0 +1,18 @@
+# Exchange-level metadata. Used by chat (display) and execution (instrument keys).
+NSE:
+  suffix: ".NS"
+  hours:
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+  default_tick_size: 0.05
+  default_lot_size: 1
+
+BSE:
+  suffix: ".BO"
+  hours:
+    open: "09:15"
+    close: "15:30"
+    tz: Asia/Kolkata
+  default_tick_size: 0.05
+  default_lot_size: 1

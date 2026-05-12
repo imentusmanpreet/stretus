@@ -1,0 +1,118 @@
+# Enabled signal cards. The loader reads this list and loads <name>.yaml for each.
+# To disable a signal: remove its name. To add: drop a YAML file and add its name here.
+enabled:
+  # ── Trend ────────────────────────────────────────
+  - ema_cross_up
+  - ema_cross_down
+  - ema_above
+  - ema_below
+  - sma_cross_up
+  - sma_cross_down
+  - price_above_ema
+  - price_below_ema
+  - is_above_sma
+
+  # ── Momentum ─────────────────────────────────────
+  - rsi_cross_up
+  - rsi_cross_down
+  - rsi_above_50
+  - rsi_below_50
+  - rsi_oversold
+  - rsi_overbought
+  - macd_bullish_cross
+  - macd_bearish_cross
+  - macd_positive
+  - macd_negative
+
+  # ── Volatility ───────────────────────────────────
+  - price_above_bb_upper
+  - price_below_bb_lower
+
+  # ── Volume / VWAP ────────────────────────────────
+  - vwap_bullish
+  - vwap_bearish
+  - volume_spike
+  - high_delivery_volume
+
+  # ── India-specific intraday ──────────────────────
+  - opening_range_breakout
+  - opening_range_breakdown
+  - gap_up_open
+  - gap_down_open
+  - gap_and_go_bullish
+  - gap_and_go_bearish
+  - inside_bar
+
+  # ── VWAP-event signals ───────────────────────────
+  - vwap_reclaim_bullish
+  - vwap_reclaim_bearish
+
+  # ── Pullback patterns ────────────────────────────
+  - ema_pullback_bullish
+  - ema_pullback_bearish
+
+  # ── EMA slope (Phase 2 AST: PREV(EMA(n), k)) ─────
+  - ema_sloping_up
+  - ema_sloping_down
+
+  # ── Z-score mean reversion (Phase 2 AST: ZSCORE) ─
+  - zscore_oversold
+  - zscore_overbought
+  - vwap_zscore_oversold
+  - vwap_zscore_overbought
+
+  # ── Cross-symbol reference signals (Phase 4) ────
+  # These require the strategy to declare a reference_symbol so the runner
+  # can fetch the benchmark series and join it with REF_ columns.
+  - rs_outperforms_reference
+  - rs_underperforms_reference
+  - reference_above_sma
+  - reference_below_sma
+
+  # ── Candle patterns ──────────────────────────────
+  - bullish_rejection_candle
+  - bearish_rejection_candle
+
+  # ── Range / breakout patterns ────────────────────
+  - n_bar_high_breakout
+  - n_bar_low_breakdown
+
+  # ── Trend strength (registry-evaluated) ──────────
+  - adx_strong_trend
+  - adx_bullish_di
+  - adx_bearish_di
+  - supertrend_bullish
+  - supertrend_bearish
+
+  # ── Volatility regime (registry-evaluated) ───────
+  - bb_squeeze
+  - keltner_breakout_up
+  - keltner_breakout_down
+  - atr_high_volatility
+  - atr_low_volatility
+
+  # ── Volume / money-flow (registry-evaluated) ─────
+  - obv_rising
+  - obv_falling
+  - chaikin_money_flow_positive
+  - chaikin_money_flow_negative
+
+  # ── Momentum oscillators (registry-evaluated) ────
+  - mfi_oversold
+  - mfi_overbought
+  - cci_oversold
+  - cci_overbought
+  - stoch_oversold
+  - stoch_overbought
+
+  # ── Structural patterns (Phase 6) ────────────────
+  # Patterns are auto-computed by the runner whenever a condition references
+  # one of the IS_* identifiers — no extra YAML wiring needed in user
+  # strategies. The signals here just expose the IS_* checks as named cards
+  # so the planner can pick them like any other entry trigger / filter.
+  - bullish_market_structure_break
+  - bearish_market_structure_break
+  - bullish_fvg_signal
+  - bearish_fvg_signal
+  - uptrend_structure
+  - downtrend_structure
