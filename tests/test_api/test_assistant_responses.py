@@ -9,9 +9,9 @@ from app.core.assistant_responses import (
 
 
 def test_assistant_response_code_count_matches_target_architecture() -> None:
-    # 18 baseline codes + 5 onboarding-aware clarification topics
-    # (tutorial, onboarding, purpose_overview, capability_examples, ambiguous).
-    assert len(ASSISTANT_RESPONSE_CODES) == 23
+    # 18 baseline codes + 6 onboarding-aware clarification topics
+    # (tutorial, onboarding, purpose_overview, capability_examples, ambiguous, etc).
+    assert len(ASSISTANT_RESPONSE_CODES) == 24
 
 
 def test_build_low_confidence_clarification_message_uses_standard_copy() -> None:

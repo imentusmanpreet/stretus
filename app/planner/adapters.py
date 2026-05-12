@@ -100,6 +100,9 @@ def plan_to_signal_plan(plan: StrategyPlan) -> dict[str, Any]:
         # Phase 5 — higher-timeframe rules ride along so the API layer knows
         # which HTF series to fetch and the YAML carries the gate definitions.
         "_htf_rules":          list(plan.htf_rules) if plan.htf_rules else [],
+        # Phase 8b — wall-clock cutoff (e.g. 15:15 IST) carried into the YAML
+        # so the simulator force-exits intraday positions on time.
+        "_time_exit":          dict(plan.time_exit) if plan.time_exit else None,
     }
 
 

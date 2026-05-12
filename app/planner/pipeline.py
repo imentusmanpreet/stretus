@@ -273,6 +273,7 @@ class Pipeline:
                     and preset.leg(sentiment).htf)
                 else []
             ),
+            time_exit=preset.time_exit if preset is not None else None,
             trace=trace.to_dict(),
         )
 

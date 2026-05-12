@@ -1,0 +1,45 @@
+name: near_52_week_high
+category: pattern
+direction: bullish
+kind: threshold
+roles: [entry_filter]
+formula: "CLOSE >= MAX(HIGH, {window}) * {proximity}"
+description: "Close is within (1 - proximity) of the highest high over the last N bars — used as a 52-week-high proximity filter when applied on a daily timeframe. Best used as an HTF gate so the lookback aligns with calendar weeks."
+
+works_best_on: [1h, 1d]
+weak_on: []
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bearish
+
+pairs_well_with: [volume_spike, ema_pullback_bullish, vwap_bullish, rsi_above_60]
+contradicts: [near_52_week_low]
+
+params_by_timeframe:
+  # On intraday timeframes a 52-week lookback would be impractically long;
+  # users typically apply this signal via an HTF (htf: 1d) where window=252
+  # ≈ one trading year. The intraday entries here keep the same proximity
+  # so the formula still type-checks even if someone applies it directly.
+  1m:   {window: 252, proximity: 0.98}
+  3m:   {window: 252, proximity: 0.98}
+  5m:   {window: 252, proximity: 0.98}
+  10m:  {window: 252, proximity: 0.98}
+  15m:  {window: 252, proximity: 0.98}
+  30m:  {window: 252, proximity: 0.98}
+  1h:   {window: 252, proximity: 0.98}
+  1d:   {window: 252, proximity: 0.98}
+
+experience_fit:
+  beginner: 0.7
+  intermediate: 1.0
+  expert: 1.0
+
+intent_fit:
+  trend: 0.9
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.0
+  scalping: 0.3
+  mean_reversion: 0.0
+  confirmation: 1.0

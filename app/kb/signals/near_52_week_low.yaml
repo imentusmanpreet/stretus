@@ -1,0 +1,41 @@
+name: near_52_week_low
+category: pattern
+direction: bearish
+kind: threshold
+roles: [entry_filter]
+formula: "CLOSE <= MIN(LOW, {window}) * {proximity}"
+description: "Close is within (proximity - 1) of the lowest low over the last N bars — 52-week-low proximity filter for short setups when applied on a daily timeframe."
+
+works_best_on: [1h, 1d]
+weak_on: []
+unsupported_on: []
+
+contraindicated_when:
+  - sentiment: bullish
+
+pairs_well_with: [volume_spike, ema_pullback_bearish, vwap_bearish, rsi_below_40]
+contradicts: [near_52_week_high]
+
+params_by_timeframe:
+  1m:   {window: 252, proximity: 1.02}
+  3m:   {window: 252, proximity: 1.02}
+  5m:   {window: 252, proximity: 1.02}
+  10m:  {window: 252, proximity: 1.02}
+  15m:  {window: 252, proximity: 1.02}
+  30m:  {window: 252, proximity: 1.02}
+  1h:   {window: 252, proximity: 1.02}
+  1d:   {window: 252, proximity: 1.02}
+
+experience_fit:
+  beginner: 0.7
+  intermediate: 1.0
+  expert: 1.0
+
+intent_fit:
+  trend: 0.9
+  momentum: 1.0
+  breakout: 1.0
+  reversal: 0.0
+  scalping: 0.3
+  mean_reversion: 0.0
+  confirmation: 1.0

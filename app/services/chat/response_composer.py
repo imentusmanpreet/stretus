@@ -198,6 +198,15 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         return f"{preface}\n{question}".strip() if preface else question
 
     if code == "workflow.input_summary_confirmation":
+        # When a comprehensive summary body has already been rendered by the
+        # caller (built from the SemanticExtractor over the user's full
+        # prompt), use it verbatim — it covers every dimension the user can
+        # have mentioned. The compact 6-line fallback below is used only on
+        # legacy paths where no extractor has run.
+        summary_text = facts.get("summary_text")
+        if isinstance(summary_text, str) and summary_text.strip():
+            return summary_text.strip()
+
         asset = _compact_text(facts.get("asset"), "this asset")
         timeframe = _compact_text(facts.get("timeframe"))
         objective = _compact_text(facts.get("objective"))
@@ -211,6 +220,36 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
             f"Experience: {experience}\n"
             f"Goal: {goal}\n\n"
             "Please confirm if these details are correct. I will then plan the signals."
+        )
+
+    if code == "workflow.missing_critical_inputs":
+        items = facts.get("missing_items") or []
+        if not isinstance(items, (list, tuple)) or not items:
+            return (
+                "Before I can build the signals, I need a couple of details "
+                "that were not in your prompt. Please describe your stop loss "
+                "and exit condition."
+            )
+        bullets: list[str] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            label = _compact_text(entry.get("label"), "")
+            question = _compact_text(entry.get("question"), "")
+            if label and question:
+                bullets.append(f"- {label}: {question}")
+            elif label:
+                bullets.append(f"- {label}")
+            elif question:
+                bullets.append(f"- {question}")
+        body = "\n".join(bullets) if bullets else "- exit rules"
+        return (
+            "Before I can build the entry and exit signals, I need a few "
+            "details that were not in your prompt. I am not filling these "
+            "in with defaults — please tell me what you want:\n"
+            f"{body}\n\n"
+            "Once you reply, I will update the summary and ask you to "
+            "confirm before building."
         )
 
     if code == "workflow.signal_plan_ready":

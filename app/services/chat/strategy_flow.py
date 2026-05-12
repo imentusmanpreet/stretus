@@ -244,6 +244,11 @@ def build_collect_user_input_reply(
         )
 
     builder.apply_defaults()
+    summary_text: str | None = None
+    if isinstance(builder.prompt_summary, dict):
+        candidate = builder.prompt_summary.get("text")
+        if isinstance(candidate, str) and candidate.strip():
+            summary_text = candidate.strip()
     return compose_response(
         "workflow.input_summary_confirmation",
         asset=_asset_label(builder),
@@ -252,6 +257,14 @@ def build_collect_user_input_reply(
         sentiment=builder.sentiment,
         experience=builder.experience,
         goal=builder.goal,
+        summary_text=summary_text,
+    )
+
+
+def build_missing_critical_inputs_reply(builder: StrategyBuilder) -> str:
+    return compose_response(
+        "workflow.missing_critical_inputs",
+        missing_items=list(builder.missing_critical_inputs or []),
     )
 
 

@@ -46,9 +46,10 @@ def test_direct_supported_stock_match_accepts_exchange_suffix_inputs():
 def test_supported_stock_message_matches_requested_copy():
     assert UNSUPPORTED_STOCK_MESSAGE == (
         "This stock is not currently supported for strategy creation and backtesting.\n\n"
-        "Currently supported stocks are: Adani Enterprises, GMR Airports, HDFC Bank, Infosys, "
-        "NHPC, Reliance Industries, Suzlon Energy, Tata Consultancy Services, and Vodafone Idea. "
-        "Please select one of these to continue."
+        "Currently supported stocks are: Adani Enterprises, Axis Bank, Bharti Airtel, GMR Airports, "
+        "HCL Technologies, HDFC Bank, ICICI Bank, ITC, Infosys, Kotak Mahindra Bank, Larsen & Toubro, "
+        "Maruti Suzuki India, NHPC, Reliance Industries, State Bank of India, Sun Pharmaceutical Industries, "
+        "Suzlon Energy, Tata Consultancy Services, and Vodafone Idea. Please select one of these to continue."
     )
 
 

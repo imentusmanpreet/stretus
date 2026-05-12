@@ -97,3 +97,37 @@ def test_builder_omits_reference_symbol_when_unset():
     _populate_minimum(b)
     yaml_dict = b.to_yaml_dict()
     assert "reference_symbol" not in yaml_dict["strategy"]
+
+
+# ── Phase 8b: time_exit propagation ──────────────────────────────────────────
+
+
+def test_builder_writes_time_exit_to_yaml():
+    b = StrategyBuilder()
+    _populate_minimum(b)
+    b.time_exit = {"exit_time": "15:15", "timezone": "Asia/Kolkata"}
+    yaml_dict = b.to_yaml_dict()
+    assert yaml_dict["strategy"]["time_exit"]["exit_time"] == "15:15"
+    assert yaml_dict["strategy"]["time_exit"]["timezone"] == "Asia/Kolkata"
+
+
+def test_apply_signal_plan_captures_time_exit_from_underscore_key():
+    """The legacy_bridge attaches `_time_exit` to the signal plan via the
+    planner adapter; builder.apply_signal_plan should hoist it onto the
+    builder so to_yaml_dict can emit it."""
+    b = StrategyBuilder()
+    _populate_minimum(b)
+    b.apply_signal_plan({
+        "entry": [], "exit": [],
+        "_time_exit": {"exit_time": "15:20", "timezone": "Asia/Kolkata"},
+    })
+    assert b.time_exit == {"exit_time": "15:20", "timezone": "Asia/Kolkata"}
+    yaml_dict = b.to_yaml_dict()
+    assert yaml_dict["strategy"]["time_exit"]["exit_time"] == "15:20"
+
+
+def test_builder_omits_time_exit_when_unset():
+    b = StrategyBuilder()
+    _populate_minimum(b)
+    yaml_dict = b.to_yaml_dict()
+    assert "time_exit" not in yaml_dict["strategy"]

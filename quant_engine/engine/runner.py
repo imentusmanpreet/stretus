@@ -20,10 +20,6 @@ from typing import Any
 import pandas as pd
 
 from engine.conditions import CompiledCondition, compile_condition
-from engine.entry_sequence import (
-    evaluate_entry_sequence,
-    parse_entry_sequence,
-)
 from engine.config import BACKTEST_MARKET_DATA_FROM_UTC, BACKTEST_MARKET_DATA_TO_UTC
 from engine.data import load_ohlcv_data, merge_reference_data
 from engine.htf import HtfContext, build_htf_contexts
@@ -194,28 +190,10 @@ def run_backtest(
     # Parsing the condition string and walking its AST ~210k× per backtest is
     # the dominant CPU cost. compile_condition() does it once and also tells us
     # every indicator the formulas reference, so we can vectorise them below.
-    #
-    # If the strategy declares an entry_sequence (state machine), it produces
-    # a synthetic boolean column ENTRY_SEQUENCE_FIRED which is AND-merged into
-    # the entry condition below — *after* indicators/patterns are computed so
-    # the sequence's per-step formulas can reference them.
-    effective_entry_condition = cfg.entry_condition or ""
-    if cfg.entry_sequence:
-        # Compile the sequence-step conditions once so we can pre-scan them for
-        # indicator/pattern requirements that the main entry condition doesn't
-        # mention but the sequence does.
-        sequence_steps = parse_entry_sequence(list(cfg.entry_sequence))
-    else:
-        sequence_steps = ()
-
     compiled_entry: CompiledCondition | None = None
     compiled_exit:  CompiledCondition | None = None
     if cfg.entry_evaluation_mode == "formula":
-        # Compile the (possibly empty) entry_condition. The synthetic
-        # ENTRY_SEQUENCE_FIRED gate is wrapped in *after* indicators are
-        # computed (the sequence's per-step conditions can reference indicators
-        # so we need a second compile then).
-        compiled_entry = compile_condition(effective_entry_condition or "")
+        compiled_entry = compile_condition(cfg.entry_condition or "")
     if cfg.exit_evaluation_mode == "formula":
         compiled_exit = compile_condition(cfg.exit_condition or "")
 
@@ -229,16 +207,12 @@ def run_backtest(
     sl_indicator_requirements = _stop_spec_indicator_requirements(
         cfg.stop_loss_spec, cfg.trailing_stop_spec,
     )
-    tp_indicator_requirements = _take_profit_spec_indicator_requirements(
-        cfg.take_profit_spec,
-    )
-    extra_requirements = {**sl_indicator_requirements, **tp_indicator_requirements}
 
     enriched_indicator_config = _merge_indicator_requirements(
         cfg.indicators,
         compiled_entry,
         compiled_exit,
-        extra=extra_requirements,
+        extra=sl_indicator_requirements,
     )
     df = add_all_indicators(df, enriched_indicator_config)
     _ensure_scalar_indicators(df, compiled_entry, compiled_exit)
@@ -252,9 +226,6 @@ def run_backtest(
     for compiled in (compiled_entry, compiled_exit):
         if compiled is not None:
             pattern_idents.update(compiled.pattern_refs)
-    # Sequence steps may reference patterns too; collect those.
-    for step in sequence_steps:
-        pattern_idents.update(step.compiled.pattern_refs)
     if pattern_idents:
         auto_config = patterns_required_by_identifiers(pattern_idents)
         merged_pattern_config = merge_pattern_configs(auto_config, cfg.patterns)
@@ -262,27 +233,6 @@ def run_backtest(
         logger.info(
             "🧩 Patterns precomputed | identifiers=%s overrides=%s",
             sorted(pattern_idents), bool(cfg.patterns),
-        )
-
-    # ── Entry sequence evaluation ──────────────────────────────────────────────
-    # Run the state machine ONCE here (now that indicators + patterns exist)
-    # and inject the result as a synthetic ENTRY_SEQUENCE_FIRED column. The
-    # entry condition string is then AND-merged so the simulator's normal
-    # entry path picks it up without any signal-pathway changes.
-    if sequence_steps:
-        fired_series = evaluate_entry_sequence(sequence_steps, df)
-        df["ENTRY_SEQUENCE_FIRED"] = fired_series.astype(float)
-        gate = "ENTRY_SEQUENCE_FIRED > 0"
-        if effective_entry_condition.strip():
-            effective_entry_condition = f"({gate}) AND ({effective_entry_condition})"
-        else:
-            effective_entry_condition = gate
-        # Re-compile with the synthetic gate baked in. Compile error would
-        # surface here at load-time, which is what we want.
-        compiled_entry = compile_condition(effective_entry_condition)
-        logger.info(
-            "🪜 Entry sequence active | steps=%s effective_condition=%r",
-            [s.id for s in sequence_steps], effective_entry_condition,
         )
 
     # ── Resolve simulation parameters ─────────────────────────────────────────
@@ -329,8 +279,7 @@ def run_backtest(
         stop_loss_spec=cfg.stop_loss_spec,
         trailing_stop_spec=cfg.trailing_stop_spec,
         htf_contexts=htf_contexts,
-        min_risk_reward=cfg.min_risk_reward,
-        take_profit_spec=cfg.take_profit_spec,
+        time_exit_spec=cfg.time_exit_spec,
     )
 
     # Derive strategy side from the trades produced (LONG if majority are long)
@@ -423,20 +372,41 @@ def _merge_indicator_requirements(
     formula — e.g. an ATR(14) needed only by the trailing-stop spec.
     """
     merged: dict[str, set[int]] = {}
+    multi_param: dict[str, set[tuple]] = {}
     for name, periods in (yaml_indicators or {}).items():
-        merged.setdefault(str(name).upper(), set()).update(int(p) for p in (periods or []))
+        key = str(name).upper()
+        normalised: list = []
+        for entry in periods or []:
+            if isinstance(entry, (list, tuple)):
+                multi_param.setdefault(key, set()).add(tuple(entry))
+            else:
+                normalised.append(int(entry))
+        if normalised:
+            merged.setdefault(key, set()).update(normalised)
 
     for compiled in compiled_conditions:
         if compiled is None:
             continue
         for ref in compiled.indicator_refs:
             merged.setdefault(ref.name, set()).add(ref.period)
+        for name, params in getattr(compiled, "multi_param_refs", ()) or ():
+            multi_param.setdefault(name, set()).add(params)
 
     for name, periods in (extra or {}).items():
-        merged.setdefault(str(name).upper(), set()).update(int(p) for p in (periods or []))
+        key = str(name).upper()
+        for entry in periods or []:
+            if isinstance(entry, (list, tuple)):
+                multi_param.setdefault(key, set()).add(tuple(entry))
+            else:
+                merged.setdefault(key, set()).add(int(entry))
 
     # Preserve list shape that add_all_indicators expects.
-    return {name: sorted(periods) for name, periods in merged.items()}
+    out: dict[str, list] = {name: sorted(periods) for name, periods in merged.items()}
+    for name, sets in multi_param.items():
+        # Multi-param indicators (Supertrend, Keltner, …) are tuples not ints.
+        # add_extended_indicators consumes them as the periods value.
+        out[name] = sorted(list(sets))
+    return out
 
 
 def _stop_spec_indicator_requirements(
@@ -462,28 +432,6 @@ def _stop_spec_indicator_requirements(
         elif ts_type == "ema":
             window = int(trailing_stop_spec.get("window", 20))
             out.setdefault("EMA", set()).add(window)
-    return {name: sorted(periods) for name, periods in out.items()}
-
-
-def _take_profit_spec_indicator_requirements(
-    take_profit_spec: dict | None,
-) -> dict[str, list[int]]:
-    """Surface any indicator columns the take_profit spec needs (pivot levels,
-    gap series, VWAP) so add_all_indicators precomputes them in the same pass."""
-    if not isinstance(take_profit_spec, dict):
-        return {}
-    out: dict[str, set[int]] = {}
-    tp_type = take_profit_spec.get("type")
-    if tp_type == "level":
-        level = str(take_profit_spec.get("level", "")).upper()
-        if level.startswith("PIVOT_"):
-            out.setdefault("PIVOT", set())
-        elif level in {"SESSION_OPEN", "PREV_SESSION_CLOSE"}:
-            out.setdefault("GAP", set())
-        elif level == "VWAP":
-            out.setdefault("VWAP", set())
-    elif tp_type == "gap_fill":
-        out.setdefault("GAP", set())
     return {name: sorted(periods) for name, periods in out.items()}
 
 

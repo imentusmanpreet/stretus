@@ -17,6 +17,8 @@ enabled:
   - rsi_cross_down
   - rsi_above_50
   - rsi_below_50
+  - rsi_above_60
+  - rsi_below_40
   - rsi_oversold
   - rsi_overbought
   - macd_bullish_cross
@@ -76,6 +78,10 @@ enabled:
   # ── Range / breakout patterns ────────────────────
   - n_bar_high_breakout
   - n_bar_low_breakdown
+
+  # ── 52-week proximity (typically applied via HTF: 1d) ─
+  - near_52_week_high
+  - near_52_week_low
 
   # ── Trend strength (registry-evaluated) ──────────
   - adx_strong_trend

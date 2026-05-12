@@ -8,7 +8,7 @@ api:
   image:
     repository: stretus/python-ai-api
     pullPolicy: IfNotPresent
-    tag: "4cfdb48-20260508-113412"
+    tag: "52b72e0-20260512-095423"
   resources:
     requests:
       cpu: 200m
@@ -41,7 +41,7 @@ quant:
   image:
     repository: stretus/python-ai-quant
     pullPolicy: IfNotPresent
-    tag: "4cfdb48-20260508-113412"
+    tag: "52b72e0-20260512-095423"
   resources:
     requests:
       cpu: 500m

@@ -119,6 +119,87 @@ async def test_unknown_preset_name_falls_back_to_ranker():
     assert plan.exit_trigger is not None
 
 
+# ── Phase 8a: volume_breakout_52w preset ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_volume_breakout_52w_bullish_leg_pins_full_signal_stack():
+    """Verifies the entire user-requested strategy lands intact: volume spike
+    + VWAP + RSI>60 filters on top of an EMA pullback trigger, with the daily
+    52-week-high HTF gate and an ATR(14)*1.5 stop + 0.5% trailing."""
+    plan = await _pipe().plan(_builder(
+        strategy_preset="volume_breakout_52w",
+        timeframe="5m",
+        sentiment="bullish",
+    ))
+
+    assert plan.entry_trigger.name == "ema_pullback_bullish"
+    filter_names = {f.name for f in plan.entry_filters}
+    assert {"volume_spike", "vwap_bullish", "rsi_above_60"} <= filter_names
+
+    # Phase 5 — HTF rules came from the bullish leg
+    assert len(plan.htf_rules) == 1
+    assert plan.htf_rules[0]["timeframe"] == "1d"
+    assert "MAX(HIGH, 252)" in plan.htf_rules[0]["condition"]
+
+    # Phase 3 — ATR stop + percent trailing rode along on the preset
+    assert plan.stop_loss_spec == {"type": "atr", "multiplier": 1.5, "window": 14}
+    assert plan.trailing_stop_spec["type"] == "percent"
+    assert plan.trailing_stop_spec["distance_pct"] == 0.5
+    assert plan.trailing_stop_spec["activate_after_pct"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_volume_breakout_52w_bearish_leg_uses_inverse_signals_and_52w_low():
+    plan = await _pipe().plan(_builder(
+        strategy_preset="volume_breakout_52w",
+        timeframe="5m",
+        sentiment="bearish",
+    ))
+
+    assert plan.entry_trigger.name == "ema_pullback_bearish"
+    filter_names = {f.name for f in plan.entry_filters}
+    assert {"volume_spike", "vwap_bearish", "rsi_below_40"} <= filter_names
+
+    assert plan.htf_rules[0]["timeframe"] == "1d"
+    assert "MIN(LOW, 252)" in plan.htf_rules[0]["condition"]
+
+
+@pytest.mark.asyncio
+async def test_volume_breakout_52w_keyword_pulls_in_preset_from_goal_text():
+    """The chat layer detects keywords in the goal text and pins the preset
+    without an explicit strategy_preset field — verifies user can type
+    "volume spike breakout near 52 week high" and get this strategy."""
+    plan = await _pipe().plan(_builder(
+        strategy_preset=None,
+        goal="give me a volume breakout setup on 5m with relative volume confirmation",
+    ))
+    assert plan.entry_trigger.name == "ema_pullback_bullish"
+    filter_names = {f.name for f in plan.entry_filters}
+    assert "volume_spike" in filter_names
+
+
+@pytest.mark.asyncio
+async def test_volume_breakout_52w_preset_carries_time_exit_to_plan():
+    """Phase 8b: the volume_breakout_52w preset declares time_exit 15:15 IST.
+    It must ride into the StrategyPlan so the builder writes it to the YAML
+    and the simulator picks it up."""
+    plan = await _pipe().plan(_builder(
+        strategy_preset="volume_breakout_52w",
+        timeframe="5m",
+    ))
+    assert plan.time_exit is not None
+    assert plan.time_exit["exit_time"] == "15:15"
+    assert plan.time_exit["timezone"] == "Asia/Kolkata"
+
+
+@pytest.mark.asyncio
+async def test_preset_without_time_exit_leaves_plan_field_none():
+    """Sanity check that legacy presets stay clean."""
+    plan = await _pipe().plan(_builder(strategy_preset="orb"))
+    assert plan.time_exit is None
+
+
 @pytest.mark.asyncio
 async def test_preset_with_structural_sl_propagates_specs_to_plan():
     """A preset that declares stop_loss / trailing_stop blocks should attach

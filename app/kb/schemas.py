@@ -119,6 +119,10 @@ class StrategyPreset(BaseModel):
     # trade symbol and joined into the df with REF_ columns. Strategies that
     # use REF_CLOSE/RS(n)/reference_above_sma must declare this.
     reference_symbol: str | None = None
+    # Phase 8b — wall-clock intraday cutoff carried from preset into the
+    # strategy YAML. Shape: {exit_time: "15:15", timezone: "Asia/Kolkata"}.
+    # Loader converts this to UTC minutes-of-day for the simulator.
+    time_exit: dict | None = None
 
     def leg(self, sentiment: SignalDirection) -> PresetLeg | None:
         if sentiment == "bullish":
@@ -274,6 +278,9 @@ class StrategyPlan(BaseModel):
     # Phase 5 — optional higher-timeframe entry gates carried from a preset
     # into the strategy YAML. Each item: {timeframe: "1d", condition: "..."}.
     htf_rules: list[dict] = Field(default_factory=list)
+    # Phase 8b — optional wall-clock intraday cutoff carried from preset into
+    # the strategy YAML. {exit_time: "15:15", timezone: "Asia/Kolkata"}.
+    time_exit: dict | None = None
     trace: dict = Field(default_factory=dict)
 
     @property

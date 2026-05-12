@@ -86,6 +86,65 @@ def _to_int(value: Any, field_name: str, default: int) -> int:
         raise ValueError(f"Strategy field '{field_name}' must be an integer.") from exc
 
 
+# Phase 8b — time_exit supports a small whitelist of timezones to keep the
+# loader dependency-free (no zoneinfo / tzdata on Windows). NSE doesn't
+# observe DST so a fixed offset is correct for the entire trading window.
+_TIME_EXIT_TZ_UTC_OFFSET_MINUTES = {
+    "Asia/Kolkata":  330,    # IST = UTC+5:30
+    "Asia/Calcutta": 330,    # legacy alias
+    "UTC":           0,
+}
+_TIME_EXIT_PATTERN = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::\d{2})?\s*$")
+
+
+def _parse_time_exit_spec(raw: Any) -> dict[str, Any] | None:
+    """Parse the optional time_exit block (Phase 8b).
+
+    Shape:
+        time_exit:
+          exit_time: "15:15"           # HH:MM in the given timezone
+          timezone:  "Asia/Kolkata"    # optional; default IST
+
+    Returns a dict including a precomputed `utc_minutes_of_day` so the
+    simulator can do a fast int comparison per bar without dragging
+    timezone math into the hot loop. None when the block is absent.
+    """
+    if raw in (None, "", {}):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("time_exit must be a mapping or omitted entirely.")
+
+    raw_time = str(raw.get("exit_time") or "").strip()
+    if not raw_time:
+        raise ValueError("time_exit.exit_time is required (format HH:MM).")
+    m = _TIME_EXIT_PATTERN.match(raw_time)
+    if not m:
+        raise ValueError(
+            f"time_exit.exit_time must be HH:MM (24-hour), got {raw_time!r}."
+        )
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        raise ValueError(f"time_exit.exit_time HH:MM out of range: {raw_time!r}.")
+
+    tz = str(raw.get("timezone") or "Asia/Kolkata").strip()
+    offset = _TIME_EXIT_TZ_UTC_OFFSET_MINUTES.get(tz)
+    if offset is None:
+        raise ValueError(
+            f"time_exit.timezone {tz!r} not supported. Use one of "
+            f"{sorted(_TIME_EXIT_TZ_UTC_OFFSET_MINUTES)}."
+        )
+
+    # Convert HH:MM in local tz to UTC minutes-of-day. Modulo 1440 handles
+    # wrap cases (e.g. 02:00 IST = 20:30 UTC the prior day).
+    utc_minutes = ((hh * 60 + mm) - offset) % (24 * 60)
+
+    return {
+        "exit_time":          raw_time,
+        "timezone":           tz,
+        "utc_minutes_of_day": utc_minutes,
+    }
+
+
 _STOP_LOSS_TYPES = {"percent", "structural", "atr"}
 _STOP_LOSS_ANCHORS = {
     "opening_range_low",   # anchor at LOW of first N bars in the session (long SL)
@@ -94,70 +153,6 @@ _STOP_LOSS_ANCHORS = {
     "prev_n_bar_high",     # anchor at MAX(HIGH, N) at entry (short SL — reserved)
 }
 _TRAILING_TYPES = {"percent", "atr", "ema", "chandelier"}
-
-_TAKE_PROFIT_LEVELS = {
-    "PIVOT_P", "PIVOT_R1", "PIVOT_R2", "PIVOT_S1", "PIVOT_S2",
-    "PREV_SESSION_CLOSE", "SESSION_OPEN", "VWAP",
-}
-
-
-def _parse_take_profit_spec(raw: Any) -> dict[str, Any] | None:
-    """Validate the take_profit block. Returns None when the block is absent
-    (simulator falls back to the legacy `take_profit_percent`).
-
-    Supported shapes:
-        take_profit:
-          type: level
-          level: PIVOT_R1               # one of _TAKE_PROFIT_LEVELS
-          padding_pct: 0.1              # optional buffer (subtracted for longs)
-        take_profit:
-          type: expression
-          expression: "OPENING_RANGE_HIGH(3) + 5"   # any DSL expression
-          padding_pct: 0.0
-        take_profit:
-          type: gap_fill
-          percent: 50                   # exit when GAP_FILL_PCT reaches this
-        take_profit:
-          type: percent                 # equivalent to legacy take_profit_percent
-          pct: 5.0
-    """
-    if raw in (None, "", {}):
-        return None
-    if not isinstance(raw, dict):
-        raise ValueError("take_profit must be a mapping or omitted entirely.")
-
-    tp_type = str(raw.get("type") or "").lower().strip()
-    if tp_type == "percent":
-        pct = _to_float(raw.get("pct"), "take_profit.pct", 0.0)
-        if pct <= 0:
-            raise ValueError("take_profit.pct must be > 0 for type=percent.")
-        return {"type": "percent", "pct": pct}
-
-    if tp_type == "level":
-        level = str(raw.get("level") or "").upper().strip()
-        if level not in _TAKE_PROFIT_LEVELS:
-            raise ValueError(
-                f"take_profit.level must be one of {sorted(_TAKE_PROFIT_LEVELS)}, got {level!r}."
-            )
-        padding = _to_float(raw.get("padding_pct", 0.0), "take_profit.padding_pct", 0.0)
-        return {"type": "level", "level": level, "padding_pct": max(0.0, padding)}
-
-    if tp_type == "expression":
-        expr = str(raw.get("expression") or "").strip()
-        if not expr:
-            raise ValueError("take_profit.expression must be a non-empty DSL string.")
-        padding = _to_float(raw.get("padding_pct", 0.0), "take_profit.padding_pct", 0.0)
-        return {"type": "expression", "expression": expr, "padding_pct": max(0.0, padding)}
-
-    if tp_type == "gap_fill":
-        percent = _to_float(raw.get("percent", 100.0), "take_profit.percent", 100.0)
-        if not 0 < percent <= 200:
-            raise ValueError("take_profit.percent for gap_fill must be in (0, 200].")
-        return {"type": "gap_fill", "percent": percent}
-
-    raise ValueError(
-        "take_profit.type must be one of: percent, level, expression, gap_fill."
-    )
 
 
 def _parse_stop_loss_spec(raw: Any) -> dict[str, Any] | None:
@@ -422,22 +417,12 @@ class StrategyConfig:
     # Patterns are auto-detected from condition formulas; this block only
     # tunes their parameters (e.g. swing window=7 instead of default 5).
     patterns: dict[str, dict[str, Any]] | None = None
-    # Minimum Risk:Reward gate. When > 0, the simulator computes the
-    # prospective risk (entry − initial SL) and reward (TP − entry) at
-    # signal time; entries whose ratio falls below this threshold are
-    # skipped. 0 disables the gate. Set via risk_management.min_risk_reward
-    # in YAML.
-    min_risk_reward: float = 0.0
-    # Dynamic take-profit spec. When None, the simulator uses the legacy
-    # `take_profit` percent. Supported types: percent | level | expression |
-    # gap_fill. See _parse_take_profit_spec for the schema.
-    take_profit_spec: dict[str, Any] | None = None
-    # Multi-step entry sequence (state machine). When non-empty, the simulator
-    # treats the *final step's* True bars as the entry trigger and AND-combines
-    # them with the legacy entry_condition. See engine/entry_sequence.py for
-    # the schema. Parsed-but-not-compiled here (compilation happens in runner
-    # where the entry_sequence module is available).
-    entry_sequence: tuple[dict[str, Any], ...] = ()
+    # Phase 8b — optional wall-clock intraday cutoff. When set, the simulator
+    # force-exits any open position when a bar's timestamp falls at or after
+    # the configured time, AND blocks new entries past that time. Format:
+    #   {"exit_time": "15:15", "timezone": "Asia/Kolkata",
+    #    "utc_minutes_of_day": 585}   (utc_minutes precomputed by the loader)
+    time_exit_spec: dict[str, Any] | None = None
 
 
 def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
@@ -522,11 +507,8 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
             raise ValueError(
                 "entry_evaluation_mode is 'registry' but entry_signals is missing or empty."
             )
-    elif not entry_condition and not strategy.get("entry_sequence"):
-        # entry_sequence supplies the entry signal when entry_condition is empty.
-        raise ValueError(
-            "Strategy YAML is missing a non-empty entry condition (or entry_sequence)."
-        )
+    elif not entry_condition:
+        raise ValueError("Strategy YAML is missing a non-empty entry condition.")
 
     if exit_evaluation_mode == "registry" and not exit_signal_rules:
         raise ValueError(
@@ -602,51 +584,6 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     # Phase 5 — optional higher-timeframe entry gates.
     htf_rules = _parse_htf_rules(strategy.get("htf") or strategy.get("higher_timeframes"))
 
-    # Dynamic take-profit (optional). When omitted, simulator uses the legacy
-    # take_profit_percent.
-    take_profit_spec = _parse_take_profit_spec(
-        strategy.get("take_profit") or risk.get("take_profit")
-    )
-
-    # Entry sequence (state machine). Validated shape only; compilation
-    # happens later in the runner so we avoid pulling engine.entry_sequence
-    # into the loader's import graph.
-    raw_entry_sequence = strategy.get("entry_sequence")
-    entry_sequence_steps: tuple[dict[str, Any], ...] = ()
-    if raw_entry_sequence is not None:
-        if not isinstance(raw_entry_sequence, list) or not raw_entry_sequence:
-            raise ValueError("entry_sequence must be a non-empty list of step mappings.")
-        seen_ids: set[str] = set()
-        cleaned: list[dict[str, Any]] = []
-        for idx, item in enumerate(raw_entry_sequence):
-            if not isinstance(item, dict):
-                raise ValueError(f"entry_sequence[{idx}] must be a mapping.")
-            sid = str(item.get("id") or "").strip()
-            cond = str(item.get("condition") or "").strip()
-            if not sid:
-                raise ValueError(f"entry_sequence[{idx}] missing 'id'.")
-            if not cond:
-                raise ValueError(f"entry_sequence[{idx}] missing 'condition'.")
-            if sid in seen_ids:
-                raise ValueError(f"entry_sequence[{idx}] duplicate id={sid!r}.")
-            seen_ids.add(sid)
-            within = _to_int(item.get("within_bars", 0), f"entry_sequence[{idx}].within_bars", 0)
-            if within < 0:
-                raise ValueError(
-                    f"entry_sequence[{idx}].within_bars must be >= 0 (0 = no timeout)."
-                )
-            cleaned.append({"id": sid, "condition": cond, "within_bars": within})
-        entry_sequence_steps = tuple(cleaned)
-
-    # Minimum Risk:Reward gate (optional). 0 = disabled.
-    min_rr = _to_float(
-        risk.get("min_risk_reward", strategy.get("min_risk_reward")),
-        "min_risk_reward",
-        0.0,
-    )
-    if min_rr < 0:
-        raise ValueError("min_risk_reward must be >= 0 (set 0 to disable).")
-
     # Phase 6 — optional structural-pattern parameter overrides.
     raw_patterns = strategy.get("patterns")
     if raw_patterns is None:
@@ -659,6 +596,11 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
             patterns_overrides[str(name).strip().lower()] = dict(params)
     else:
         raise ValueError("patterns must be a mapping of pattern_name -> params, or omitted.")
+
+    # Phase 8b — optional wall-clock intraday cutoff.
+    time_exit_spec = _parse_time_exit_spec(
+        strategy.get("time_exit") or (strategy.get("exits") or {}).get("time_exit")
+    )
 
     config = StrategyConfig(
         name=str(strategy.get("name") or "Unknown Strategy"),
@@ -683,9 +625,7 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         reference_symbol=reference_symbol,
         htf_rules=htf_rules,
         patterns=patterns_overrides,
-        min_risk_reward=min_rr,
-        take_profit_spec=take_profit_spec,
-        entry_sequence=entry_sequence_steps,
+        time_exit_spec=time_exit_spec,
     )
 
     logger.info(

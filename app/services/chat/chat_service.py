@@ -52,6 +52,7 @@ from app.services.chat.strategy_flow import (
     build_final_strategy_payload,
     build_grounded_clarification_reply,
     build_input_modification_invalid_field_reply,
+    build_missing_critical_inputs_reply,
     build_pause_workflow_reply,
     build_plan_signals_reminder,
     build_plan_signals_reply,
@@ -67,6 +68,48 @@ from app.planner.legacy_bridge import (
     UnsupportedStock,
     UnsupportedTimeframe,
     plan_signals_v2,
+)
+from app.planner.semantic_extractor import SemanticExtractor
+from app.planner.execution_orchestrator import ExecutionOrchestrator
+from app.planner.prompt_summary import (
+    build_prompt_summary,
+    enforce_zero_loss_capture,
+    find_missing_critical_inputs,
+)
+from app.planner.signal_filters import (
+    SignalFilterConfig,
+    apply_filters_to_plan,
+    build_signal_filters,
+    render_filters_for_summary,
+)
+from app.planner.trade_management import (
+    TradeManagementConfig,
+    apply_trade_management_to_plan,
+    build_trade_management_config,
+    find_missing_trade_management,
+    render_trade_management_for_summary,
+)
+from app.planner.mirror_side import (
+    assess_trading_window,
+    mirror_plan,
+)
+from app.planner.market_context import (
+    MarketContextConfig,
+    apply_market_context_to_plan,
+    build_market_context_config,
+    find_missing_market_context,
+    render_market_context_for_summary,
+)
+from app.planner.stock_recommender import (
+    recommend as recommend_stocks,
+    render_recommendations_for_summary,
+)
+from app.planner.trade_journal import (
+    append_to_builder as append_journal_entry,
+    build_signal_entry,
+    confirmation_factors_from_plan,
+    grade_setup,
+    render_journal_for_summary,
 )
 from app.planner.strategy_assembler import (
     build_retrieval_meta,
@@ -804,6 +847,195 @@ _CAPTURE_MODIFY_TEMPLATES: tuple[str, ...] = (
 
 def _core_snapshot(builder: StrategyBuilder) -> tuple[Optional[str], ...]:
     return tuple(getattr(builder, field, None) for field in _CORE_SNAPSHOT_FIELDS)
+
+
+def _collect_full_prompt_text(
+    builder: StrategyBuilder,
+    all_messages: list[ChatMessage] | None,
+    user_content: str,
+) -> str:
+    """Concatenate every user-side message in this session plus the captured
+    goal and the latest turn, so the SemanticExtractor sees the full
+    description rather than just the most recent message. Order: history,
+    goal, current turn — the extractor is order-insensitive (regex-based)
+    but this keeps logs readable.
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    for message in all_messages or []:
+        if getattr(message, "role", None) != ChatRole.user:
+            continue
+        text = (getattr(message, "content", None) or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    goal = (getattr(builder, "goal", None) or "").strip()
+    if goal and goal not in seen:
+        parts.append(goal)
+        seen.add(goal)
+    latest = (user_content or "").strip()
+    if latest and latest not in seen:
+        parts.append(latest)
+    return "\n".join(parts)
+
+
+def _ensure_prompt_summary_built(
+    builder: StrategyBuilder,
+    *,
+    user_content: str,
+    all_messages: list[ChatMessage] | None,
+) -> None:
+    """Populate builder.prompt_summary + builder.missing_critical_inputs
+    from a fresh SemanticExtractor pass over the user's accumulated prompt
+    text. Idempotent — the comprehensive snapshot is rebuilt every time
+    this is called so that confirmation reflects the latest captured
+    fields. Cheap (regex-only); safe to invoke per turn.
+    """
+    try:
+        full_text = _collect_full_prompt_text(builder, all_messages, user_content)
+        instructions = SemanticExtractor().extract(full_text)
+        summary = build_prompt_summary(
+            builder,
+            instructions,
+            extra_prompt_text=full_text,
+        )
+
+        # Filter framework: detect which behavioural filters the user
+        # asked for, fall back to defaults for the rest, and render them
+        # into the summary so the user sees the toggles before confirming.
+        existing_filters = SignalFilterConfig.from_dict(builder.signal_filters or {})
+        filter_cfg = build_signal_filters(
+            full_text,
+            instructions,
+            builder,
+            existing=existing_filters,
+        )
+        builder.signal_filters = filter_cfg.to_dict()
+
+        # Trade-management rule pack (Phase 3 #9-#17). Same toggle pattern:
+        # detect from prompt, fall back to defaults, surface required-but-
+        # unspecified rules in missing_critical_inputs so the user is asked.
+        existing_tm = TradeManagementConfig.from_dict(builder.trade_management or {})
+        tm_cfg = build_trade_management_config(
+            full_text, instructions, builder, existing=existing_tm,
+        )
+        builder.trade_management = tm_cfg.to_dict()
+        tm_missing = find_missing_trade_management(tm_cfg)
+
+        # Phase 4 — market-context filters (rules #18-#23). Built every
+        # turn from the user prompt; required toggles (gap_handling,
+        # news_event_filter) bubble into missing_critical_inputs.
+        existing_mc = MarketContextConfig.from_dict(builder.market_context or {})
+        mc_cfg = build_market_context_config(
+            full_text, instructions, builder, existing=existing_mc,
+        )
+        builder.market_context = mc_cfg.to_dict()
+        mc_missing = find_missing_market_context(mc_cfg)
+
+        # Phase 4 — stock recommender (rule #24). Runs every turn so the
+        # user sees the recommendation alongside the summary. If they
+        # already pinned a stock from the supported universe, the picks
+        # validate the choice; otherwise they propose the best fits.
+        builder.stock_recommendations = recommend_stocks(
+            full_text, instructions, builder, top_n=3,
+        )
+
+        # Trading-window stability check (Phase 3 #7) — flag overlap with
+        # known unstable Indian-market periods so the user can tighten the
+        # session before signal planning.
+        window_warnings: list = []
+        if instructions is not None and instructions.session_filters is not None:
+            session_dict = {
+                "valid_windows":    [w.dict() for w in instructions.session_filters.valid_windows or []],
+                "blackout_windows": [w.dict() for w in instructions.session_filters.blackout_windows or []],
+                "session":          instructions.session_filters.session,
+            }
+            window_warnings = assess_trading_window(session_dict)
+        else:
+            window_warnings = assess_trading_window(None)
+        builder.window_warnings = window_warnings
+
+        # Auto-generate the opposite-direction setup (Phase 3 #8). The
+        # mirror is derived from whatever entry/exit_condition the planner
+        # produces; until plan_signals runs we mirror the user's own
+        # threshold conditions so the summary still shows both directions.
+        primary_entry = " AND ".join(
+            t["expression"]
+            for t in (summary.get("snapshot", {}).get("extracted", {}) or {}).get(
+                "threshold_conditions", []
+            ) or []
+        ) or ""
+        primary_direction = "long" if (
+            (getattr(builder, "sentiment", "") or "").lower() in {"bullish", "bull", "long"}
+        ) else "short"
+        if primary_entry:
+            stub_plan = {"entry_condition": primary_entry, "exit_condition": ""}
+            builder.mirror_plan = {
+                "primary_direction":  primary_direction,
+                "mirror_direction":   "short" if primary_direction == "long" else "long",
+                "primary_entry":      primary_entry,
+                "mirror_entry":       mirror_plan(stub_plan, primary_direction=primary_direction).get("entry_condition", ""),
+            }
+
+        # Render every Phase-1/2/3 section into the summary.
+        summary_text = summary.get("text") or ""
+        section_blocks: list[str] = []
+        filter_lines = render_filters_for_summary(filter_cfg)
+        if filter_lines:
+            section_blocks.append("\n".join(filter_lines))
+        tm_lines = render_trade_management_for_summary(tm_cfg)
+        if tm_lines:
+            section_blocks.append("\n".join(tm_lines))
+        if window_warnings:
+            warn_lines = ["── Trading window warnings ──"]
+            for w in window_warnings:
+                warn_lines.append(f"⚠ {w['window']}: {w['why']}")
+                warn_lines.append(f"   suggestion → {w['suggestion']}")
+            section_blocks.append("\n".join(warn_lines))
+        if builder.mirror_plan and builder.mirror_plan.get("mirror_entry"):
+            mp = builder.mirror_plan
+            mirror_lines = [
+                "── Opposite-side setup (auto-generated) ──",
+                f"Primary direction: {mp.get('primary_direction', 'long').upper()}",
+                f"  entry: {mp.get('primary_entry') or '(planner-defined)'}",
+                f"Mirror direction:  {mp.get('mirror_direction', 'short').upper()}",
+                f"  entry: {mp.get('mirror_entry')}",
+                "The mirror setup is ready but inactive until you say 'trade both directions'.",
+            ]
+            section_blocks.append("\n".join(mirror_lines))
+
+        # Phase 4 sections.
+        mc_lines = render_market_context_for_summary(mc_cfg)
+        if mc_lines:
+            section_blocks.append("\n".join(mc_lines))
+        rec_lines = render_recommendations_for_summary(builder.stock_recommendations or {})
+        if rec_lines:
+            section_blocks.append("\n".join(rec_lines))
+        journal_lines = render_journal_for_summary(builder)
+        if journal_lines:
+            section_blocks.append("\n".join(journal_lines))
+
+        if section_blocks:
+            summary_text = summary_text.rstrip() + "\n\n" + "\n\n".join(section_blocks)
+
+        builder.prompt_summary = {
+            "text":     summary_text,
+            "snapshot": summary.get("snapshot"),
+        }
+
+        # Combined missing-critical list: prompt-level (Phase 1) + TM rules
+        # (Phase 3) + market-context decisions (Phase 4) the user must
+        # specify before building.
+        combined_missing = list(summary.get("missing_critical") or [])
+        combined_missing.extend(tm_missing)
+        combined_missing.extend(mc_missing)
+        builder.missing_critical_inputs = combined_missing
+    except Exception:
+        logger.warning(
+            "⚠️ chat_flow|event=prompt_summary_build_failed — falling back to legacy summary",
+            exc_info=True,
+        )
 
 
 def _format_capture_value(builder: StrategyBuilder, field: str, value: Any) -> str:
@@ -2315,8 +2547,37 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 draft["kb_signals_used"] = retrieval_meta.get("signals_used", [])
                 draft["kb_signals_available"] = retrieval_meta.get("signals_available", 0)
             else:
-                if builder.is_user_input_complete() and not builder.user_input_confirmed and user_confirmed:
-                    builder.user_input_confirmed = True
+                # ── Feature 1: comprehensive prompt summary before building ──
+                # As soon as all six core inputs are captured, run the
+                # SemanticExtractor over the user's accumulated prompt text
+                # so the confirmation message can mirror every detail back
+                # to the user. We refuse to flip user_input_confirmed while
+                # critical exit-side details are missing — instead the next
+                # turn asks the user to supply them.
+                if (
+                    builder.is_user_input_complete()
+                    and not builder.user_input_confirmed
+                ):
+                    _ensure_prompt_summary_built(
+                        builder,
+                        user_content=user_content,
+                        all_messages=all_messages,
+                    )
+
+                if (
+                    builder.is_user_input_complete()
+                    and not builder.user_input_confirmed
+                    and user_confirmed
+                ):
+                    if builder.missing_critical_inputs:
+                        logger.info(
+                            "🚧 chat_flow|event=confirmation_blocked_missing_critical"
+                            "|session_id=%s|missing=%s",
+                            session_id,
+                            [m.get("field") for m in builder.missing_critical_inputs],
+                        )
+                    else:
+                        builder.user_input_confirmed = True
 
                 _structured_clarification_topics = {
                     "tutorial",
@@ -2461,11 +2722,28 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         was_modification=input_modification_turn,
                         turn_index=len(all_messages),
                     )
-                    assistant_text = build_collect_user_input_reply(
-                        builder,
-                        user_content,
-                        preface=capture_ack,
-                    )
+                    # When the six core fields are captured but exit-side
+                    # details were never mentioned, ask the user instead of
+                    # silently defaulting — and instead of returning the
+                    # comprehensive summary that would imply the strategy
+                    # is ready to build.
+                    if (
+                        builder.is_user_input_complete()
+                        and builder.missing_critical_inputs
+                    ):
+                        assistant_text = build_missing_critical_inputs_reply(builder)
+                        logger.info(
+                            "❓ chat_flow|event=missing_critical_inputs_prompt"
+                            "|session_id=%s|missing=%s",
+                            session_id,
+                            [m.get("field") for m in builder.missing_critical_inputs],
+                        )
+                    else:
+                        assistant_text = build_collect_user_input_reply(
+                            builder,
+                            user_content,
+                            preface=capture_ack,
+                        )
                     assistant_state = "collect_user_input"
                     draft = builder.to_draft_json(
                         mode_override="collect_user_input",
@@ -2555,9 +2833,155 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         )
                         raise
 
+                    # ===== Apply semantic extraction and orchestration =====
+                    semantic_instructions = None
+                    semantic_gates_applied = []
+                    zero_loss_augmentation: dict | None = None
+                    filter_cfg: SignalFilterConfig | None = None
+                    filter_audit: dict | None = None
+                    tm_cfg: TradeManagementConfig | None = None
+                    tm_audit: dict | None = None
+                    mc_cfg: MarketContextConfig | None = None
+                    mc_audit: dict | None = None
+                    try:
+                        # Feed the extractor the full prompt context (goal +
+                        # accumulated user messages + current turn) so it
+                        # catches every condition the user mentioned across
+                        # the conversation, not just the last message.
+                        full_prompt_text = _collect_full_prompt_text(
+                            builder, all_messages, user_content
+                        )
+                        semantic_extractor = SemanticExtractor()
+                        semantic_instructions = semantic_extractor.extract(full_prompt_text)
+
+                        logger.info(
+                            "📊 chat_flow|event=semantic_extraction_done|session_id=%s"
+                            "|family=%s|htf_rules=%d|quality=%.2f",
+                            session_id,
+                            semantic_instructions.strategy_family,
+                            len(semantic_instructions.htf_rules),
+                            semantic_instructions.extraction_quality_score,
+                        )
+
+                        # Apply semantic gates to enhance signal plan
+                        orchestrator = ExecutionOrchestrator()
+                        plan = orchestrator.apply_semantic_gates(plan, semantic_instructions)
+                        semantic_gates_applied = plan.get("_semantic_gates_applied", [])
+
+                        # ── Feature 2: zero-loss capture enforcement ──
+                        # If the planner / gates didn't translate every
+                        # condition the user mentioned into entry/exit
+                        # signal logic, augment the condition strings and
+                        # side-channel specs so the user's prompt is
+                        # mirrored faithfully in the signals.
+                        zero_loss_augmentation = enforce_zero_loss_capture(
+                            plan,
+                            semantic_instructions,
+                            prompt_text=full_prompt_text,
+                        )
+
+                        # ── Feature 3: behavioural signal filters ──
+                        # Layer the toggleable filter pack (volume confirmation,
+                        # volatility cap, market regime, trend direction, multi-
+                        # candle, momentum) on top of whatever the planner +
+                        # zero-loss step produced. The user has already seen
+                        # the filter toggles in the confirmation summary and
+                        # confirmed them implicitly.
+                        filter_cfg = SignalFilterConfig.from_dict(
+                            builder.signal_filters or {}
+                        )
+                        filter_audit = apply_filters_to_plan(plan, filter_cfg)
+
+                        # ── Feature 4: trade-management rule pack ──
+                        # Engine-known knobs (max_trades, daily_loss_cap,
+                        # per_trade_risk, trailing stop) are mirrored onto
+                        # `plan["_risk_overrides"]` / `_trailing_stop_spec`.
+                        # The full pack is attached at `plan["_trade_management"]`
+                        # so downstream consumers see every rule, even those
+                        # the current engine doesn't act on yet.
+                        tm_cfg = TradeManagementConfig.from_dict(
+                            builder.trade_management or {}
+                        )
+                        tm_audit = apply_trade_management_to_plan(plan, tm_cfg)
+
+                        # ── Feature 5: opposite-direction mirror ──
+                        # Build the mirror plan from the FULL entry/exit
+                        # condition the planner produced (rather than from
+                        # the user's threshold-conditions alone). The mirror
+                        # lives next to the primary plan so callers can
+                        # surface both in the chat summary and the user can
+                        # opt into "trade both directions".
+                        primary_direction = "long" if (
+                            (getattr(builder, "sentiment", "") or "").lower()
+                            in {"bullish", "bull", "long"}
+                        ) else "short"
+                        mirror = mirror_plan(plan, primary_direction=primary_direction)
+                        plan["_mirror_plan"] = {
+                            "primary_direction": primary_direction,
+                            "mirror_direction":  mirror.get("_direction"),
+                            "entry_condition":   mirror.get("entry_condition"),
+                            "exit_condition":    mirror.get("exit_condition"),
+                        }
+                        builder.mirror_plan = plan["_mirror_plan"]
+
+                        # ── Feature 6: market-context filters (Phase 4) ──
+                        # Layer the broader-market direction, HTF
+                        # confirmation, gap-handling, news-event, candle-
+                        # pattern, sector-strength filters on top. Engine-
+                        # known knobs land in plan["_htf_rules"],
+                        # plan["_reference_symbol"], etc.; the rest become
+                        # side-channel specs the runner / order manager can
+                        # honour.
+                        mc_cfg = MarketContextConfig.from_dict(
+                            builder.market_context or {}
+                        )
+                        mc_audit = apply_market_context_to_plan(plan, mc_cfg)
+
+                        # ── Feature 7: auto-journal the signal (Phase 4) ──
+                        # Trade journaling per rule #25 — every signal
+                        # generated gets a journal entry with the indicators
+                        # that triggered, the setup grade, and the full
+                        # plan context.
+                        factors = confirmation_factors_from_plan(plan)
+                        grade   = grade_setup(plan)
+                        plan["_setup_grade"]          = grade
+                        plan["_confirmation_factors"] = factors
+                        append_journal_entry(
+                            builder,
+                            build_signal_entry(
+                                builder=builder,
+                                plan=plan,
+                                setup_grade=grade,
+                                confirmation_factors=factors,
+                                notes="Auto-logged by chat_service signal-planning step.",
+                            ),
+                        )
+
+                        logger.info(
+                            "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s"
+                            "|gates=%s|entry_added=%s|exit_added=%s|side=%s"
+                            "|filters_entry=%s|filters_side=%s",
+                            session_id,
+                            ", ".join(semantic_gates_applied),
+                            (zero_loss_augmentation or {}).get("entry_added") or [],
+                            (zero_loss_augmentation or {}).get("exit_added") or [],
+                            len((zero_loss_augmentation or {}).get("side_channels") or []),
+                            filter_audit.get("entry_added") or [],
+                            len(filter_audit.get("side_channels") or []),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "⚠️ chat_flow|event=semantic_extraction_error|session_id=%s|error=%s",
+                            session_id,
+                            str(e),
+                        )
+                        # Continue without semantic enhancement if extraction fails
+                        pass
+                    # ===== END: Semantic extraction and orchestration =====
+
                     logger.info(
                         "✅ chat_flow|event=signal_planning_done|session_id=%s"
-                        "|signals=%s|available=%d|sl=%s%%|tp=%s%%|entry=%r|exit=%r",
+                        "|signals=%s|available=%d|sl=%s%%|tp=%s%%|entry=%r|exit=%r|semantic_gates=%d",
                         session_id,
                         plan.get("signals_used", []),
                         plan.get("signals_available", 0),
@@ -2565,6 +2989,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         plan.get("_tp_pct"),
                         (plan.get("entry_condition") or "")[:80],
                         (plan.get("exit_condition") or "")[:80],
+                        len(semantic_gates_applied),
                     )
                     builder.apply_signal_plan(plan)
                     assistant_text = build_plan_signals_reply(builder, plan)
@@ -2575,6 +3000,44 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     )
                     draft["kb_signals_used"] = plan.get("signals_used", [])
                     draft["kb_signals_available"] = plan.get("signals_available", 0)
+
+                    # ===== NEW: Add semantic extraction results to draft =====
+                    if semantic_instructions:
+                        draft["semantic_extraction"] = {
+                            "quality_score": semantic_instructions.extraction_quality_score,
+                            "strategy_family": semantic_instructions.strategy_family,
+                            "htf_rules": [r.dict() for r in semantic_instructions.htf_rules],
+                            "indicators": semantic_instructions.indicators,
+                            "adx_threshold": (
+                                semantic_instructions.volume_momentum.momentum.adx_threshold
+                                if semantic_instructions.volume_momentum and semantic_instructions.volume_momentum.momentum
+                                else None
+                            ),
+                            "structural_sl": semantic_instructions.stop_loss.dict() if semantic_instructions.stop_loss else None,
+                            "risk_reward": semantic_instructions.risk_reward.dict() if semantic_instructions.risk_reward else None,
+                            "candle_confirmation": semantic_instructions.candle_confirmation.dict() if semantic_instructions.candle_confirmation else None,
+                        }
+                        draft["semantic_gates_applied"] = semantic_gates_applied
+                        if zero_loss_augmentation:
+                            draft["zero_loss_augmentation"] = zero_loss_augmentation
+                    if filter_cfg is not None:
+                        draft["signal_filters"]      = filter_cfg.to_dict()
+                        draft["signal_filter_audit"] = filter_audit
+                    if tm_cfg is not None:
+                        draft["trade_management"]       = tm_cfg.to_dict()
+                        draft["trade_management_audit"] = tm_audit
+                    if mc_cfg is not None:
+                        draft["market_context"]         = mc_cfg.to_dict()
+                        draft["market_context_audit"]   = mc_audit
+                    if builder.mirror_plan:
+                        draft["mirror_plan"]            = dict(builder.mirror_plan)
+                    if builder.window_warnings:
+                        draft["window_warnings"]        = list(builder.window_warnings)
+                    if builder.stock_recommendations:
+                        draft["stock_recommendations"]  = dict(builder.stock_recommendations)
+                    if builder.trade_journal:
+                        draft["trade_journal"]          = list(builder.trade_journal)
+                    # ===== END: Semantic extraction results =====
                 else:
                     assistant_text = build_plan_signals_reminder(builder)
                     assistant_state = "plan_signals"

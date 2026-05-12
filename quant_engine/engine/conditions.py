@@ -15,16 +15,7 @@ Supported syntax:
                   IS_SWING_HIGH, IS_SWING_LOW, IS_BOS_BULLISH, IS_BOS_BEARISH,
                   IS_BULLISH_FVG, IS_BEARISH_FVG, IS_HIGHER_HIGH, IS_LOWER_LOW
                                                                        ← Phase 6: structural patterns
-                  PIVOT_P, PIVOT_R1, PIVOT_R2, PIVOT_S1, PIVOT_S2      ← classic pivots
-                  SESSION_OPEN, PREV_SESSION_CLOSE,
-                  GAP_SIZE_PCT, GAP_FILL_PCT                            ← gap diagnostics
   - Functions:    ... RS(n)                                            ← Phase 4: relative strength vs reference
-                  IN_TIME_WINDOW(hhmm_start, hhmm_end)                 ← intraday session filter
-                                                                          (e.g. IN_TIME_WINDOW(915, 1430))
-                  VOL_SPIKE(window, multiplier)                        ← volume spike vs SMA(VOL, window)
-                  IS_GAP_UP(min_pct?) / IS_GAP_DOWN(min_pct?)          ← session gap
-                  RETEST_FROM_ABOVE(level, N) / RETEST_FROM_BELOW(level, N)
-                                                                       ← breakout-then-retest in last N bars
   - Variables:    PROFIT, LOSS, TAKE_PROFIT_TARGET, STOP_LOSS_TARGET
 
 Parse hierarchy (highest to lowest precedence):
@@ -42,19 +33,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from engine.indicators import (
-    bb_lower,
-    bb_middle,
-    bb_upper,
-    ema,
-    gap_series,
-    macd_line,
-    macd_signal,
-    pivot_points,
-    rsi,
-    sma,
-    vwap,
-)
+from engine.indicators import bb_lower, bb_middle, bb_upper, ema, macd_line, macd_signal, rsi, sma, vwap
 
 logger = logging.getLogger(__name__)
 
@@ -447,79 +426,6 @@ def _session_opening_range(df: pd.DataFrame, field: str, n: int, i: int, agg: st
     return float(value)
 
 
-def _in_time_window(df: pd.DataFrame, i: int, start_hhmm: int, end_hhmm: int) -> bool:
-    """True iff the timestamp at bar i lies in [start_hhmm, end_hhmm] inclusive.
-
-    Times are HHMM ints: 915 = 09:15, 1430 = 14:30. Wrap-around (end < start)
-    is rejected — intraday filters never cross midnight.
-    """
-    if not isinstance(df.index, pd.DatetimeIndex) or i < 0 or i >= len(df):
-        return False
-    if start_hhmm > end_hhmm:
-        return False
-    ts = df.index[i]
-    hhmm = ts.hour * 100 + ts.minute
-    return start_hhmm <= hhmm <= end_hhmm
-
-
-def _retest_within(df: pd.DataFrame, i: int, level: float, window: int, side: str) -> bool:
-    """Bullish breakout-retest (side="above"):
-        Within bars [i-window+1 .. i], some bar j has close[j] > level AND
-        some later bar k (j < k ≤ i) has low[k] ≤ level.
-
-    Bearish breakdown-retest (side="below"): mirror — close[j] < level and
-    later high[k] ≥ level.
-
-    Used to filter fake breakouts: the breakout candle alone is unreliable; a
-    successful retest of the broken level is the institutional confirmation.
-    """
-    if window <= 1 or i - window + 1 < 0:
-        return False
-    if "close" not in df.columns or "high" not in df.columns or "low" not in df.columns:
-        return False
-    start = i - window + 1
-    closes = df["close"].iloc[start : i + 1].astype(float).to_numpy()
-    lows = df["low"].iloc[start : i + 1].astype(float).to_numpy()
-    highs = df["high"].iloc[start : i + 1].astype(float).to_numpy()
-    if side == "above":
-        breakout_idxs = np.flatnonzero(closes > level)
-        if breakout_idxs.size == 0:
-            return False
-        first_breakout = int(breakout_idxs[0])
-        # A retest must occur strictly AFTER the breakout candle and within
-        # the window. low touching the level (≤) counts as a retest.
-        retest_zone = lows[first_breakout + 1 :]
-        return bool(np.any(retest_zone <= level))
-    # side == "below"
-    breakdown_idxs = np.flatnonzero(closes < level)
-    if breakdown_idxs.size == 0:
-        return False
-    first_breakdown = int(breakdown_idxs[0])
-    retest_zone = highs[first_breakdown + 1 :]
-    return bool(np.any(retest_zone >= level))
-
-
-def _vol_spike(df: pd.DataFrame, i: int, window: int, multiplier: float) -> bool:
-    """True iff VOLUME[i] >= multiplier × AVG(VOLUME[i-window..i-1]).
-
-    The current bar is excluded from the baseline so its own volume can't
-    inflate the threshold. NaN-safe: returns False when the baseline window
-    isn't fully available.
-    """
-    if window <= 0 or i - window < 0 or "volume" not in df.columns:
-        return False
-    baseline = df["volume"].iloc[i - window : i].astype(float)
-    if len(baseline) != window or baseline.isna().any():
-        return False
-    avg = float(baseline.mean())
-    if avg <= 0.0:
-        return False
-    current = float(df["volume"].iloc[i])
-    if _is_nan(current):
-        return False
-    return current >= avg * multiplier
-
-
 def _resolve_indicator(df: pd.DataFrame, name: str, period: int, i: int) -> float:
     close = df["close"].astype(float)
     mapping = {
@@ -549,13 +455,7 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
     if name in {"TRUE", "FALSE"}:
         return name == "TRUE"
 
-    if name in {
-        "CLOSE", "OPEN", "HIGH", "LOW", "VOL", "VOLUME", "VWAP",
-        "MACD", "MACD_SIGNAL", "MACD_HIST",
-        "PIVOT_P", "PIVOT_R1", "PIVOT_R2", "PIVOT_S1", "PIVOT_S2",
-        "SESSION_OPEN", "PREV_SESSION_CLOSE", "GAP_SIZE_PCT", "GAP_FILL_PCT",
-        "ENTRY_SEQUENCE_FIRED",
-    }:
+    if name in {"CLOSE", "OPEN", "HIGH", "LOW", "VOL", "VOLUME", "VWAP", "MACD", "MACD_SIGNAL", "MACD_HIST"}:
         col = _col_name(name)
         value = row.get(col, float("nan"))
         if pd.isna(value) and name == "VWAP":
@@ -564,12 +464,14 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
             return _resolve_macd(df, i)
         if pd.isna(value) and name == "MACD_SIGNAL":
             return _resolve_macd_signal(df, i)
-        if pd.isna(value) and name.startswith("PIVOT_"):
-            return _resolve_pivot(df, i, name)
-        if pd.isna(value) and name in {
-            "SESSION_OPEN", "PREV_SESSION_CLOSE", "GAP_SIZE_PCT", "GAP_FILL_PCT"
-        }:
-            return _resolve_gap(df, i, name)
+        return float(value) if not pd.isna(value) else float("nan")
+
+    # Phase 2 — scalar identifiers from the extended indicator pack. These
+    # are precomputed by add_extended_indicators(); when the runner forgot
+    # to request them, the column is missing and we return NaN (comparisons
+    # against NaN are False, so the condition silently stays inactive).
+    if name in _SCALAR_INDICATORS:
+        value = row.get(name, float("nan"))
         return float(value) if not pd.isna(value) else float("nan")
 
     # Phase 4 — REF_* identifiers resolve to the reference symbol's OHLCV
@@ -592,6 +494,15 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
     return float("nan")
 
 
+def _float_suffix(value: float) -> str:
+    """Render a parameter value into the identifier-safe suffix the extended
+    indicator orchestrator uses: ints stay '10', floats become '3p0' / '2p5'.
+    Must stay in sync with indicators_ext.column_suffix()."""
+    if value == int(value):
+        return str(int(value))
+    return str(value).replace(".", "p").replace("-", "neg")
+
+
 def _resolve_vwap(df: pd.DataFrame, i: int) -> float:
     series = vwap(df)
     value = series.iloc[i] if i < len(series) else float("nan")
@@ -610,25 +521,6 @@ def _resolve_macd_signal(df: pd.DataFrame, i: int) -> float:
     return float(value) if not pd.isna(value) else float("nan")
 
 
-def _resolve_pivot(df: pd.DataFrame, i: int, name: str) -> float:
-    """Compute the requested pivot column on-the-fly when the runner didn't
-    precompute it. Same semantics as indicators.pivot_points()."""
-    piv = pivot_points(df)
-    if name not in piv.columns or i >= len(piv):
-        return float("nan")
-    value = piv[name].iloc[i]
-    return float(value) if not pd.isna(value) else float("nan")
-
-
-def _resolve_gap(df: pd.DataFrame, i: int, name: str) -> float:
-    """Lazy fallback for gap columns when the runner didn't precompute them."""
-    gap = gap_series(df)
-    if name not in gap.columns or i >= len(gap):
-        return float("nan")
-    value = gap[name].iloc[i]
-    return float(value) if not pd.isna(value) else float("nan")
-
-
 def _evaluate_function(
     node: FunctionNode,
     df: pd.DataFrame,
@@ -638,14 +530,19 @@ def _evaluate_function(
     name = node.name
     args = node.args
 
-    if name in {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}:
+    if name in _PERIODIC_INDICATORS:
         if len(args) == 1:
             period = int(_as_float(_eval_node(args[0], df, i, variables)))
             precomputed = f"{name}_{period}"
             if precomputed in df.columns:
                 value = df.iloc[i].get(precomputed, float("nan"))
                 return float(value) if not pd.isna(value) else float("nan")
-            return _resolve_indicator(df, name, period, i)
+            # Only the original core indicators have a slow-path fallback.
+            if name in {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}:
+                return _resolve_indicator(df, name, period, i)
+            # Phase-2 indicators must be precomputed via add_extended_indicators
+            # — if the runner forgot to request them, return NaN safely.
+            return float("nan")
         if len(args) == 2 and isinstance(args[0], IdentifierNode):
             field = args[0].name
             period = int(_as_float(_eval_node(args[1], df, i, variables)))
@@ -654,6 +551,24 @@ def _evaluate_function(
             if name == "EMA":
                 return _rolling_ema(df, field, period, i)
         raise ParseError(f"{name} expects either 1 period argument or FIELD, period.")
+
+    # Phase 2 — multi-arg indicators (Supertrend(period, multiplier), Keltner,
+    # ATR Bands, PSAR). Column name suffix is "_<param1>_<param2>" with
+    # floats rendered as identifier-safe strings (3.0 → '3', 2.5 → '2p5').
+    if name in _MULTI_PARAM_INDICATORS:
+        if not args:
+            raise ParseError(f"{name} expects at least one parameter.")
+        suffix_parts: list[str] = []
+        for arg_node in args:
+            value = _as_float(_eval_node(arg_node, df, i, variables))
+            if value != value:  # NaN
+                return float("nan")
+            suffix_parts.append(_float_suffix(value))
+        precomputed = f"{name}_{'_'.join(suffix_parts)}"
+        if precomputed in df.columns:
+            value = df.iloc[i].get(precomputed, float("nan"))
+            return float(value) if not pd.isna(value) else float("nan")
+        return float("nan")
 
     if name == "AVG":
         if len(args) != 2 or not isinstance(args[0], IdentifierNode):
@@ -734,66 +649,6 @@ def _evaluate_function(
         if ref_ret == 0.0:
             return float("nan")
         return stock_ret / ref_ret
-
-    if name in {"IS_GAP_UP", "IS_GAP_DOWN"}:
-        # IS_GAP_UP(min_pct) / IS_GAP_DOWN(min_pct) — True when the current
-        # session opened with a gap of at least `min_pct` percent in the
-        # corresponding direction. Zero args = any non-zero gap.
-        min_pct = 0.0
-        if len(args) == 1:
-            min_pct = _as_float(_eval_node(args[0], df, i, variables))
-        elif len(args) != 0:
-            raise ParseError(f"{name} expects 0 or 1 argument (min_pct).")
-        if _is_nan(min_pct):
-            return False
-        gap_pct = _resolve_identifier("GAP_SIZE_PCT", df, i, variables)
-        if _is_nan(gap_pct):
-            return False
-        if name == "IS_GAP_UP":
-            return float(gap_pct) >= max(0.0, min_pct)
-        # IS_GAP_DOWN: gap is negative
-        return float(gap_pct) <= -max(0.0, min_pct)
-
-    if name in {"RETEST_FROM_ABOVE", "RETEST_FROM_BELOW"}:
-        # RETEST_FROM_ABOVE(level, N): within the last N bars (inclusive of i),
-        # at least one bar closed strictly above `level` AND a later bar's LOW
-        # touched or undercut that same `level`. Bullish "breakout + retest".
-        # RETEST_FROM_BELOW(level, N): mirror — at least one bar closed
-        # strictly below `level` and a later bar's HIGH touched or exceeded
-        # the level. Bearish breakdown + retest.
-        if len(args) != 2:
-            raise ParseError(f"{name} expects (level_expr, N_bars).")
-        level = _as_float(_eval_node(args[0], df, i, variables))
-        if _is_nan(level):
-            return False
-        window = int(_as_float(_eval_node(args[1], df, i, variables)))
-        return _retest_within(df, i, level, window, side=(
-            "above" if name == "RETEST_FROM_ABOVE" else "below"
-        ))
-
-    if name == "IN_TIME_WINDOW":
-        # IN_TIME_WINDOW(start_hhmm, end_hhmm) — True iff the current bar's
-        # timestamp falls within [start, end] inclusive. Times are integers in
-        # HHMM form: 915 = 09:15, 1430 = 14:30. End < start wraps midnight,
-        # which is rejected (returns False) since intraday sessions never wrap.
-        if len(args) != 2:
-            raise ParseError("IN_TIME_WINDOW expects (start_hhmm, end_hhmm).")
-        start_v = _eval_node(args[0], df, i, variables)
-        end_v = _eval_node(args[1], df, i, variables)
-        if _is_nan(start_v) or _is_nan(end_v):
-            return False
-        return _in_time_window(df, i, int(_as_float(start_v)), int(_as_float(end_v)))
-
-    if name == "VOL_SPIKE":
-        # VOL_SPIKE(window, multiplier) — True iff current VOLUME is at least
-        # `multiplier` × the SMA(VOLUME, window) over the last `window` bars
-        # ending at the previous bar (so the current bar's volume doesn't bias
-        # its own threshold). Used as a clean shortcut for breakout filters.
-        if len(args) != 2:
-            raise ParseError("VOL_SPIKE expects (window, multiplier).")
-        window = int(_as_float(_eval_node(args[0], df, i, variables)))
-        multiplier = _as_float(_eval_node(args[1], df, i, variables))
-        return _vol_spike(df, i, window, multiplier)
 
     if name == "OPENING_RANGE_HIGH":
         if len(args) != 1:
@@ -903,29 +758,6 @@ def evaluate_condition(
         return False
 
 
-def evaluate_condition_value(
-    expression: str,
-    df: pd.DataFrame,
-    i: int,
-    variables: dict[str, float] | None = None,
-) -> float:
-    """Evaluate a DSL expression and return its numeric value (not coerced to
-    bool). Used by the simulator to resolve dynamic target expressions such
-    as "OPENING_RANGE_HIGH(3) + 5" at trade-entry time.
-
-    Returns NaN when the expression is empty, the index is out of range, or
-    the expression evaluates to a non-numeric value.
-    """
-    if not expression or i < 0 or i >= len(df):
-        return float("nan")
-    try:
-        tree = _parse_expression(expression)
-        value = _eval_node(tree, df, i, variables)
-        return _as_float(value)
-    except Exception:
-        return float("nan")
-
-
 def build_entry_signals(
     condition: str,
     df: pd.DataFrame,
@@ -988,6 +820,7 @@ class CompiledCondition:
     scalar_refs: tuple[str, ...]  # MACD, MACD_SIGNAL, VWAP — no period
     fast_path_safe: bool = True
     pattern_refs: tuple[str, ...] = ()
+    multi_param_refs: tuple[tuple[str, tuple[float, ...]], ...] = ()
 
     def evaluate(self, df: pd.DataFrame, i: int, variables: dict[str, float] | None = None) -> bool:
         if i < 0 or i >= len(df):
@@ -1031,12 +864,41 @@ class CompiledCondition:
             return False
 
 
-_PERIODIC_INDICATORS = {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}
+# Single-period indicators precomputed as <NAME>_<N> columns by
+# add_all_indicators(). The parser looks up NAME(period) → column.
+_PERIODIC_INDICATORS = {
+    "SMA", "EMA", "RSI",
+    "BB_UPPER", "BB_LOWER", "BB_MID",
+    # Phase 2 extended pack
+    "ADX", "DI_PLUS", "DI_MINUS",
+    "STOCH_K", "STOCH_D", "WILLR",
+    "ROC", "MOMENTUM", "CMO", "CCI", "TRIX", "DISPARITY",
+    "STDEV", "HV", "CHOPPINESS",
+    "BB_WIDTH", "BB_PCT_B",
+    "VOLUME_SMA", "VROC", "MFI", "CMF",
+    "AROON_UP", "AROON_DOWN", "AROON_OSC",
+    "HHV", "LLV",
+    "DON_UPPER", "DON_LOWER", "DON_MID",
+}
+
+# Multi-arg indicators precomputed under a suffix derived from every param
+# (e.g. SUPERTREND(10, 3.0) → SUPERTREND_10_3). Parser handles them in the
+# multi-arg branch of _evaluate_function.
+_MULTI_PARAM_INDICATORS = {
+    "SUPERTREND", "SUPERTREND_DIR",
+    "KC_UPPER", "KC_LOWER", "KC_MID",
+    "ATR_UPPER", "ATR_LOWER",
+    "PSAR",
+}
+
+# Scalar (no-period) indicators with a fixed column name.
 _SCALAR_INDICATORS = {
     "MACD", "MACD_SIGNAL", "MACD_HIST", "VWAP",
-    "PIVOT_P", "PIVOT_R1", "PIVOT_R2", "PIVOT_S1", "PIVOT_S2",
-    "SESSION_OPEN", "PREV_SESSION_CLOSE", "GAP_SIZE_PCT", "GAP_FILL_PCT",
-    "ENTRY_SEQUENCE_FIRED",
+    # Phase 2 extended pack
+    "OBV", "ACCDIST",
+    "PIVOT", "R1", "R2", "S1", "S2",
+    "MEDIAN_PRICE", "TYPICAL_PRICE", "WEIGHTED_CLOSE",
+    "HIGH_LOW", "TRUE_RANGE",
 }
 
 # Phase 6 — structural-pattern identifiers. Kept in sync with the keys of
@@ -1048,8 +910,11 @@ _PATTERN_IDENTIFIERS = {
     "IS_HIGHER_HIGH", "IS_LOWER_LOW",
     "IS_BULLISH_FVG", "IS_BEARISH_FVG",
     "IS_BOS_BULLISH", "IS_BOS_BEARISH",
-    "IS_BULLISH_ENGULFING", "IS_BEARISH_ENGULFING",
-    "IS_HAMMER", "IS_SHOOTING_STAR",
+    # Phase 4 — candlestick patterns.
+    "IS_HAMMER", "IS_HANGING_MAN",
+    "IS_ENGULFING", "IS_BULLISH_ENGULFING", "IS_BEARISH_ENGULFING",
+    "IS_PIN_BAR", "IS_DOJI",
+    "IS_MORNING_STAR", "IS_EVENING_STAR",
 }
 
 # Identifier name → array key in the prebuilt arrays dict.
@@ -1058,31 +923,33 @@ _IDENT_TO_ARRAY = {
     "VOL": "volume", "VOLUME": "volume",
     "VWAP": "VWAP", "MACD": "MACD",
     "MACD_SIGNAL": "MACD_SIGNAL", "MACD_HIST": "MACD_HIST",
+    # Phase 2 — scalar identifiers from the extended indicator pack.
+    "OBV": "OBV", "ACCDIST": "ACCDIST",
+    "PIVOT": "PIVOT", "R1": "R1", "R2": "R2", "S1": "S1", "S2": "S2",
+    "MEDIAN_PRICE": "MEDIAN_PRICE", "TYPICAL_PRICE": "TYPICAL_PRICE",
+    "WEIGHTED_CLOSE": "WEIGHTED_CLOSE", "HIGH_LOW": "HIGH_LOW",
+    "TRUE_RANGE": "TRUE_RANGE",
     # Phase 4 — reference symbol columns. build_arrays_from_df() only
     # populates these when the runner has merged in reference data.
     "REF_CLOSE": "REF_close", "REF_OPEN": "REF_open",
     "REF_HIGH":  "REF_high",  "REF_LOW":  "REF_low",
     "REF_VOL":   "REF_volume", "REF_VOLUME": "REF_volume",
-    # Pivot Points — set by indicators.pivot_points(); identifier name == column.
-    "PIVOT_P":   "PIVOT_P",   "PIVOT_R1":  "PIVOT_R1",  "PIVOT_R2": "PIVOT_R2",
-    "PIVOT_S1":  "PIVOT_S1",  "PIVOT_S2":  "PIVOT_S2",
-    # Gap diagnostics — set by indicators.gap_series().
-    "SESSION_OPEN":       "SESSION_OPEN",
-    "PREV_SESSION_CLOSE": "PREV_SESSION_CLOSE",
-    "GAP_SIZE_PCT":       "GAP_SIZE_PCT",
-    "GAP_FILL_PCT":       "GAP_FILL_PCT",
-    # Entry-sequence gate — set by runner when entry_sequence is configured.
-    "ENTRY_SEQUENCE_FIRED": "ENTRY_SEQUENCE_FIRED",
     # Phase 6 — pattern columns are 0/1 floats added to df by add_all_patterns
     # before simulation. Identifier name == column name.
     "IS_SWING_HIGH":  "IS_SWING_HIGH",  "IS_SWING_LOW":  "IS_SWING_LOW",
     "IS_HIGHER_HIGH": "IS_HIGHER_HIGH", "IS_LOWER_LOW":  "IS_LOWER_LOW",
     "IS_BULLISH_FVG": "IS_BULLISH_FVG", "IS_BEARISH_FVG": "IS_BEARISH_FVG",
     "IS_BOS_BULLISH": "IS_BOS_BULLISH", "IS_BOS_BEARISH": "IS_BOS_BEARISH",
-    "IS_BULLISH_ENGULFING": "IS_BULLISH_ENGULFING",
-    "IS_BEARISH_ENGULFING": "IS_BEARISH_ENGULFING",
-    "IS_HAMMER":            "IS_HAMMER",
-    "IS_SHOOTING_STAR":     "IS_SHOOTING_STAR",
+    # Phase 4 — candlestick patterns.
+    "IS_HAMMER":             "IS_HAMMER",
+    "IS_HANGING_MAN":        "IS_HANGING_MAN",
+    "IS_ENGULFING":          "IS_ENGULFING",
+    "IS_BULLISH_ENGULFING":  "IS_BULLISH_ENGULFING",
+    "IS_BEARISH_ENGULFING":  "IS_BEARISH_ENGULFING",
+    "IS_PIN_BAR":            "IS_PIN_BAR",
+    "IS_DOJI":               "IS_DOJI",
+    "IS_MORNING_STAR":       "IS_MORNING_STAR",
+    "IS_EVENING_STAR":       "IS_EVENING_STAR",
 }
 
 
@@ -1222,6 +1089,17 @@ def _evaluate_function_arr(
             return float("nan")
         return float(arr[i])
 
+    # Multi-param indicators (Supertrend, Keltner, ATR Bands, PSAR). Each
+    # arg becomes part of the column suffix using the same convention as
+    # the extended-indicator orchestrator.
+    if name in _MULTI_PARAM_INDICATORS and args and all(type(a) is NumberNode for a in args):
+        suffix = "_".join(_float_suffix(a.value) for a in args)
+        col = f"{name}_{suffix}"
+        arr = arrays.get(col)
+        if arr is None:
+            return float("nan")
+        return float(arr[i])
+
     if name == "PREV":
         if len(args) != 2:
             raise ParseError("PREV expects (FIELD or EXPR), offset.")
@@ -1259,9 +1137,6 @@ def _evaluate_function_arr(
 _FAST_PATH_UNSAFE_FUNCS = {
     "AVG", "MAX", "MIN", "STDEV", "ZSCORE", "RS",
     "OPENING_RANGE_HIGH", "OPENING_RANGE_LOW",
-    "IN_TIME_WINDOW", "VOL_SPIKE",
-    "IS_GAP_UP", "IS_GAP_DOWN",
-    "RETEST_FROM_ABOVE", "RETEST_FROM_BELOW",
 }
 
 
@@ -1271,6 +1146,7 @@ def _collect_refs(
     scalars: set[str],
     patterns: set[str],
     flags: dict[str, bool],
+    multi_param_refs: set[tuple[str, tuple[float, ...]]] | None = None,
 ) -> None:
     """Walk the AST: collect indicator refs, scalar refs, pattern refs, and
     detect any fast-path-unsafe func."""
@@ -1287,18 +1163,23 @@ def _collect_refs(
         elif node.name in _PERIODIC_INDICATORS:
             # Two-arg form e.g. SMA(CLOSE, 20) — can't be pre-served from a column.
             flags["fast_path_safe"] = False
+        elif node.name in _MULTI_PARAM_INDICATORS:
+            if multi_param_refs is not None and all(isinstance(a, NumberNode) for a in node.args):
+                multi_param_refs.add((node.name, tuple(float(a.value) for a in node.args)))
+            else:
+                flags["fast_path_safe"] = False
         for arg in node.args:
-            _collect_refs(arg, indicators, scalars, patterns, flags)
+            _collect_refs(arg, indicators, scalars, patterns, flags, multi_param_refs)
     elif isinstance(node, IdentifierNode):
         if node.name in _SCALAR_INDICATORS:
             scalars.add(node.name)
         elif node.name in _PATTERN_IDENTIFIERS:
             patterns.add(node.name)
     elif isinstance(node, (UnaryNode, NotNode)):
-        _collect_refs(getattr(node, "operand", None), indicators, scalars, patterns, flags)
+        _collect_refs(getattr(node, "operand", None), indicators, scalars, patterns, flags, multi_param_refs)
     elif isinstance(node, (BinaryNode, ComparisonNode, BooleanNode)):
-        _collect_refs(node.left, indicators, scalars, patterns, flags)
-        _collect_refs(node.right, indicators, scalars, patterns, flags)
+        _collect_refs(node.left, indicators, scalars, patterns, flags, multi_param_refs)
+        _collect_refs(node.right, indicators, scalars, patterns, flags, multi_param_refs)
 
 
 def compile_condition(condition: str) -> CompiledCondition | None:
@@ -1314,8 +1195,9 @@ def compile_condition(condition: str) -> CompiledCondition | None:
     indicators: set[IndicatorRef] = set()
     scalars: set[str] = set()
     patterns: set[str] = set()
+    multi_param_refs: set[tuple[str, tuple[float, ...]]] = set()
     flags: dict[str, bool] = {"fast_path_safe": True}
-    _collect_refs(tree, indicators, scalars, patterns, flags)
+    _collect_refs(tree, indicators, scalars, patterns, flags, multi_param_refs)
     return CompiledCondition(
         raw=condition,
         tree=tree,
@@ -1323,4 +1205,5 @@ def compile_condition(condition: str) -> CompiledCondition | None:
         scalar_refs=tuple(sorted(scalars)),
         fast_path_safe=flags["fast_path_safe"],
         pattern_refs=tuple(sorted(patterns)),
+        multi_param_refs=tuple(sorted(multi_param_refs)),
     )

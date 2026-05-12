@@ -446,9 +446,53 @@ class StrategyBuilder:
         # blocks entries that don't pass every gate on the most recent
         # CLOSED HTF bar.
         self.htf_rules: list[dict[str, Any]] = []
+        # Phase 8b — optional wall-clock intraday cutoff. Shape:
+        # {"exit_time": "15:15", "timezone": "Asia/Kolkata"}.
+        # When set, the strategy YAML carries this block and the simulator
+        # force-exits any open position once a bar's UTC time crosses the
+        # cutoff (and blocks new entries past that point).
+        self.time_exit: Optional[dict[str, Any]] = None
         self.risk_execution_config: dict[str, Any] = {}
         self.input_modification_requested: bool = False
         self.pending_input_modification_fields: list[str] = []
+        # Comprehensive snapshot of everything the SemanticExtractor captured
+        # from the user's strategy prompt. Populated when the six core
+        # inputs are complete and shown back to the user for confirmation
+        # before any signal planning runs. Persisted in the chat draft so
+        # it survives across turns.
+        self.prompt_summary: Optional[dict[str, Any]] = None
+        # Exit-side gaps the user never supplied. While non-empty, the flow
+        # refuses to plan signals and asks the user to fill them instead of
+        # defaulting silently.
+        self.missing_critical_inputs: list[dict[str, str]] = []
+        # Toggleable behavioural filters layered on top of the entry signal.
+        # Shape mirrors SignalFilterConfig.to_dict() — each entry is a
+        # {name, enabled, params, source, description} block. Filled in by
+        # _ensure_prompt_summary_built so users see filter state in the
+        # confirmation summary.
+        self.signal_filters: dict[str, Any] = {}
+        # Trade-management rule pack (Phase 3 #9-#17). Shape mirrors
+        # TradeManagementConfig.to_dict(). Rules marked required=True and
+        # not enabled are surfaced in missing_critical_inputs so the user
+        # is asked instead of defaulted.
+        self.trade_management: dict[str, Any] = {}
+        # Auto-generated opposite-side (SELL/Short) plan derived from the
+        # primary entry/exit conditions. Carried through the draft so the
+        # user can review both sides in the confirmation summary before
+        # building.
+        self.mirror_plan: dict[str, Any] = {}
+        # Trading-window warnings (Phase 3 #7) — list of dicts describing
+        # known unstable periods the user's session overlaps.
+        self.window_warnings: list[dict[str, Any]] = []
+        # Phase 4 — market-context filter pack (rules #18-#23). Shape
+        # mirrors MarketContextConfig.to_dict().
+        self.market_context: dict[str, Any] = {}
+        # Phase 4 — stock recommender output: top picks + justifications
+        # + the inferred strategy profile.
+        self.stock_recommendations: dict[str, Any] = {}
+        # Phase 4 — trade journal: chronological list of
+        # {kind, payload, …} entries (see app/planner/trade_journal.py).
+        self.trade_journal: list[dict[str, Any]] = []
 
     def _render_validation_message(self, code: Optional[str], facts: dict[str, Any], fallback: Optional[str]) -> Optional[str]:
         if code:
@@ -582,6 +626,21 @@ class StrategyBuilder:
         self.max_trade = None
         self.stop_loss = None
         self.take_profit = None
+        # Any change to the captured inputs invalidates the comprehensive
+        # prompt summary — we re-derive it on the next turn before asking
+        # the user to confirm again. Filter toggles are kept (user may have
+        # already chosen them) — only their defaults need refreshing.
+        self.prompt_summary = None
+        self.missing_critical_inputs = []
+        # Mirror plan + window warnings are derived from the primary plan
+        # and the user's session config; both get re-derived on each turn
+        # so they always reflect the current snapshot.
+        self.mirror_plan = {}
+        self.window_warnings = []
+        # Stock recommendations depend on the strategy profile — drop them
+        # so the next turn re-derives against the updated inputs. The
+        # journal stays as an audit trail across the session.
+        self.stock_recommendations = {}
 
     def _clear_core_user_input_field(self, field: str) -> None:
         if field == "symbol":
@@ -883,6 +942,14 @@ class StrategyBuilder:
                     cleaned.append({"timeframe": tf, "condition": cond})
             if cleaned:
                 self.htf_rules = cleaned
+        time_exit = plan.get("_time_exit")
+        if isinstance(time_exit, dict) and time_exit.get("exit_time"):
+            # Carry through only the public fields; the loader recomputes
+            # utc_minutes_of_day at strategy-load time.
+            self.time_exit = {
+                "exit_time": str(time_exit["exit_time"]).strip(),
+                "timezone":  str(time_exit.get("timezone") or "Asia/Kolkata").strip(),
+            }
         self._normalize_legacy_signal_conditions()
 
     def merge_preview(self, preview: dict):
@@ -955,6 +1022,27 @@ class StrategyBuilder:
             ]
         if not self.input_modification_requested:
             self.pending_input_modification_fields = []
+        if preview.get("prompt_summary") is not None:
+            self.prompt_summary = preview["prompt_summary"]
+        if isinstance(preview.get("missing_critical_inputs"), list):
+            self.missing_critical_inputs = [
+                dict(item) for item in preview["missing_critical_inputs"]
+                if isinstance(item, dict)
+            ]
+        if isinstance(preview.get("signal_filters"), dict):
+            self.signal_filters = dict(preview["signal_filters"])
+        if isinstance(preview.get("trade_management"), dict):
+            self.trade_management = dict(preview["trade_management"])
+        if isinstance(preview.get("mirror_plan"), dict):
+            self.mirror_plan = dict(preview["mirror_plan"])
+        if isinstance(preview.get("window_warnings"), list):
+            self.window_warnings = [dict(w) for w in preview["window_warnings"] if isinstance(w, dict)]
+        if isinstance(preview.get("market_context"), dict):
+            self.market_context = dict(preview["market_context"])
+        if isinstance(preview.get("stock_recommendations"), dict):
+            self.stock_recommendations = dict(preview["stock_recommendations"])
+        if isinstance(preview.get("trade_journal"), list):
+            self.trade_journal = [dict(e) for e in preview["trade_journal"] if isinstance(e, dict)]
         self._normalize_legacy_signal_conditions()
 
     def to_draft_json(
@@ -991,6 +1079,15 @@ class StrategyBuilder:
             "strategy_preset": self.strategy_preset,
             "input_modification_requested": self.input_modification_requested,
             "pending_input_modification_fields": self.pending_input_modification_fields,
+            "prompt_summary": self.prompt_summary,
+            "missing_critical_inputs": list(self.missing_critical_inputs or []),
+            "signal_filters": dict(self.signal_filters or {}),
+            "trade_management": dict(self.trade_management or {}),
+            "mirror_plan":      dict(self.mirror_plan or {}),
+            "window_warnings":  list(self.window_warnings or []),
+            "market_context":         dict(self.market_context or {}),
+            "stock_recommendations":  dict(self.stock_recommendations or {}),
+            "trade_journal":          list(self.trade_journal or []),
             "processing_status": processing_status or ("complete" if self.signal_plan else "in_progress"),
         }
 
@@ -1070,6 +1167,8 @@ class StrategyBuilder:
             strategy_block["reference_symbol"] = self.reference_symbol
         if isinstance(self.htf_rules, list) and self.htf_rules:
             strategy_block["htf"] = [dict(r) for r in self.htf_rules]
+        if isinstance(self.time_exit, dict) and self.time_exit.get("exit_time"):
+            strategy_block["time_exit"] = dict(self.time_exit)
         if entry_signals:
             strategy_block["entry_evaluation_mode"] = "registry"
             strategy_block["entry_signals"] = entry_signals

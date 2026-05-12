@@ -75,7 +75,7 @@ class CandleDiagnostic:
     entry_blocked_daily_cap: bool = False
     entry_blocked_max_trades: bool = False
     entry_blocked_htf: bool = False     # Phase 5: an HTF entry-gate failed
-    entry_blocked_rr: bool = False      # min_risk_reward gate rejected the entry
+    entry_blocked_time_exit: bool = False  # Phase 8b: past the time_exit cutoff
     exit_evaluated: bool = False
     exit_signal: bool = False
     stop_hit: bool = False
@@ -92,7 +92,7 @@ class CandleDiagnostic:
             "entry_blocked_daily_cap":  self.entry_blocked_daily_cap,
             "entry_blocked_max_trades": self.entry_blocked_max_trades,
             "entry_blocked_htf":        self.entry_blocked_htf,
-            "entry_blocked_rr":         self.entry_blocked_rr,
+            "entry_blocked_time_exit":  self.entry_blocked_time_exit,
             "exit_evaluated":           self.exit_evaluated,
             "exit_signal":              self.exit_signal,
             "stop_hit":                 self.stop_hit,
@@ -255,71 +255,6 @@ def _compute_initial_stop_long(
     return entry_price * (1.0 - fallback_pct / 100.0)
 
 
-def _compute_take_profit_long(
-    spec: dict | None,
-    *,
-    fallback_pct: float,
-    entry_price: float,
-    entry_index: int,
-    df: pd.DataFrame,
-    arrays: dict[str, np.ndarray],
-) -> tuple[float, str | None]:
-    """Return (take_profit_price, dynamic_trigger_kind) for a LONG entry.
-
-    Static targets (percent, level, expression) collapse to a fixed price set
-    once at entry — then the simulator's existing TP-touch check handles them.
-
-    Dynamic triggers (gap_fill) return (NaN, "gap_fill") so the per-bar loop
-    knows to evaluate GAP_FILL_PCT[i] ≥ threshold instead of price ≥ TP.
-
-    NaN-safe: if a level/expression can't be resolved (warmup, missing column)
-    we fall back to the legacy `fallback_pct` so a trade always has *some*
-    take-profit price.
-    """
-    if spec is None:
-        return entry_price * (1.0 + fallback_pct / 100.0), None
-
-    tp_type = spec.get("type")
-
-    if tp_type == "percent":
-        return entry_price * (1.0 + float(spec["pct"]) / 100.0), None
-
-    if tp_type == "level":
-        level_name = str(spec["level"]).upper()
-        col = arrays.get(level_name)
-        if col is None or entry_index >= len(col):
-            return entry_price * (1.0 + fallback_pct / 100.0), None
-        target = float(col[entry_index])
-        if target != target:           # NaN
-            return entry_price * (1.0 + fallback_pct / 100.0), None
-        if target <= entry_price:
-            # Level is below entry — useless as a long target. Fall back to %.
-            return entry_price * (1.0 + fallback_pct / 100.0), None
-        padding_pct = float(spec.get("padding_pct", 0.0))
-        # padding moves the TP a touch nearer to entry so a wick that just
-        # tags the level doesn't get missed.
-        return target * (1.0 - padding_pct / 100.0), None
-
-    if tp_type == "expression":
-        # Late import to avoid loader→simulator→conditions cycle at module load.
-        from engine.conditions import evaluate_condition_value
-        expr = str(spec["expression"])
-        try:
-            target = evaluate_condition_value(expr, df, entry_index)
-        except Exception:
-            target = float("nan")
-        if target != target or target <= entry_price:
-            return entry_price * (1.0 + fallback_pct / 100.0), None
-        padding_pct = float(spec.get("padding_pct", 0.0))
-        return float(target) * (1.0 - padding_pct / 100.0), None
-
-    if tp_type == "gap_fill":
-        # No static target; the bar loop checks GAP_FILL_PCT[i] each candle.
-        return float("nan"), "gap_fill"
-
-    return entry_price * (1.0 + fallback_pct / 100.0), None
-
-
 def _compute_trailing_floor_long(
     spec: dict | None,
     *,
@@ -435,14 +370,11 @@ def simulate_trades(
     # condition must pass on its most recently *closed* HTF bar before an
     # LTF entry signal is allowed to fill. Empty list = no HTF gating.
     htf_contexts: list[HtfContext] | None = None,
-    # Minimum risk:reward gate. When > 0, the simulator computes the trade's
-    # prospective RR (reward = TP_pct, risk = entry − initial SL) at signal
-    # time and skips entries whose ratio falls below this threshold.
-    min_risk_reward: float = 0.0,
-    # Dynamic take-profit spec. When None, the legacy take_profit_pct is used
-    # (TP = entry × (1 + tp_pct/100)). See _compute_take_profit_long for
-    # supported shapes.
-    take_profit_spec: dict[str, Any] | None = None,
+    # Phase 8b — wall-clock intraday cutoff. When set, the simulator force-
+    # exits any open trade once a bar's UTC time-of-day reaches the cutoff,
+    # and blocks new entries past that time. Loader pre-computes
+    # `utc_minutes_of_day` so this hot-path stays a plain int compare.
+    time_exit_spec: dict[str, Any] | None = None,
 ) -> tuple[list[Trade], list[dict]]:
     """
     Simulate trades on the supplied OHLCV DataFrame.
@@ -507,6 +439,19 @@ def simulate_trades(
     else:
         session_last_mask = np.zeros(0, dtype=bool)
 
+    # Phase 8b — pre-compute each bar's UTC minutes-of-day for the time_exit
+    # cutoff. Computed unconditionally so we don't branch in the hot loop;
+    # the per-bar check is gated by `time_exit_cutoff_minutes is not None`.
+    if isinstance(df.index, pd.DatetimeIndex) and n_rows > 0:
+        bar_utc_minutes = (df.index.hour * 60 + df.index.minute).to_numpy(dtype=np.int32)
+    else:
+        bar_utc_minutes = np.zeros(n_rows, dtype=np.int32)
+    time_exit_cutoff_minutes: int | None = (
+        int(time_exit_spec["utc_minutes_of_day"])
+        if isinstance(time_exit_spec, dict) and "utc_minutes_of_day" in time_exit_spec
+        else None
+    )
+
     # Choose evaluator path based on whether the compiled conditions are
     # fast-path-safe (no AVG/MAX/MIN/two-arg-SMA references).
     use_fast_entry = compiled_entry is not None and compiled_entry.fast_path_safe
@@ -531,10 +476,6 @@ def simulate_trades(
     # used unchanged.
     _initial_stop_price: float = 0.0
     _trailing_floor:     float = float("-inf")
-    # Dynamic TP state. _take_profit_price is the fixed target (NaN for
-    # dynamic gap_fill mode); _tp_trigger_kind is "gap_fill" or None.
-    _take_profit_price:  float = 0.0
-    _tp_trigger_kind:    str | None = None
 
     # Per-day state (for intraday circuit-breakers).
     # Day key is an int ordinal (days since epoch) — way faster than `date` objects.
@@ -613,66 +554,45 @@ def simulate_trades(
                 # 1h trend bullish AND 15m entry trigger" without leaking
                 # future HTF data into the LTF decision.
                 htf_blocked = bool(htf_contexts) and not all_htf_gates_pass(htf_contexts, i)
+                # Phase 8b: block new entries past the time_exit cutoff. No
+                # point filling a trade that would immediately be force-closed.
+                time_exit_blocked = (
+                    time_exit_cutoff_minutes is not None
+                    and int(bar_utc_minutes[i]) >= time_exit_cutoff_minutes
+                )
                 diag.entry_blocked_daily_cap   = cap_blocked
                 diag.entry_blocked_max_trades  = trades_blocked
                 diag.entry_blocked_htf         = htf_blocked
+                diag.entry_blocked_time_exit   = time_exit_blocked
 
                 # Intraday entries must be fillable within the same session.
-                if not cap_blocked and not trades_blocked and not htf_blocked and not is_session_last_bar:
+                if (not cap_blocked and not trades_blocked and not htf_blocked
+                        and not time_exit_blocked and not is_session_last_bar):
                     # Fill at next bar's open price (realistic execution)
                     next_open = float(open_arr[i + 1])
-                    prospective_entry = _apply_entry_costs(
+                    entry_price = _apply_entry_costs(
                         next_open, slippage_bps, commission_bps, stt_entry_pct
                     )
-                    prospective_entry_index = i + 1
-                    # Compute the initial stop up-front so the RR gate can use
-                    # the *real* SL price (structural/ATR specs not just %).
-                    prospective_stop = _compute_initial_stop_long(
-                        stop_loss_spec,
-                        fallback_pct=stop_loss_pct,
-                        entry_price=prospective_entry,
-                        entry_index=prospective_entry_index,
-                        arrays=arrays,
-                        low_arr=low_arr,
-                        day_ordinals=day_ordinals,
-                    )
-
-                    # Min RR gate: skip entries whose reward:risk falls below
-                    # the configured threshold. Reward is fixed by take_profit_pct;
-                    # risk is the % drop from entry to initial SL.
-                    rr_blocked = False
-                    if min_risk_reward > 0.0 and prospective_entry > 0:
-                        risk_pct = (prospective_entry - prospective_stop) / prospective_entry * 100.0
-                        if risk_pct <= 0:
-                            rr_blocked = True
-                        else:
-                            rr = take_profit_pct / risk_pct
-                            if rr < min_risk_reward:
-                                rr_blocked = True
-                    diag.entry_blocked_rr = rr_blocked
-
-                    if rr_blocked:
-                        diagnostics.append(diag)
-                        continue
-
-                    entry_price = prospective_entry
-                    entry_index = prospective_entry_index
+                    entry_index = i + 1
                     entry_date  = str(timestamps_iso[i + 1])
                     in_trade    = True
                     diag.in_trade = True
                     # Reset MAE/MFE accumulators for this new trade
                     _trade_min_low  = next_open
                     _trade_max_high = next_open
-                    _initial_stop_price = prospective_stop
-                    _trailing_floor = float("-inf")
-                    _take_profit_price, _tp_trigger_kind = _compute_take_profit_long(
-                        take_profit_spec,
-                        fallback_pct=take_profit_pct,
+                    # Phase 3: lock in the initial stop and reset trailing.
+                    # Computed once here at entry so we don't re-evaluate
+                    # opening_range / ATR-at-entry on every bar.
+                    _initial_stop_price = _compute_initial_stop_long(
+                        stop_loss_spec,
+                        fallback_pct=stop_loss_pct,
                         entry_price=entry_price,
                         entry_index=entry_index,
-                        df=df,
                         arrays=arrays,
+                        low_arr=low_arr,
+                        day_ordinals=day_ordinals,
                     )
+                    _trailing_floor = float("-inf")
                     logger.debug(
                         "Entered trade | symbol=%s signal_index=%s entry_index=%s entry_price=%.4f initial_stop=%.4f",
                         symbol, i, entry_index, entry_price, _initial_stop_price,
@@ -716,28 +636,10 @@ def simulate_trades(
         # in that case the stop fires *this* bar at the floor price (worst-case
         # fill, mirrors the static-SL code path below).
         stop_price = max(_initial_stop_price, _trailing_floor)
-
-        # Dynamic TP: gap_fill mode triggers on a column value reaching a %
-        # threshold rather than price ≥ TP. Static specs (percent/level/
-        # expression) reduce to a fixed price computed once at entry.
-        if _tp_trigger_kind == "gap_fill":
-            tp_threshold = float(take_profit_spec.get("percent", 100.0))
-            gap_fill_col = arrays.get("GAP_FILL_PCT")
-            if gap_fill_col is not None and i < len(gap_fill_col):
-                current_fill = float(gap_fill_col[i])
-                take_profit_hit = (
-                    current_fill == current_fill          # not NaN
-                    and current_fill >= tp_threshold
-                )
-            else:
-                take_profit_hit = False
-            # For accounting we still need *some* price; use current close.
-            take_profit_price = close_price if take_profit_hit else entry_price * (1 + take_profit_pct / 100.0)
-        else:
-            take_profit_price = _take_profit_price
-            take_profit_hit = high_price >= take_profit_price
+        take_profit_price = entry_price * (1 + take_profit_pct / 100.0)
 
         stop_hit        = low_price  <= stop_price
+        take_profit_hit = high_price >= take_profit_price
         # A trailing-stop exit and a static-SL exit are functionally the same
         # mechanic, but the user wants to know which one fired in the report.
         is_trailing_exit = stop_hit and _trailing_floor > _initial_stop_price
@@ -812,6 +714,22 @@ def simulate_trades(
                     )
                     exit_date = timestamps_iso[i + 1]
                 exit_reason = "MAX_HOLDING"
+
+            # Phase 8b — wall-clock cutoff. The FIRST bar whose timestamp
+            # crosses the cutoff is the exit bar. We use this bar's close
+            # (rather than next bar's open) so the cutoff is honored
+            # strictly even when the bar at the cutoff is the last bar of
+            # the data window. Conservative same-as-SESSION_END convention.
+            if (
+                exit_price is None
+                and time_exit_cutoff_minutes is not None
+                and int(bar_utc_minutes[i]) >= time_exit_cutoff_minutes
+            ):
+                exit_price = _apply_exit_costs(
+                    close_price, slippage_bps, commission_bps, stt_exit_pct
+                )
+                exit_date = timestamps_iso[i]
+                exit_reason = "TIME_EXIT"
 
             if exit_price is None and is_session_last_bar:
                 exit_price = _apply_exit_costs(
@@ -915,11 +833,11 @@ def _summarise_diagnostics(diagnostics: list[CandleDiagnostic]) -> dict[str, int
         "entry_blocked_daily_cap":   sum(1 for d in diagnostics if d.entry_blocked_daily_cap),
         "entry_blocked_max_trades":  sum(1 for d in diagnostics if d.entry_blocked_max_trades),
         "entry_blocked_htf":     sum(1 for d in diagnostics if d.entry_blocked_htf),
-        "entry_blocked_rr":      sum(1 for d in diagnostics if d.entry_blocked_rr),
-        "rr_blocks":             sum(1 for d in diagnostics if d.entry_blocked_rr),
+        "entry_blocked_time_exit": sum(1 for d in diagnostics if d.entry_blocked_time_exit),
         "daily_cap_blocks":      sum(1 for d in diagnostics if d.entry_blocked_daily_cap),
         "max_trades_blocks":     sum(1 for d in diagnostics if d.entry_blocked_max_trades),
         "htf_blocks":            sum(1 for d in diagnostics if d.entry_blocked_htf),
+        "time_exit_blocks":      sum(1 for d in diagnostics if d.entry_blocked_time_exit),
         "exit_signals":          sum(1 for d in diagnostics if d.exit_signal),
         "stop_hits":             sum(1 for d in diagnostics if d.stop_hit),
         "tp_hits":               sum(1 for d in diagnostics if d.tp_hit),
