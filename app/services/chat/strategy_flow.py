@@ -244,11 +244,6 @@ def build_collect_user_input_reply(
         )
 
     builder.apply_defaults()
-    summary_text: str | None = None
-    if isinstance(builder.prompt_summary, dict):
-        candidate = builder.prompt_summary.get("text")
-        if isinstance(candidate, str) and candidate.strip():
-            summary_text = candidate.strip()
     return compose_response(
         "workflow.input_summary_confirmation",
         asset=_asset_label(builder),
@@ -257,14 +252,6 @@ def build_collect_user_input_reply(
         sentiment=builder.sentiment,
         experience=builder.experience,
         goal=builder.goal,
-        summary_text=summary_text,
-    )
-
-
-def build_missing_critical_inputs_reply(builder: StrategyBuilder) -> str:
-    return compose_response(
-        "workflow.missing_critical_inputs",
-        missing_items=list(builder.missing_critical_inputs or []),
     )
 
 
@@ -447,3 +434,495 @@ def build_final_strategy_payload(
         },
         "success": True,
     }
+
+
+# ── Phase 9 — discovery / dynamic-symbol replies ────────────────────────────
+
+
+def build_discovery_no_match_reply(
+    asset_label_hint: str = "stocks",
+    *,
+    parameters_used: dict | None = None,
+    conditions_used: list | None = None,
+    scan_diagnostics: dict | None = None,
+) -> str:
+    """The scanner found zero candidates matching the preset's discovery
+    conditions. Surface ENOUGH context that the user can take an
+    informed next step rather than guessing.
+
+    Phase 9h — surface the active threshold summary.
+    Phase 9k — list the parsed primitives so the user sees the exact
+               constraints applied (no "you also have to be near 52w
+               high" surprise).
+    Phase 9m — when scan_diagnostics is supplied (asof, scanned_count,
+               failed_fetches, fail_counts), use them to:
+                 • show how many stocks were checked and on what asof
+                   date (so the user can spot stale data fast),
+                 • show per-condition failure counts (e.g. "18/19
+                   stocks failed: volume ≥ 1.2× the 20-day average"),
+                 • generate suggestions tailored to the active
+                   conditions only (e.g. "lower the volume multiplier"
+                   when only volume_spike is active — no more
+                   misleading "relax 52-week proximity" text when no
+                   52-week clause was applied).
+    """
+    # Phase 9n — if the universe is empty because EVERY fetch failed,
+    # the constraint-relaxation suggestions are misleading (the user's
+    # thresholds were never even checked). Detect this case and emit a
+    # totally different message focused on the infrastructure error.
+    if _is_total_fetch_failure(scan_diagnostics):
+        return _build_fetch_failure_reply(asset_label_hint, scan_diagnostics)
+
+    lines = [f"No {asset_label_hint} matched the strategy's discovery criteria today."]
+
+    # 1. What did we actually look for?
+    primitive_lines = _primitive_descriptions(conditions_used)
+    if primitive_lines:
+        lines.append("Constraints applied: " + "; ".join(primitive_lines) + ".")
+    elif parameters_used:
+        thresholds = _format_threshold_summary(parameters_used)
+        if thresholds:
+            lines.append(f"Thresholds used: {thresholds}.")
+
+    # 2. Diagnostic snapshot (asof + universe size + per-condition fails)
+    if scan_diagnostics:
+        diag_line = _format_scan_diagnostics(scan_diagnostics, conditions_used or [])
+        if diag_line:
+            lines.append(diag_line)
+
+    # 3. Concrete next steps
+    lines.append("You can either:")
+    for hint in _build_relax_hints(conditions_used, parameters_used, scan_diagnostics):
+        lines.append(f"  • {hint}")
+
+    return "\n".join(lines)
+
+
+def _is_total_fetch_failure(scan_diagnostics: dict | None) -> bool:
+    """True when EVERY universe fetch failed (no data reached the
+    scanner, so threshold-relaxation hints would be misleading)."""
+    if not scan_diagnostics:
+        return False
+    scanned = scan_diagnostics.get("scanned_count") or 0
+    failed = scan_diagnostics.get("failed_fetches") or 0
+    fetch_errors = scan_diagnostics.get("fetch_errors") or {}
+    if scanned <= 0:
+        return False
+    return failed >= scanned and bool(fetch_errors)
+
+
+def _build_fetch_failure_reply(
+    asset_label_hint: str, scan_diagnostics: dict,
+) -> str:
+    """User-facing message for the case where the scanner couldn't
+    fetch ANY market data. Quotes a sample error so the user / ops
+    can take an informed next step (retry, check service health,
+    file a ticket) instead of fiddling with thresholds that aren't
+    the problem."""
+    scanned = int(scan_diagnostics.get("scanned_count") or 0)
+    fetch_errors = scan_diagnostics.get("fetch_errors") or {}
+    sample_symbol = next(iter(fetch_errors), None)
+    sample_error = fetch_errors.get(sample_symbol) if sample_symbol else None
+
+    lines = [
+        f"I couldn't scan any {asset_label_hint} right now — every "
+        f"market-data fetch failed.",
+    ]
+    if scanned:
+        lines.append(f"Tried {scanned} symbols; none returned OHLCV records.")
+    if sample_symbol and sample_error:
+        lines.append(f"Example error ({sample_symbol}): {sample_error}")
+    asof = scan_diagnostics.get("asof_iso")
+    if asof:
+        date = str(asof).split("T", 1)[0] if "T" in str(asof) else asof
+        lines.append(f"As-of: {date}.")
+    lines.append("This is an infrastructure issue, not a strategy problem. You can either:")
+    lines.append("  • Wait a minute and retry — transient network or rate-limit issues clear quickly")
+    lines.append("  • Pin a specific stock manually so the scanner is bypassed")
+    lines.append("  • Switch to a different strategy preset that doesn't run discovery")
+    lines.append("  • Report the example error above if it persists for more than a few minutes")
+    return "\n".join(lines)
+
+
+def _primitive_descriptions(conditions_used: list | None) -> list[str]:
+    if not conditions_used:
+        return []
+    try:
+        from app.services.discovery.primitives import primitive_descriptions
+        return primitive_descriptions(conditions_used) or []
+    except Exception:
+        return []
+
+
+def _format_scan_diagnostics(diag: dict, conditions_used: list) -> str:
+    """Multi-line diagnostic summary so the user can see exactly which
+    stocks were scanned, which failed which step, and (if available)
+    which were fetched but rejected by which condition. Replaces the
+    earlier one-line "Scanned N stocks (M excluded ...)" black box.
+    """
+    asof = diag.get("asof_iso")
+    scanned = diag.get("scanned_count")
+    failed_fetches = diag.get("failed_fetches") or 0
+    fail_counts = diag.get("fail_counts") or {}
+    fetch_errors = diag.get("fetch_errors") or {}
+    scanned_symbols: list[str] = list(diag.get("scanned_symbols") or [])
+    failed_fetch_symbols: list[str] = list(diag.get("failed_fetch_symbols") or [])
+    failed_condition_by_symbol: dict[str, str] = dict(
+        diag.get("failed_condition_by_symbol") or {}
+    )
+
+    lines: list[str] = []
+
+    # Headline: how many, on what date.
+    if isinstance(scanned, int) and scanned > 0:
+        headline = f"Scanned {scanned} stock{'s' if scanned != 1 else ''}"
+        if asof:
+            date = str(asof).split("T", 1)[0] if "T" in str(asof) else asof
+            headline += f" (as of {date})"
+        headline += "."
+        lines.append(headline)
+
+    # The actual universe — names so the user isn't guessing.
+    if scanned_symbols:
+        lines.append(f"  Universe: {', '.join(_pretty_symbols(scanned_symbols))}.")
+
+    # Fetch failures — show every symbol that couldn't be fetched, not
+    # just one example. fetch_errors still dedups by error text so we
+    # can quote a sample error message.
+    if failed_fetch_symbols:
+        sample_error = next(iter(fetch_errors.values()), None) if fetch_errors else None
+        line = (
+            f"  Couldn't fetch data ({len(failed_fetch_symbols)}): "
+            f"{', '.join(_pretty_symbols(failed_fetch_symbols))}."
+        )
+        if sample_error:
+            line += f" Example error: {sample_error}"
+        lines.append(line)
+    elif failed_fetches:
+        # Counter says fetches failed but no symbol list (older diagnostics).
+        # Fall back to the example-only line.
+        example = next(iter(fetch_errors.values()), None) if fetch_errors else None
+        line = f"  {failed_fetches} stocks excluded due to data fetch errors."
+        if example:
+            line += f" Example: {example}"
+        lines.append(line)
+
+    # Per-condition breakdown: show which stocks failed each step,
+    # not just the aggregate count. Limits each list to a few names
+    # so the message stays scannable when the universe is large.
+    if failed_condition_by_symbol:
+        per_cond: dict[str, list[str]] = {}
+        for sym, cond in failed_condition_by_symbol.items():
+            per_cond.setdefault(cond, []).append(sym)
+        # Sort by descending fail-count so the binding constraint
+        # appears first.
+        for cond, syms in sorted(per_cond.items(), key=lambda kv: -len(kv[1])):
+            desc = _condition_to_description(cond, conditions_used) or cond
+            lines.append(
+                f"  Failed «{desc}» ({len(syms)}): "
+                f"{', '.join(_pretty_symbols(syms))}."
+            )
+    else:
+        # No per-symbol breakdown available (older scan or all fetches
+        # failed) — fall back to the aggregate "worst condition" line.
+        worst = _worst_failing_condition(fail_counts, conditions_used)
+        if worst:
+            worst_cond, worst_count = worst
+            worst_desc = _condition_to_description(worst_cond, conditions_used)
+            if worst_count > 0:
+                lines.append(f"  Most stocks ({worst_count}) failed: {worst_desc}.")
+
+    return "\n".join(lines)
+
+
+def _pretty_symbols(symbols: list[str]) -> list[str]:
+    """Strip the .NS exchange suffix from a list of symbols so the
+    user sees "TCS, INFY" instead of "TCS.NS, INFY.NS". Preserves
+    order and uniqueness; non-string entries are skipped.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for sym in symbols:
+        if not isinstance(sym, str):
+            continue
+        clean = sym.split(".", 1)[0] if "." in sym else sym
+        if clean and clean not in seen:
+            out.append(clean)
+            seen.add(clean)
+    return out
+
+
+def _worst_failing_condition(
+    fail_counts: dict, conditions_used: list,
+) -> tuple[str, int] | None:
+    """Pick the condition that the most stocks failed at. Returns
+    (condition_string, count) or None."""
+    if not isinstance(fail_counts, dict) or not fail_counts:
+        return None
+    items = [(k, int(v)) for k, v in fail_counts.items() if isinstance(v, (int, float))]
+    if not items:
+        return None
+    worst = max(items, key=lambda kv: kv[1])
+    if worst[1] <= 0:
+        return None
+    return worst
+
+
+def _condition_to_description(condition: str, conditions_used: list) -> str:
+    """Map an AST condition string back to its human description if
+    possible. Falls back to the raw condition string otherwise."""
+    if not conditions_used:
+        return condition
+    try:
+        from app.services.discovery.primitives import (
+            primitive_descriptions, render_conditions,
+        )
+    except Exception:
+        return condition
+    try:
+        rendered = render_conditions(conditions_used)
+    except Exception:
+        return condition
+    descs = _primitive_descriptions(conditions_used)
+    for r, d in zip(rendered, descs):
+        if r.strip() == condition.strip():
+            return d
+    return condition
+
+
+def _build_relax_hints(
+    conditions_used: list | None,
+    parameters_used: dict | None,
+    scan_diagnostics: dict | None,
+) -> list[str]:
+    """Generate next-step suggestions based ONLY on the constraints
+    actually applied. No more "relax 52-week proximity" when 52-week
+    isn't an active constraint."""
+    hints: list[str] = []
+    names = (
+        [str(c.get("name") or "") for c in conditions_used if isinstance(c, dict)]
+        if conditions_used else []
+    )
+
+    has_volume   = "volume_spike" in names
+    has_near_high = "near_52w_high" in names
+    has_near_low  = "near_52w_low"  in names
+    has_above_high = "above_52w_high" in names
+    has_below_low  = "below_52w_low"  in names
+    has_rsi_above  = "rsi_above"  in names
+    has_rsi_below  = "rsi_below"  in names
+    has_pullback = ("shallow_pullback_long" in names
+                    or "shallow_pullback_short" in names)
+
+    if has_volume:
+        # Suggest a lower multiplier.
+        cur = _condition_param_value(conditions_used, "volume_spike", "multiplier", 2.0)
+        suggestion = max(1.0, round(cur - 0.3, 1))
+        if suggestion < cur:
+            hints.append(
+                f"Lower the volume threshold (e.g. drop from {cur:g}× to {suggestion:g}×)"
+            )
+    if has_near_high or has_near_low:
+        window_phrase = _active_window_phrase(parameters_used)
+        hints.append(
+            f"Widen the {window_phrase} proximity (e.g. from 2% to 5%)"
+        )
+    if has_above_high or has_below_low:
+        hints.append(
+            "Switch the breakout to proximity (`near 52-week high` instead of `breaking above`)"
+        )
+    if has_rsi_above:
+        cur = _condition_param_value(conditions_used, "rsi_above", "threshold", 60.0)
+        suggestion = max(40.0, cur - 10.0)
+        if suggestion < cur:
+            hints.append(
+                f"Lower the RSI threshold (e.g. drop from {cur:g} to {suggestion:g})"
+            )
+    if has_rsi_below:
+        cur = _condition_param_value(conditions_used, "rsi_below", "threshold", 40.0)
+        suggestion = min(60.0, cur + 10.0)
+        if suggestion > cur:
+            hints.append(
+                f"Raise the RSI threshold (e.g. lift from {cur:g} to {suggestion:g})"
+            )
+    if has_pullback:
+        hints.append("Drop the pullback constraint (some setups don't pull back at all)")
+
+    # Generic fallback when we can't propose anything specific (e.g.
+    # only above_vwap is active and there's no numeric tunable).
+    if not hints:
+        hints.append("Loosen the constraints — type a new prompt with relaxed thresholds")
+
+    # Always include these last two so the user has multiple paths.
+    hints.append("Switch to a different strategy preset")
+    hints.append("Pin a specific stock manually so the scanner is bypassed")
+
+    # Stale data hint when the asof date is more than 3 days old.
+    if scan_diagnostics:
+        asof = scan_diagnostics.get("asof_iso")
+        if asof and _asof_looks_stale(asof):
+            hints.insert(
+                0,
+                f"The latest data the scanner saw is dated {str(asof).split('T', 1)[0]} — "
+                "it may be stale; try again later if the market is closed",
+            )
+
+    return hints
+
+
+def _condition_param_value(
+    conditions_used: list, name: str, param: str, default: float,
+) -> float:
+    """Pull the user's param value for a primitive (or the default
+    when not specified)."""
+    for c in conditions_used or []:
+        if isinstance(c, dict) and c.get("name") == name:
+            params = c.get("params") if isinstance(c.get("params"), dict) else {}
+            try:
+                return float(params.get(param, default))
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
+def _asof_looks_stale(asof_iso: str) -> bool:
+    """True when the asof date is more than 3 calendar days old. Used
+    to surface a 'data may be stale' hint in the no-match reply."""
+    try:
+        from datetime import datetime, timezone, timedelta
+        text = str(asof_iso).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return (now - dt) > timedelta(days=3)
+    except Exception:
+        return False
+
+
+def _active_window_phrase(parameters_used: dict | None) -> str:
+    """Return the window phrase ("52-week", "20-day", …) implied by
+    the active discovery parameters; defaults to "52-week" so the
+    pre-9i hint phrasing is preserved when no params are supplied."""
+    if parameters_used:
+        raw = parameters_used.get("lookback_window_bars")
+        if raw is not None:
+            try:
+                bars = int(float(raw))
+            except (TypeError, ValueError):
+                bars = 252
+            if bars and bars != 252:
+                return _format_window_phrase(bars)
+    return "52-week"
+
+
+def _format_threshold_summary(params: dict) -> str:
+    """Render a human-readable summary of the discovery thresholds in
+    use. Translates the internal factor params back to percentages so
+    the user sees the same units they typed.
+
+    Phase 9i — the high/low window is also tunable. When the user
+    chose a non-default window, the percentages reference the same
+    window phrase (e.g. "within 5% of 20-day high") so the message
+    matches the actual scan."""
+    window_phrase = "52-week"
+    window_bars_raw = params.get("lookback_window_bars")
+    if window_bars_raw is not None:
+        try:
+            bars = int(float(window_bars_raw))
+        except (TypeError, ValueError):
+            bars = 252
+        if bars and bars != 252:
+            window_phrase = _format_window_phrase(bars)
+    parts: list[str] = []
+    vm = params.get("volume_multiplier")
+    if vm is not None:
+        parts.append(f"volume ≥ {float(vm):g}× the 20-day average")
+    hi = params.get("near_52w_high_factor")
+    if hi is not None:
+        pct = max(0.0, (1.0 - float(hi)) * 100.0)
+        parts.append(f"within {pct:g}% of {window_phrase} high")
+    lo = params.get("near_52w_low_factor")
+    if lo is not None:
+        pct = max(0.0, (float(lo) - 1.0) * 100.0)
+        parts.append(f"within {pct:g}% of {window_phrase} low")
+    return "; ".join(parts)
+
+
+def _format_window_phrase(bars: int) -> str:
+    """Render a bar count as a user-friendly window phrase. Mirrors the
+    helper in app.services.discovery.orchestrator (kept duplicated to
+    avoid a chat→discovery import cycle)."""
+    if bars % 252 == 0 and bars >= 252:
+        years = bars // 252
+        return f"{years}-year" if years > 1 else "1-year"
+    if bars % 21 == 0 and bars >= 42:
+        months = bars // 21
+        return f"{months}-month"
+    if bars % 5 == 0 and bars >= 25:
+        weeks = bars // 5
+        return f"{weeks}-week"
+    return f"{bars}-day"
+
+
+def build_discovery_choice_prompt(scan_result: dict) -> str:
+    """The scanner returned multiple candidates. Format them + the tie-break
+    options so the user can pick a method.
+
+    `scan_result` is the dict produced by ScanResult.to_dict() (kept as a
+    dict here so this builder doesn't need to import the discovery types)."""
+    candidates = scan_result.get("candidates") or []
+    options    = scan_result.get("tie_break_options") or []
+
+    if not candidates:
+        return "The scanner returned no candidates. Try different criteria."
+    if not options:
+        return (
+            f"Found {len(candidates)} candidates but no tie-break options were "
+            "configured for this preset. Please pick a stock manually."
+        )
+
+    cand_lines = []
+    for c in candidates:
+        sym  = c.get("symbol", "?")
+        name = c.get("display_name") or sym
+        m    = c.get("metrics") or {}
+        # Pick a couple of metrics to surface in-line so the user has
+        # context. Falling back to "—" for any that didn't compute.
+        rv   = m.get("relative_volume")
+        d52  = m.get("distance_to_52w_high_pct")
+        rsi  = m.get("rsi_14")
+        bits = []
+        if rv is not None and rv == rv:        # not NaN
+            bits.append(f"vol×{rv:.1f}")
+        if d52 is not None and d52 == d52:
+            bits.append(f"−{d52:.1f}% from 52w high")
+        if rsi is not None and rsi == rsi:
+            bits.append(f"RSI {rsi:.0f}")
+        suffix = f" ({', '.join(bits)})" if bits else ""
+        cand_lines.append(f"  • {name} ({sym}){suffix}")
+    cand_block = "\n".join(cand_lines)
+
+    opt_lines = []
+    for i, o in enumerate(options, start=1):
+        label = o.get("label") or o.get("method", "?")
+        desc  = o.get("description") or ""
+        opt_lines.append(f"  {i}. {label}" + (f" — {desc}" if desc else ""))
+    opt_block = "\n".join(opt_lines)
+
+    return (
+        f"I found {len(candidates)} stocks matching the strategy criteria today:\n"
+        f"{cand_block}\n\n"
+        "How should I pick one? Reply with the number or method name:\n"
+        f"{opt_block}"
+    )
+
+
+def build_discovery_resolved_reply(symbol: str, display_name: str, method: str) -> str:
+    """Confirmation message after the user picks a tie-break method and we
+    resolve to a single symbol."""
+    pretty_method = method.replace("_", " ")
+    return (
+        f"Picked **{display_name}** (`{symbol}`) using *{pretty_method}*. "
+        "Continuing with the strategy build."
+    )

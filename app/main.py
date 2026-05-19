@@ -5,6 +5,20 @@ Stretus FastAPI application factory.
 
 Startup loads the structured KB (app/kb) into memory. No ChromaDB / embeddings.
 """
+# quant_engine/ has 26 internal cross-imports of the form `from engine.*`.
+# They resolve only when `quant_engine/` is itself on sys.path. tests/conftest.py
+# does this for pytest; production Uvicorn startup needs the same injection or
+# any code path touching the discovery scanner / backtest engine fails with
+# `ModuleNotFoundError: No module named 'engine'`.
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+for _candidate in (_REPO_ROOT, _REPO_ROOT / "quant_engine"):
+    _candidate_str = str(_candidate)
+    if _candidate_str not in sys.path:
+        sys.path.insert(0, _candidate_str)
+
 from contextlib import asynccontextmanager
 import logging
 import os

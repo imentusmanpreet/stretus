@@ -3,6 +3,7 @@ category: trend
 direction: bullish
 kind: threshold
 roles: [entry_filter]
+tags: [relative_strength]
 formula: "RS({window}) > {threshold}"
 description: "Stock has outperformed the reference benchmark over the last N bars (relative strength > threshold). Requires reference_symbol on the strategy."
 

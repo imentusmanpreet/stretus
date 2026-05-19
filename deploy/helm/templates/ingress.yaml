@@ -11,7 +11,9 @@ metadata:
     nginx.ingress.kubernetes.io/use-forwarded-headers: "true"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    {{- if .Values.ingress.certManagerIssuer }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.certManagerIssuer }}
+    {{- end }}
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

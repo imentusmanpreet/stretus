@@ -20,7 +20,7 @@ class StubLLM:
         return json.dumps(self._payload)
 
 
-def _builder(symbol="hdfc", timeframe="1m", sentiment="bullish",
+def _builder(symbol="hdfc bank", timeframe="1m", sentiment="bullish",
              experience="beginner", objective="positional",
              goal="short profit and quick trades"):
     return SimpleNamespace(

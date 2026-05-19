@@ -19,12 +19,12 @@ services:
       APP_DEBUG: ${APP_DEBUG:-true}
       # Inside Docker the DB host is the service name, not localhost
       POSTGRES_HOST: stretus-postgres
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_PORT: "5432"
       POSTGRES_DB: ${POSTGRES_DB:-stretus}
       POSTGRES_USER: ${POSTGRES_USER:-stretus}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stretus_db}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-stretus}
-      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-stretus}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:5432/${POSTGRES_DB:-stretus}
+      DATABASE_URL_SYNC: postgresql+psycopg2://${POSTGRES_USER:-stretus}:${POSTGRES_PASSWORD:-stretus_db}@stretus-postgres:5432/${POSTGRES_DB:-stretus}
       LLM_PROVIDER: ${LLM_PROVIDER:-auto}
       USE_GROQ: ${USE_GROQ:-false}
       GROQ_API_KEY: ${GROQ_API_KEY:-}

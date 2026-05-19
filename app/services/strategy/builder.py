@@ -452,47 +452,59 @@ class StrategyBuilder:
         # force-exits any open position once a bar's UTC time crosses the
         # cutoff (and blocks new entries past that point).
         self.time_exit: Optional[dict[str, Any]] = None
+        # Phase 9 — discovery state for "dynamic" presets that don't take a
+        # user-supplied symbol. Lifecycle:
+        #   1. Preset has a discovery: block AND user hasn't given a symbol →
+        #      orchestrator runs the scan.
+        #   2. Result single: discovered_symbol + symbol set; flow continues.
+        #   3. Result none: discovery_no_match=True; chat asks user to
+        #      relax criteria.
+        #   4. Result multiple: discovery_pending=True, candidates +
+        #      tie_break_options stored; chat asks user to pick a method;
+        #      next user reply is interpreted as the tie-break choice.
+        self.discovery_pending:           bool                   = False
+        self.discovery_no_match:          bool                   = False
+        self.discovery_candidates:        Optional[list[dict]]   = None
+        self.discovery_tie_break_options: Optional[list[dict]]   = None
+        self.discovery_chosen_method:     Optional[str]          = None
+        self.discovered_symbol:           Optional[str]          = None
+        # Phase 9h — user-typed tunables that override the preset's
+        # discovery `parameters` defaults (e.g. "volume spike 1.2x" sets
+        # {"volume_multiplier": 1.2}). Populated by the chat layer
+        # before maybe_dispatch_discovery, consumed by the orchestrator.
+        self.discovery_parameter_overrides: Optional[dict[str, float]] = None
+        # Phase 9h — actual parameter values used by the most recent
+        # scan. Surfaces in the no-match message so the user can tell
+        # whether their override was honored.
+        self.discovery_parameters_used:     Optional[dict[str, float]] = None
+        # Phase 9m — diagnostics from the most recent scan: asof date,
+        # universe size, per-condition failure counts. Drives the
+        # data-actionable no-match reply.
+        self.discovery_last_scan_diagnostics: Optional[dict[str, Any]] = None
+        # Phase 9k — compositional primitives parsed from the user's
+        # prose. When non-empty, the orchestrator IGNORES the preset's
+        # hardcoded `conditions` list and runs the scanner with only
+        # the primitives the user explicitly mentioned. Format:
+        # [{"name": "volume_spike", "params": {"multiplier": 1.2}}, ...]
+        self.discovery_conditions:          Optional[list[dict]] = None
+        # Issue 2 — explicit user-supplied universe restriction.
+        # When the user types e.g. "choose among these stocks: TCS,
+        # Infosys, Reliance", the chat layer resolves each name to a
+        # canonical KB symbol and stashes the list here. The scanner
+        # then evaluates ONLY these symbols instead of the full
+        # kb_default universe — so subsequent diagnostics name the
+        # exact stocks the user asked about. Sticky across turns
+        # until the user explicitly broadens scope.
+        self.discovery_universe_override:   Optional[list[str]]  = None
         self.risk_execution_config: dict[str, Any] = {}
         self.input_modification_requested: bool = False
         self.pending_input_modification_fields: list[str] = []
-        # Comprehensive snapshot of everything the SemanticExtractor captured
-        # from the user's strategy prompt. Populated when the six core
-        # inputs are complete and shown back to the user for confirmation
-        # before any signal planning runs. Persisted in the chat draft so
-        # it survives across turns.
-        self.prompt_summary: Optional[dict[str, Any]] = None
-        # Exit-side gaps the user never supplied. While non-empty, the flow
-        # refuses to plan signals and asks the user to fill them instead of
-        # defaulting silently.
-        self.missing_critical_inputs: list[dict[str, str]] = []
-        # Toggleable behavioural filters layered on top of the entry signal.
-        # Shape mirrors SignalFilterConfig.to_dict() — each entry is a
-        # {name, enabled, params, source, description} block. Filled in by
-        # _ensure_prompt_summary_built so users see filter state in the
-        # confirmation summary.
-        self.signal_filters: dict[str, Any] = {}
-        # Trade-management rule pack (Phase 3 #9-#17). Shape mirrors
-        # TradeManagementConfig.to_dict(). Rules marked required=True and
-        # not enabled are surfaced in missing_critical_inputs so the user
-        # is asked instead of defaulted.
-        self.trade_management: dict[str, Any] = {}
-        # Auto-generated opposite-side (SELL/Short) plan derived from the
-        # primary entry/exit conditions. Carried through the draft so the
-        # user can review both sides in the confirmation summary before
-        # building.
-        self.mirror_plan: dict[str, Any] = {}
-        # Trading-window warnings (Phase 3 #7) — list of dicts describing
-        # known unstable periods the user's session overlaps.
-        self.window_warnings: list[dict[str, Any]] = []
-        # Phase 4 — market-context filter pack (rules #18-#23). Shape
-        # mirrors MarketContextConfig.to_dict().
-        self.market_context: dict[str, Any] = {}
-        # Phase 4 — stock recommender output: top picks + justifications
-        # + the inferred strategy profile.
-        self.stock_recommendations: dict[str, Any] = {}
-        # Phase 4 — trade journal: chronological list of
-        # {kind, payload, …} entries (see app/planner/trade_journal.py).
-        self.trade_journal: list[dict[str, Any]] = []
+        # Normalized semantic intent extracted from user's raw message.
+        # Populated in collect_input (before planning) so that the planner
+        # can use strategy_family, htf_rules, reference_symbols, and
+        # structural SL/trailing specs extracted from free-form prose.
+        # Persisted as a plain dict in the draft JSON so it survives across turns.
+        self.semantic_intent: Optional[dict[str, Any]] = None
 
     def _render_validation_message(self, code: Optional[str], facts: dict[str, Any], fallback: Optional[str]) -> Optional[str]:
         if code:
@@ -590,8 +602,15 @@ class StrategyBuilder:
         ])
 
     def is_user_input_complete(self) -> bool:
+        # Phase 9 — for dynamic-discovery presets, the symbol is optional from
+        # the user's side: the runtime scanner fills it in. Once
+        # discovered_symbol is set OR the preset has discovery declared
+        # (so the chat layer will trigger the scan), we treat the symbol
+        # requirement as satisfied for the purpose of moving past input
+        # collection.
+        symbol_ok = bool(self.symbol) or bool(self.discovered_symbol) or self.requires_discovery()
         if not all([
-            self.symbol,
+            symbol_ok,
             self.timeframe,
             self.sentiment,
             self.experience,
@@ -601,9 +620,30 @@ class StrategyBuilder:
             return False
         return True
 
+    def requires_discovery(self) -> bool:
+        """True when the active preset declares a discovery block AND the
+        user hasn't pinned a symbol manually. Used as the signal for the
+        chat layer to dispatch the universe scanner."""
+        if self.symbol:
+            return False
+        preset_name = (self.strategy_preset or "").strip().lower()
+        if not preset_name:
+            return False
+        try:
+            from app.kb import kb as _kb
+            preset = _kb.presets.get(preset_name)
+        except Exception:
+            return False
+        if preset is None:
+            return False
+        discovery = preset.discovery or {}
+        return bool(discovery.get("enabled", False) and discovery.get("conditions"))
+
     def missing_user_input_fields(self) -> list[str]:
         fields: list[str] = []
-        if not self.symbol:
+        # Same exemption as is_user_input_complete — discovery-driven presets
+        # don't require a user-supplied symbol.
+        if not self.symbol and not self.discovered_symbol and not self.requires_discovery():
             fields.append("symbol")
         if not self.timeframe:
             fields.append("timeframe")
@@ -626,21 +666,6 @@ class StrategyBuilder:
         self.max_trade = None
         self.stop_loss = None
         self.take_profit = None
-        # Any change to the captured inputs invalidates the comprehensive
-        # prompt summary — we re-derive it on the next turn before asking
-        # the user to confirm again. Filter toggles are kept (user may have
-        # already chosen them) — only their defaults need refreshing.
-        self.prompt_summary = None
-        self.missing_critical_inputs = []
-        # Mirror plan + window warnings are derived from the primary plan
-        # and the user's session config; both get re-derived on each turn
-        # so they always reflect the current snapshot.
-        self.mirror_plan = {}
-        self.window_warnings = []
-        # Stock recommendations depend on the strategy profile — drop them
-        # so the next turn re-derives against the updated inputs. The
-        # journal stays as an audit trail across the session.
-        self.stock_recommendations = {}
 
     def _clear_core_user_input_field(self, field: str) -> None:
         if field == "symbol":
@@ -1006,6 +1031,16 @@ class StrategyBuilder:
         risk_execution_config = preview.get("risk_execution_config")
         if isinstance(risk_execution_config, dict):
             self.set_risk_execution_config(risk_execution_config)
+        # Restore structural SL and trailing stop specs persisted in the draft
+        stop_loss_spec = preview.get("stop_loss_spec")
+        if isinstance(stop_loss_spec, dict) and stop_loss_spec:
+            self.stop_loss_spec = stop_loss_spec
+        trailing_stop_spec = preview.get("trailing_stop_spec")
+        if isinstance(trailing_stop_spec, dict) and trailing_stop_spec:
+            self.trailing_stop_spec = trailing_stop_spec
+        semantic_intent = preview.get("semantic_intent")
+        if isinstance(semantic_intent, dict) and semantic_intent:
+            self.semantic_intent = semantic_intent
         if preview.get("user_input_confirmed"):
             self.user_input_confirmed = True
         if preview.get("signal_plan"):
@@ -1022,27 +1057,80 @@ class StrategyBuilder:
             ]
         if not self.input_modification_requested:
             self.pending_input_modification_fields = []
-        if preview.get("prompt_summary") is not None:
-            self.prompt_summary = preview["prompt_summary"]
-        if isinstance(preview.get("missing_critical_inputs"), list):
-            self.missing_critical_inputs = [
-                dict(item) for item in preview["missing_critical_inputs"]
-                if isinstance(item, dict)
+
+        # Phase 9j — restore discovery state. The chat layer relies on
+        # these fields persisting across turns: discovery_pending lets
+        # the next user reply route to handle_pending_tie_break;
+        # discovery_parameter_overrides keeps a user-typed "1.2x"
+        # threshold alive while the user supplies remaining inputs
+        # (timeframe, sentiment, ...) over multiple turns; the
+        # discovered_symbol is reused once a stock has been picked.
+        if "discovery_pending" in preview:
+            self.discovery_pending = bool(preview.get("discovery_pending"))
+        if "discovery_no_match" in preview:
+            self.discovery_no_match = bool(preview.get("discovery_no_match"))
+        candidates = preview.get("discovery_candidates")
+        if isinstance(candidates, list):
+            self.discovery_candidates = [
+                dict(c) for c in candidates if isinstance(c, dict)
+            ] or None
+        options = preview.get("discovery_tie_break_options")
+        if isinstance(options, list):
+            self.discovery_tie_break_options = [
+                dict(o) for o in options if isinstance(o, dict)
+            ] or None
+        method = preview.get("discovery_chosen_method")
+        if isinstance(method, str) and method.strip():
+            self.discovery_chosen_method = method.strip()
+        discovered = preview.get("discovered_symbol")
+        if isinstance(discovered, str) and discovered.strip():
+            self.discovered_symbol = discovered.strip()
+        overrides = preview.get("discovery_parameter_overrides")
+        if isinstance(overrides, dict) and overrides:
+            self.discovery_parameter_overrides = {
+                str(k): float(v) for k, v in overrides.items()
+                if isinstance(v, (int, float))
+            } or None
+        used = preview.get("discovery_parameters_used")
+        if isinstance(used, dict) and used:
+            self.discovery_parameters_used = {
+                str(k): float(v) for k, v in used.items()
+                if isinstance(v, (int, float))
+            } or None
+        # Phase 9m — restore the per-scan diagnostic snapshot.
+        diag = preview.get("discovery_last_scan_diagnostics")
+        if isinstance(diag, dict) and diag:
+            self.discovery_last_scan_diagnostics = dict(diag)
+        # Phase 9k — restore the parsed primitive list. Each item must
+        # be a {name, params} dict; malformed entries are dropped so a
+        # corrupt draft can't crash the orchestrator.
+        conditions = preview.get("discovery_conditions")
+        if isinstance(conditions, list):
+            cleaned: list[dict] = []
+            for item in conditions:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                params_raw = item.get("params") if isinstance(item.get("params"), dict) else {}
+                params = {
+                    str(k): float(v) for k, v in params_raw.items()
+                    if isinstance(v, (int, float))
+                }
+                cleaned.append({"name": name, "params": params})
+            self.discovery_conditions = cleaned or None
+        # Issue 2 — restore an explicit user-supplied universe override.
+        # Each entry must be a non-empty string; malformed items are
+        # dropped and the field collapses to None if the list ends up empty.
+        override = preview.get("discovery_universe_override")
+        if isinstance(override, list):
+            cleaned_universe = [
+                str(sym).strip() for sym in override
+                if isinstance(sym, str) and str(sym).strip()
             ]
-        if isinstance(preview.get("signal_filters"), dict):
-            self.signal_filters = dict(preview["signal_filters"])
-        if isinstance(preview.get("trade_management"), dict):
-            self.trade_management = dict(preview["trade_management"])
-        if isinstance(preview.get("mirror_plan"), dict):
-            self.mirror_plan = dict(preview["mirror_plan"])
-        if isinstance(preview.get("window_warnings"), list):
-            self.window_warnings = [dict(w) for w in preview["window_warnings"] if isinstance(w, dict)]
-        if isinstance(preview.get("market_context"), dict):
-            self.market_context = dict(preview["market_context"])
-        if isinstance(preview.get("stock_recommendations"), dict):
-            self.stock_recommendations = dict(preview["stock_recommendations"])
-        if isinstance(preview.get("trade_journal"), list):
-            self.trade_journal = [dict(e) for e in preview["trade_journal"] if isinstance(e, dict)]
+            self.discovery_universe_override = cleaned_universe or None
+
         self._normalize_legacy_signal_conditions()
 
     def to_draft_json(
@@ -1077,18 +1165,33 @@ class StrategyBuilder:
             "user_input_confirmed": self.user_input_confirmed,
             "signal_plan": self.signal_plan,
             "strategy_preset": self.strategy_preset,
+            "risk_execution_config": self.risk_execution_config or {},
+            "stop_loss_spec": self.stop_loss_spec,
+            "trailing_stop_spec": self.trailing_stop_spec,
             "input_modification_requested": self.input_modification_requested,
             "pending_input_modification_fields": self.pending_input_modification_fields,
-            "prompt_summary": self.prompt_summary,
-            "missing_critical_inputs": list(self.missing_critical_inputs or []),
-            "signal_filters": dict(self.signal_filters or {}),
-            "trade_management": dict(self.trade_management or {}),
-            "mirror_plan":      dict(self.mirror_plan or {}),
-            "window_warnings":  list(self.window_warnings or []),
-            "market_context":         dict(self.market_context or {}),
-            "stock_recommendations":  dict(self.stock_recommendations or {}),
-            "trade_journal":          list(self.trade_journal or []),
             "processing_status": processing_status or ("complete" if self.signal_plan else "in_progress"),
+            # Phase 9j — persist the discovery state machine. Without
+            # these fields, anything the chat layer learns mid-flow
+            # about discovery (preset overrides typed by the user,
+            # pending tie-break candidates, the resolved symbol) is
+            # lost the next turn because the builder gets rehydrated
+            # from this draft. The tie-break flow + parameter overrides
+            # (Phases 9b/9h/9i) all depend on these surviving across
+            # turns.
+            "discovery_pending":             self.discovery_pending,
+            "discovery_no_match":            self.discovery_no_match,
+            "discovery_candidates":          self.discovery_candidates,
+            "discovery_tie_break_options":   self.discovery_tie_break_options,
+            "discovery_chosen_method":       self.discovery_chosen_method,
+            "discovered_symbol":             self.discovered_symbol,
+            "discovery_parameter_overrides": self.discovery_parameter_overrides,
+            "discovery_parameters_used":     self.discovery_parameters_used,
+            "discovery_conditions":          self.discovery_conditions,
+            "discovery_last_scan_diagnostics": self.discovery_last_scan_diagnostics,
+            "discovery_universe_override":   self.discovery_universe_override,
+            # Semantic intent: plain dict so it round-trips cleanly through JSON.
+            "semantic_intent":               self.semantic_intent,
         }
 
         return draft
@@ -1244,6 +1347,183 @@ def _extract_symbol(text: str) -> Optional[str]:
     return None
 
 
+def _extract_rms_from_text(text: str) -> dict[str, Any]:
+    """Parse risk-management settings from free-form user text.
+
+    Returns a dict of extracted fields with provenance source="user".
+    Only fields that are explicitly mentioned are included.
+    All values are stored under canonical keys that mirror risk_execution_config.
+    """
+    rms: dict[str, Any] = {}
+
+    # ── Stop loss ─────────────────────────────────────────────────────────────
+    # "SL 2%", "stop loss at 1.5%", "stop at 1%", "2% stop"
+    sl_match = re.search(
+        r"\b(?:stop[\s\-]*loss|stoploss|sl|stop)\s*[=:@]?\s*(?:at\s+)?"
+        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
+        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:stop|sl|stop[\s\-]*loss)\b",
+        text, re.IGNORECASE,
+    )
+    if sl_match:
+        val = float(sl_match.group(1) or sl_match.group(2) or 0)
+        if val > 0:
+            rms["stop_loss_pct"] = {"value": val, "source": "user"}
+
+    # ── Take profit ───────────────────────────────────────────────────────────
+    # "TP 5%", "target 3%", "take profit 4%", "3% target"
+    tp_match = re.search(
+        r"\b(?:take[\s\-]*profit|takeprofit|tp|target|tgt)\s*[=:@]?\s*(?:at\s+)?"
+        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
+        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:target|tp|profit)\b",
+        text, re.IGNORECASE,
+    )
+    if tp_match:
+        val = float(tp_match.group(1) or tp_match.group(2) or 0)
+        if val > 0:
+            rms["take_profit_pct"] = {"value": val, "source": "user"}
+
+    # ── Risk:Reward ratio ─────────────────────────────────────────────────────
+    # Matches: "1:2", "1:3 RR", "R:R 1:2", "risk reward 1:3", "minimum 1:2"
+    rr_match = re.search(
+        r"\b(?:r:r|rr|risk[\s:]*(?:to[\s:]*)?reward|reward[\s:]*(?:to[\s:]*)?risk"
+        r"|minimum\s+)?1\s*[:/]\s*(\d+(?:\.\d+)?)\b",
+        text, re.IGNORECASE,
+    )
+    if rr_match:
+        val = float(rr_match.group(1))
+        if val > 0:
+            rms["risk_reward"] = {"value": val, "source": "user"}
+
+    # ── Per-trade risk ────────────────────────────────────────────────────────
+    ptr_match = re.search(
+        r"\b(?:risk|per[\s\-]*trade[\s\-]*risk|per\s+trade)\s+"
+        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(%|percent|pct)\s*(?:of\s+capital|per\s+trade)?"
+        r"|\brisk\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
+        text, re.IGNORECASE,
+    )
+    if ptr_match:
+        val = float(ptr_match.group(1) or ptr_match.group(3) or 0)
+        if val > 0:
+            rms["per_trade_risk"] = {"value": val, "source": "user"}
+
+    # ── Daily loss cap ────────────────────────────────────────────────────────
+    dlc_match = re.search(
+        r"\b(?:daily[\s\-]*(?:loss[\s\-]*)?(?:cap|limit|sl|stop|loss)"
+        r"|max[\s\-]*daily[\s\-]*loss|cap\s+loss(?:es)?|stop\s+trading\s+after)\s+"
+        r"(?:(?:a|an)\s+)?(?:₹\s*)?(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|percent|pct|k)?"
+        r"|\bdaily\s+(?:sl|stop[\s\-]*loss)\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
+        text, re.IGNORECASE,
+    )
+    if dlc_match:
+        raw = (dlc_match.group(1) or dlc_match.group(3) or "0").replace(",", "")
+        unit = (dlc_match.group(2) or "").lower()
+        val = float(raw)
+        if unit == "k":
+            # ₹ absolute — skip % storage; user can clarify
+            pass
+        elif val > 0:
+            rms["daily_loss_cap"] = {"value": val, "source": "user"}
+
+    # ── Max open positions ────────────────────────────────────────────────────
+    pos_match = re.search(
+        r"\b(?:max(?:imum)?\s+(?:\d+|one|two|three)\s+(?:trade|position|open)"
+        r"|one\s+trade\s+at\s+a\s+time|single\s+trade)\b",
+        text, re.IGNORECASE,
+    )
+    if pos_match:
+        snippet = pos_match.group(0).lower()
+        if "one" in snippet or "single" in snippet:
+            rms["max_positions"] = {"value": 1, "source": "user"}
+        else:
+            n_match = re.search(r"(\d+)", snippet)
+            if n_match:
+                rms["max_positions"] = {"value": int(n_match.group(1)), "source": "user"}
+
+    # Explicit "max N trades" pattern
+    max_match = re.search(r"\bmax\s+(\d+)\s+(?:trades?|positions?)\b", text, re.IGNORECASE)
+    if max_match and "max_positions" not in rms:
+        rms["max_positions"] = {"value": int(max_match.group(1)), "source": "user"}
+
+    # ── Trailing stop ─────────────────────────────────────────────────────────
+    # "trail SL after 2%", "trailing stop 2%", "trail 2%"
+    trail_match = re.search(
+        r"\btrail(?:ing)?[\s\-]*(?:stop|sl|stop[\s\-]*loss|stop\s*loss)?\s*"
+        r"(?:after|of|by|at)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
+        text, re.IGNORECASE,
+    )
+    if trail_match:
+        val = float(trail_match.group(1))
+        if val > 0:
+            rms["trailing_stop_pct"] = {"value": val, "source": "user"}
+
+    # ── Trading window ────────────────────────────────────────────────────────
+    tw_match = re.search(
+        r"\b(?:trade|entry|entries|no\s+entries?)\s+(?:only\s+)?(?:from\s+)?"
+        r"(\d{1,2}:\d{2})\s*(?:-|to|–|till|until)\s*(\d{1,2}:\d{2})",
+        text, re.IGNORECASE,
+    )
+    if tw_match:
+        rms["trading_window"] = {
+            "value": f"{tw_match.group(1)}-{tw_match.group(2)}",
+            "source": "user",
+        }
+    else:
+        cutoff = re.search(
+            r"\b(?:no\s+entries?\s+after|exit\s+(?:all\s+)?by|close\s+(?:all\s+)?by)\s+(\d{1,2}:\d{2})\b",
+            text, re.IGNORECASE,
+        )
+        if cutoff:
+            rms["trading_window"] = {
+                "value": f"09:15-{cutoff.group(1)}",
+                "source": "user",
+            }
+
+    # ── Structural stop loss ──────────────────────────────────────────────────
+    # "opening range low as structural stop loss", "SL at ORB candle low",
+    # "structural SL", "swing low as stop", "9:15 candle low"
+    struct_sl_match = re.search(
+        r"\b(?:"
+        r"opening\s+range\s+(?:low|high)(?:\s+as\s+(?:structural\s+)?(?:stop|sl|stop[\s\-]*loss))?"
+        r"|orb\s+(?:candle\s+)?(?:low|high)(?:\s+as\s+(?:stop|sl))?"
+        r"|(?:structural\s+(?:stop|sl|stop[\s\-]*loss))"
+        r"|sl\s+(?:at|below)\s+(?:the\s+)?(?:9:15\s+candle|opening\s+range|orb)\s+(?:low|candle\s+low)?"
+        r"|stop\s+(?:at|below)\s+(?:the\s+)?(?:9:15\s+candle|opening\s+range|orb)\s+(?:low)?"
+        r"|swing\s+(?:low|high)\s+(?:as\s+)?(?:stop|sl|stop[\s\-]*loss)"
+        r")\b",
+        text, re.IGNORECASE,
+    )
+    if struct_sl_match:
+        anchor_text = struct_sl_match.group(0).lower()
+        if "swing low" in anchor_text:
+            anchor = "swing_low"
+        elif "high" in anchor_text:
+            anchor = "opening_range_high"
+        else:
+            anchor = "opening_range_low"
+        rms["structural_sl"] = {
+            "value": anchor,
+            "source": "user",
+            "type": "structural",
+        }
+
+    # ── EMA trailing stop ─────────────────────────────────────────────────────
+    # "trail profits using EMA trailing stop", "EMA trail", "trail by EMA"
+    ema_trail_match = re.search(
+        r"\b(?:ema\s+trail(?:ing)?(?:\s+stop)?|trail(?:ing)?\s+(?:profits?\s+using\s+)?ema"
+        r"|trail\s+(?:using|by|with)\s+ema|ema[\s\-]*based\s+trail(?:ing)?)\b",
+        text, re.IGNORECASE,
+    )
+    if ema_trail_match:
+        period_match = re.search(r"\b(\d+)\s*(?:period\s+)?ema\b", text, re.IGNORECASE)
+        rms["trailing_stop_type"] = {
+            "value": "ema",
+            "period": int(period_match.group(1)) if period_match else 20,
+            "source": "user",
+        }
+
+    return rms
+
+
 def extract_strategy_details(text: str, builder: StrategyBuilder):
     builder.market = DEFAULT_MARKET
     builder.clear_validation_state()
@@ -1263,37 +1543,122 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
                     unsupported_user_timeframe_validation_facts(),
                 )
 
-    if re.search(r"\b(bullish|optimistic|positive|long|buy|uptrend|upside)\b", text, re.IGNORECASE):
+    # ── Sentiment — infer from directional language + strategy mechanics ──────
+    if re.search(
+        r"\b(bullish|optimistic|positive|long|buy|uptrend|upside"
+        r"|breakout|breakouts|break\s*above|price\s*breaks?\s*above"
+        r"|momentum\s*up|gap\s*up)\b",
+        text, re.IGNORECASE,
+    ):
         builder.sentiment = "bullish"
-    elif re.search(r"\b(bearish|cautious|negative|short|sell|downtrend|downside)\b", text, re.IGNORECASE):
+    elif re.search(
+        r"\b(bearish|cautious|negative|short|sell|downtrend|downside"
+        r"|breakdown|break\s*below|price\s*breaks?\s*below"
+        r"|fade|reversal|momentum\s*down|gap\s*down)\b",
+        text, re.IGNORECASE,
+    ):
         builder.sentiment = "bearish"
 
+    # ── Objective ─────────────────────────────────────────────────────────────
     if re.search(
-        r"\b(intraday|day trade|day trading|scalp|scalping|quick profit|quick profits|same day|today only|short term)\b",
+        r"\b(intraday|day trade|day trading|scalp|scalping|quick profit|quick profits"
+        r"|same day|today only|short term|btst)\b",
         text,
         re.IGNORECASE,
     ):
         builder.objective = "intraday"
     elif re.search(
-        r"\b(positional|swing|steady growth|risk protection|long term|multi day|carry)\b",
+        r"\b(positional|swing|steady growth|risk protection|long term|multi day|carry"
+        r"|hold\s+(?:for\s+)?(?:a\s+)?(?:few|several|multiple)\s+days?)\b",
         text,
         re.IGNORECASE,
     ):
         builder.objective = "positional"
 
+    # ── Experience — infer from vocabulary sophistication ────────────────────
+    if not builder.experience:
+        expert_cues = re.search(
+            r"\b(orb|vwap\s+anchor|swing\s+low|swing\s+high|bos|fvg|fair\s*value\s*gap"
+            r"|atr\s+multiple|atr\s+stop|atr\s+trail|structural\s+sl|structural\s+stop"
+            r"|partial\s+exit|trail\s+sl|break\s*even\s*stop|hh\s*/\s*hl|lh\s*/\s*ll"
+            r"|risk\s*:\s*reward|r\s*:\s*r|lot\s+size|position\s+sizing|per\s*trade\s*risk"
+            r"|daily\s+loss\s+cap|max\s+drawdown|opening\s+range\s+low)\b",
+            text, re.IGNORECASE,
+        )
+        beginner_cues = re.search(
+            r"\b(what\s+is|i\s+don.?t\s+know|kuch\s+nahi\s+pata|i.?m\s+new"
+            r"|explain|how\s+does|beginner|beginner[- ]friendly|beginner[- ]level"
+            r"|simple\s+(?:intraday|swing|strategy|trading)|basic\s+(?:intraday|swing|strategy)"
+            r"|start(?:ing)?\s+(?:with|from\s+scratch)"
+            r"|never\s+traded|first\s+time)\b",
+            text, re.IGNORECASE,
+        )
+        if expert_cues and not beginner_cues:
+            builder.experience = "expert"
+        elif beginner_cues:
+            builder.experience = "beginner"
+
     goal_text = extract_goal_text(text)
     if goal_text:
         builder.goal = goal_text
 
-    # Detect a strategy preset by keyword anywhere in the message. The KB owns
-    # the keyword-to-preset map; we only consult it here so a user typing
-    # "let's run an ORB strategy on RELIANCE 5m" gets the ORB preset pinned
-    # without any additional UI step. Explicit caller-set presets win.
-    if not builder.strategy_preset:
-        try:
-            from app.kb import kb as _kb
-            preset = _kb.detect_preset_in_text(text)
-        except Exception:
-            preset = None
-        if preset is not None:
-            builder.strategy_preset = preset.name
+    # ── RMS extraction ────────────────────────────────────────────────────────
+    rms = _extract_rms_from_text(text)
+    if rms:
+        existing = dict(builder.risk_execution_config or {})
+        rms_sources = dict(existing.get("rms_sources", {}))
+        for field, entry in rms.items():
+            # First-write-wins: never overwrite a user-supplied value
+            if field not in existing or rms_sources.get(field) != "user":
+                if isinstance(entry, dict) and "value" in entry:
+                    existing[field] = entry["value"]
+                    rms_sources[field] = entry.get("source", "user")
+        existing["rms_sources"] = rms_sources
+        builder.risk_execution_config = existing
+
+        # Mirror onto builder direct attributes
+        if "stop_loss_pct" in rms and builder.stop_loss is None:
+            builder.stop_loss = rms["stop_loss_pct"]["value"]
+        if "take_profit_pct" in rms and builder.take_profit is None:
+            builder.take_profit = rms["take_profit_pct"]["value"]
+        if "daily_loss_cap" in rms and builder.daily_loss_cap is None:
+            builder.daily_loss_cap = rms["daily_loss_cap"]["value"]
+
+        # Structural SL → builder.stop_loss_spec (overrides preset default only
+        # when user explicitly mentions a structural anchor).
+        if "structural_sl" in rms and builder.stop_loss_spec is None:
+            sl_entry = rms["structural_sl"]
+            builder.stop_loss_spec = {
+                "type": "structural",
+                "anchor": sl_entry["value"],
+                "source": "user",
+            }
+
+        # EMA trailing stop → builder.trailing_stop_spec
+        if "trailing_stop_type" in rms and builder.trailing_stop_spec is None:
+            ts_entry = rms["trailing_stop_type"]
+            if ts_entry["value"] == "ema":
+                builder.trailing_stop_spec = {
+                    "type": "ema",
+                    "period": ts_entry.get("period", 20),
+                    "source": "user",
+                }
+        # Percent trailing stop (from trailing_stop_pct)
+        elif "trailing_stop_pct" in rms and builder.trailing_stop_spec is None:
+            builder.trailing_stop_spec = {
+                "type": "percent",
+                "distance_pct": rms["trailing_stop_pct"]["value"],
+                "source": "user",
+            }
+
+    # ── Preset detection ──────────────────────────────────────────────────────
+    # Always re-detect from the current message so a fresh message can correct
+    # a stale/wrong preset stored from a prior turn. When no keyword matches,
+    # the builder's existing preset is preserved (it won't be cleared).
+    try:
+        from app.kb import kb as _kb
+        detected_preset = _kb.detect_preset_in_text(text)
+    except Exception:
+        detected_preset = None
+    if detected_preset is not None:
+        builder.strategy_preset = detected_preset.name

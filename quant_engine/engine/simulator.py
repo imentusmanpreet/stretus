@@ -41,6 +41,46 @@ from engine.kb_signals import KB_REGISTRY_AVAILABLE, evaluate_kb_signal_rules
 logger = logging.getLogger(__name__)
 
 
+# ─── Direction detection helper ───────────────────────────────────────────────
+
+def _detect_signal_direction(entry_signal_rules: list[dict[str, Any]] | None) -> str:
+    """
+    Detect trade direction from entry signal rules.
+    
+    Returns "LONG" for bullish signals, "SHORT" for bearish signals, "LONG" as default.
+    Checks signal names for bearish/bullish keywords.
+    """
+    if not entry_signal_rules:
+        return "LONG"
+    
+    # Count bullish vs bearish signals
+    bearish_count = 0
+    bullish_count = 0
+    
+    for rule in entry_signal_rules:
+        name = str(rule.get("name", "")).lower()
+        
+        # Bearish indicators
+        if any(keyword in name for keyword in [
+            "bearish", "short", "down", "below", "under", "sell",
+            "breakdown", "falling", "negative", "overbought"
+        ]):
+            bearish_count += 1
+        
+        # Bullish indicators
+        elif any(keyword in name for keyword in [
+            "bullish", "long", "up", "above", "over", "buy",
+            "breakout", "rising", "positive", "oversold"
+        ]):
+            bullish_count += 1
+    
+    # If more bearish signals, it's a SHORT strategy
+    if bearish_count > bullish_count:
+        return "SHORT"
+    
+    return "LONG"
+
+
 # ─── Trade dataclass ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -255,6 +295,61 @@ def _compute_initial_stop_long(
     return entry_price * (1.0 - fallback_pct / 100.0)
 
 
+def _compute_initial_stop_short(
+    spec: dict | None,
+    *,
+    fallback_pct: float,
+    entry_price: float,
+    entry_index: int,
+    arrays: dict[str, np.ndarray],
+    high_arr: np.ndarray,
+    day_ordinals: np.ndarray,
+) -> float:
+    """Return the initial stop price for a SHORT entry.
+    For shorts, stop is ABOVE entry price (exit when price rises too much)."""
+    if spec is None:
+        return entry_price * (1.0 + fallback_pct / 100.0)
+
+    sl_type = spec.get("type")
+
+    if sl_type == "percent":
+        return entry_price * (1.0 + float(spec["pct"]) / 100.0)
+
+    if sl_type == "structural":
+        anchor = spec.get("anchor")
+        padding_pct = float(spec.get("padding_pct", 0.0))
+        anchor_price: float
+        if anchor == "opening_range_high":
+            anchor_price = _session_open_high(
+                high_arr, day_ordinals, entry_index, int(spec.get("opening_bars", 3)),
+            )
+        elif anchor == "opening_range_low":
+            # Reserved for longs; for a short entry a downside anchor is nonsensical
+            return entry_price * (1.0 + fallback_pct / 100.0)
+        elif anchor == "prev_n_bar_high":
+            window = int(spec.get("window", 5))
+            start = max(0, entry_index - window)
+            anchor_price = float(np.max(high_arr[start:entry_index])) if entry_index > start else float(high_arr[entry_index])
+        elif anchor == "prev_n_bar_low":
+            return entry_price * (1.0 + fallback_pct / 100.0)
+        else:
+            return entry_price * (1.0 + fallback_pct / 100.0)
+        # padding pulls the SL slightly *above* the anchor for shorts
+        return float(anchor_price) * (1.0 + padding_pct / 100.0)
+
+    if sl_type == "atr":
+        window = int(spec["window"])
+        atr_col = arrays.get(f"ATR_{window}")
+        if atr_col is None or entry_index >= len(atr_col):
+            return entry_price * (1.0 + fallback_pct / 100.0)
+        atr_value = float(atr_col[entry_index])
+        if atr_value != atr_value or atr_value <= 0:        # NaN check
+            return entry_price * (1.0 + fallback_pct / 100.0)
+        return entry_price + float(spec["multiplier"]) * atr_value
+
+    return entry_price * (1.0 + fallback_pct / 100.0)
+
+
 def _compute_trailing_floor_long(
     spec: dict | None,
     *,
@@ -303,6 +398,58 @@ def _compute_trailing_floor_long(
         return ema_value
 
     return float("-inf")
+
+
+def _compute_trailing_ceiling_short(
+    spec: dict | None,
+    *,
+    entry_price: float,
+    current_index: int,
+    arrays: dict[str, np.ndarray],
+    lowest_low_since_entry: float,
+    current_close: float,
+) -> float:
+    """Return today's trailing-ceiling candidate for a SHORT trade.
+    Returns +inf when trailing isn't applicable yet so it can't override the
+    initial SL (the caller takes min(initial_stop, this_value)).
+    For shorts, we trail DOWN as price falls (profit increases).
+    """
+    if spec is None:
+        return float("inf")
+
+    activate = float(spec.get("activate_after_pct", 0.0))
+    if activate > 0.0:
+        # For shorts, profit = entry - current (price going down is good)
+        gain_pct = ((entry_price - current_close) / entry_price) * 100.0
+        if gain_pct < activate:
+            return float("inf")
+
+    ts_type = spec.get("type")
+
+    if ts_type == "percent":
+        return lowest_low_since_entry * (1.0 + float(spec["distance_pct"]) / 100.0)
+
+    if ts_type in {"atr", "chandelier"}:
+        window = int(spec["window"])
+        atr_col = arrays.get(f"ATR_{window}")
+        if atr_col is None or current_index >= len(atr_col):
+            return float("inf")
+        atr_value = float(atr_col[current_index])
+        if atr_value != atr_value or atr_value <= 0:
+            return float("inf")
+        return lowest_low_since_entry + float(spec["multiplier"]) * atr_value
+
+    if ts_type == "ema":
+        window = int(spec["window"])
+        ema_col = arrays.get(f"EMA_{window}")
+        if ema_col is None or current_index >= len(ema_col):
+            return float("inf")
+        ema_value = float(ema_col[current_index])
+        if ema_value != ema_value:
+            return float("inf")
+        return ema_value
+
+    return float("inf")
 
 
 # ─── Session-day helpers ───────────────────────────────────────────────────────
@@ -375,6 +522,9 @@ def simulate_trades(
     # and blocks new entries past that time. Loader pre-computes
     # `utc_minutes_of_day` so this hot-path stays a plain int compare.
     time_exit_spec: dict[str, Any] | None = None,
+    # Phase 10 — trade direction: "LONG" | "SHORT" | "AUTO"
+    # When "AUTO", the simulator detects direction from entry signal rules.
+    trade_direction: str = "AUTO",
 ) -> tuple[list[Trade], list[dict]]:
     """
     Simulate trades on the supplied OHLCV DataFrame.
@@ -397,11 +547,23 @@ def simulate_trades(
     stt_entry_pct = 0.0                   if is_intraday else stt_delivery_pct
     stt_exit_pct  = stt_intraday_sell_pct if is_intraday else stt_delivery_pct
 
+    # Detect trade direction from entry signals if set to AUTO
+    if trade_direction.upper() == "AUTO":
+        detected_direction = _detect_signal_direction(entry_signal_rules)
+        logger.info(
+            "Auto-detected trade direction from entry signals | direction=%s",
+            detected_direction,
+        )
+    else:
+        detected_direction = trade_direction.upper()
+    
+    is_short_strategy = detected_direction == "SHORT"
+
     logger.info(
         "Starting trade simulation | objective=%s candles=%s warm_up=%s stop_loss_pct=%.4f "
         "take_profit_pct=%.4f max_holding_candles=%s daily_loss_cap_pct=%.2f "
         "max_trades_per_day=%s slippage_bps=%.2f commission_bps=%.2f "
-        "stt_entry_pct=%.4f stt_exit_pct=%.4f entry_mode=%s exit_mode=%s",
+        "stt_entry_pct=%.4f stt_exit_pct=%.4f entry_mode=%s exit_mode=%s trade_direction=%s",
         objective, len(df), warm_up_candles,
         stop_loss_pct, take_profit_pct, max_holding_candles,
         daily_loss_cap_pct, max_trades_per_day,
@@ -409,6 +571,7 @@ def simulate_trades(
         stt_entry_pct, stt_exit_pct,
         entry_evaluation_mode,
         exit_evaluation_mode,
+        detected_direction,
     )
 
     # ── Fix 4: extract numpy arrays once, drop pandas inside the bar loop ─────
@@ -570,32 +733,56 @@ def simulate_trades(
                         and not time_exit_blocked and not is_session_last_bar):
                     # Fill at next bar's open price (realistic execution)
                     next_open = float(open_arr[i + 1])
-                    entry_price = _apply_entry_costs(
-                        next_open, slippage_bps, commission_bps, stt_entry_pct
-                    )
+                    
+                    # For LONG: entry price increases by costs
+                    # For SHORT: entry price decreases by costs (we're selling)
+                    if is_short_strategy:
+                        entry_price = _apply_exit_costs(
+                            next_open, slippage_bps, commission_bps, stt_entry_pct
+                        )
+                    else:
+                        entry_price = _apply_entry_costs(
+                            next_open, slippage_bps, commission_bps, stt_entry_pct
+                        )
+                    
                     entry_index = i + 1
                     entry_date  = str(timestamps_iso[i + 1])
                     in_trade    = True
                     diag.in_trade = True
+                    
                     # Reset MAE/MFE accumulators for this new trade
                     _trade_min_low  = next_open
                     _trade_max_high = next_open
+                    
                     # Phase 3: lock in the initial stop and reset trailing.
                     # Computed once here at entry so we don't re-evaluate
                     # opening_range / ATR-at-entry on every bar.
-                    _initial_stop_price = _compute_initial_stop_long(
-                        stop_loss_spec,
-                        fallback_pct=stop_loss_pct,
-                        entry_price=entry_price,
-                        entry_index=entry_index,
-                        arrays=arrays,
-                        low_arr=low_arr,
-                        day_ordinals=day_ordinals,
-                    )
-                    _trailing_floor = float("-inf")
+                    if is_short_strategy:
+                        _initial_stop_price = _compute_initial_stop_short(
+                            stop_loss_spec,
+                            fallback_pct=stop_loss_pct,
+                            entry_price=entry_price,
+                            entry_index=entry_index,
+                            arrays=arrays,
+                            high_arr=high_arr,
+                            day_ordinals=day_ordinals,
+                        )
+                        _trailing_floor = float("inf")  # For shorts, ceiling starts at +inf
+                    else:
+                        _initial_stop_price = _compute_initial_stop_long(
+                            stop_loss_spec,
+                            fallback_pct=stop_loss_pct,
+                            entry_price=entry_price,
+                            entry_index=entry_index,
+                            arrays=arrays,
+                            low_arr=low_arr,
+                            day_ordinals=day_ordinals,
+                        )
+                        _trailing_floor = float("-inf")
+                    
                     logger.debug(
-                        "Entered trade | symbol=%s signal_index=%s entry_index=%s entry_price=%.4f initial_stop=%.4f",
-                        symbol, i, entry_index, entry_price, _initial_stop_price,
+                        "Entered trade | symbol=%s side=%s signal_index=%s entry_index=%s entry_price=%.4f initial_stop=%.4f",
+                        symbol, "SHORT" if is_short_strategy else "LONG", i, entry_index, entry_price, _initial_stop_price,
                     )
 
             diagnostics.append(diag)
@@ -615,34 +802,55 @@ def simulate_trades(
         if low_price  < _trade_min_low:  _trade_min_low  = low_price
         if high_price > _trade_max_high: _trade_max_high = high_price
 
-        # Phase 3 — effective stop is the higher of the initial SL (locked at
-        # entry) and the trailing floor (running max since entry, only when
-        # a trailing spec is configured). Ratchet means the floor never moves
-        # backwards even if subsequent candles are lower.
-        candidate_floor = _compute_trailing_floor_long(
-            trailing_stop_spec,
-            entry_price=entry_price,
-            current_index=i,
-            arrays=arrays,
-            highest_high_since_entry=_trade_max_high,
-            current_close=close_price,
+        # Phase 3 — effective stop calculation differs for LONG vs SHORT
+        if is_short_strategy:
+            # SHORT: stop is ABOVE entry (exit when price rises too much)
+            # Trailing ceiling moves DOWN as price falls (profit increases)
+            candidate_ceiling = _compute_trailing_ceiling_short(
+                trailing_stop_spec,
+                entry_price=entry_price,
+                current_index=i,
+                arrays=arrays,
+                lowest_low_since_entry=_trade_min_low,
+                current_close=close_price,
+            )
+            if candidate_ceiling < _trailing_floor:  # For shorts, ceiling trails DOWN
+                _trailing_floor = candidate_ceiling
+            
+            # Effective stop is the LOWER of initial stop and trailing ceiling
+            stop_price = min(_initial_stop_price, _trailing_floor)
+            take_profit_price = entry_price * (1 - take_profit_pct / 100.0)
+            
+            # For SHORT: stop hit when price goes ABOVE stop, TP when price goes BELOW target
+            stop_hit        = high_price >= stop_price
+            take_profit_hit = low_price  <= take_profit_price
+        else:
+            # LONG: stop is BELOW entry (exit when price falls too much)
+            # Trailing floor moves UP as price rises (profit increases)
+            candidate_floor = _compute_trailing_floor_long(
+                trailing_stop_spec,
+                entry_price=entry_price,
+                current_index=i,
+                arrays=arrays,
+                highest_high_since_entry=_trade_max_high,
+                current_close=close_price,
+            )
+            if candidate_floor > _trailing_floor:
+                _trailing_floor = candidate_floor
+            
+            # Effective stop is the HIGHER of initial stop and trailing floor
+            stop_price = max(_initial_stop_price, _trailing_floor)
+            take_profit_price = entry_price * (1 + take_profit_pct / 100.0)
+            
+            # For LONG: stop hit when price goes BELOW stop, TP when price goes ABOVE target
+            stop_hit        = low_price  <= stop_price
+            take_profit_hit = high_price >= take_profit_price
+        
+        is_trailing_exit = (
+            stop_hit and 
+            ((is_short_strategy and _trailing_floor < _initial_stop_price) or
+             (not is_short_strategy and _trailing_floor > _initial_stop_price))
         )
-        if candidate_floor > _trailing_floor:
-            _trailing_floor = candidate_floor
-
-        # Effective stop is the higher of the initial SL and the trailing floor.
-        # Trailing-floor candidates use intra-bar highs, so the floor can
-        # legitimately sit between the current bar's low and the bar's high —
-        # in that case the stop fires *this* bar at the floor price (worst-case
-        # fill, mirrors the static-SL code path below).
-        stop_price = max(_initial_stop_price, _trailing_floor)
-        take_profit_price = entry_price * (1 + take_profit_pct / 100.0)
-
-        stop_hit        = low_price  <= stop_price
-        take_profit_hit = high_price >= take_profit_price
-        # A trailing-stop exit and a static-SL exit are functionally the same
-        # mechanic, but the user wants to know which one fired in the report.
-        is_trailing_exit = stop_hit and _trailing_floor > _initial_stop_price
 
         diag.stop_hit = stop_hit
         diag.tp_hit   = take_profit_hit
@@ -654,15 +862,24 @@ def simulate_trades(
         # ── Worst-case rule: if both stop AND TP touched on the same bar ──────
         # We assume the stop was hit first (conservative for the trader).
         if stop_hit and take_profit_hit:
-            exit_price  = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            if is_short_strategy:
+                exit_price = _apply_entry_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            else:
+                exit_price = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TRAILING_STOP_AND_TAKE_PROFIT_SAME_BAR" if is_trailing_exit else "STOP_LOSS_AND_TAKE_PROFIT_SAME_BAR"
 
         elif stop_hit:
-            exit_price  = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            if is_short_strategy:
+                exit_price = _apply_entry_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            else:
+                exit_price = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TRAILING_STOP" if is_trailing_exit else "STOP_LOSS"
 
         elif take_profit_hit:
-            exit_price  = _apply_exit_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
+            if is_short_strategy:
+                exit_price = _apply_entry_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
+            else:
+                exit_price = _apply_exit_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TAKE_PROFIT"
 
         else:
@@ -678,7 +895,20 @@ def simulate_trades(
                     exit_signal = evaluate_kb_signal_rules(exit_signal_rules, df, i)
                     diag.exit_signal = exit_signal
             elif exit_condition or compiled_exit is not None:
-                variables = _trade_variables(entry_price, close_price, stop_loss_pct, take_profit_pct)
+                # For SHORT: profit when price goes DOWN, loss when price goes UP
+                if is_short_strategy:
+                    profit_pct = ((entry_price - close_price) / entry_price) * 100.0
+                    loss_pct   = -profit_pct
+                else:
+                    profit_pct = ((close_price - entry_price) / entry_price) * 100.0
+                    loss_pct   = -profit_pct
+                
+                variables = {
+                    "PROFIT":             profit_pct,
+                    "LOSS":               loss_pct,
+                    "TAKE_PROFIT_TARGET": take_profit_pct,
+                    "STOP_LOSS_TARGET":   stop_loss_pct,
+                }
                 diag.exit_evaluated = True
                 if use_fast_exit:
                     exit_signal = compiled_exit.evaluate_arrays(arrays, n_rows, i, variables=variables)
@@ -690,28 +920,48 @@ def simulate_trades(
 
             if exit_signal:
                 if is_session_last_bar or i + 1 >= n_rows:
-                    exit_price = _apply_exit_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
+                    if is_short_strategy:
+                        exit_price = _apply_entry_costs(
+                            close_price, slippage_bps, commission_bps, stt_exit_pct
+                        )
+                    else:
+                        exit_price = _apply_exit_costs(
+                            close_price, slippage_bps, commission_bps, stt_exit_pct
+                        )
                     exit_date = timestamps_iso[i]
                 else:
-                    exit_price = _apply_exit_costs(
-                        float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                    )
+                    if is_short_strategy:
+                        exit_price = _apply_entry_costs(
+                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                        )
+                    else:
+                        exit_price = _apply_exit_costs(
+                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                        )
                     exit_date = timestamps_iso[i + 1]
                 exit_reason = "EXIT_SIGNAL"
 
             # Check max holding candles (time-based stop)
             if exit_price is None and max_holding_candles is not None and holding_candles >= max_holding_candles:
                 if is_session_last_bar or i + 1 >= n_rows:
-                    exit_price = _apply_exit_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
+                    if is_short_strategy:
+                        exit_price = _apply_entry_costs(
+                            close_price, slippage_bps, commission_bps, stt_exit_pct
+                        )
+                    else:
+                        exit_price = _apply_exit_costs(
+                            close_price, slippage_bps, commission_bps, stt_exit_pct
+                        )
                     exit_date = timestamps_iso[i]
                 else:
-                    exit_price = _apply_exit_costs(
-                        float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                    )
+                    if is_short_strategy:
+                        exit_price = _apply_entry_costs(
+                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                        )
+                    else:
+                        exit_price = _apply_exit_costs(
+                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                        )
                     exit_date = timestamps_iso[i + 1]
                 exit_reason = "MAX_HOLDING"
 
@@ -725,35 +975,58 @@ def simulate_trades(
                 and time_exit_cutoff_minutes is not None
                 and int(bar_utc_minutes[i]) >= time_exit_cutoff_minutes
             ):
-                exit_price = _apply_exit_costs(
-                    close_price, slippage_bps, commission_bps, stt_exit_pct
-                )
+                if is_short_strategy:
+                    exit_price = _apply_entry_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
+                else:
+                    exit_price = _apply_exit_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
                 exit_date = timestamps_iso[i]
                 exit_reason = "TIME_EXIT"
 
             if exit_price is None and is_session_last_bar:
-                exit_price = _apply_exit_costs(
-                    close_price, slippage_bps, commission_bps, stt_exit_pct
-                )
+                if is_short_strategy:
+                    exit_price = _apply_entry_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
+                else:
+                    exit_price = _apply_exit_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
                 exit_date = timestamps_iso[i]
                 exit_reason = "SESSION_END"
 
         # ── Book the trade ───────────────────────────────────────────────────
         if exit_price is not None and exit_reason is not None:
-            pnl_inr = exit_price - entry_price          # absolute per-unit P&L in ₹
-            pnl_abs = pnl_inr / entry_price             # fractional return (for compounding)
-            pnl_pct = pnl_abs * 100.0
-
-            # MAE: worst unrealised loss = (min_low - entry) / entry * 100  (≤ 0 for long)
-            # MFE: best unrealised gain  = (max_high - entry) / entry * 100 (≥ 0 for long)
-            mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
-            mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+            # P&L calculation differs for LONG vs SHORT
+            if is_short_strategy:
+                # SHORT: profit when exit < entry (price went down)
+                pnl_inr = entry_price - exit_price      # absolute per-unit P&L in ₹
+                pnl_abs = pnl_inr / entry_price         # fractional return (for compounding)
+                pnl_pct = pnl_abs * 100.0
+                
+                # MAE: worst unrealised loss = (max_high - entry) / entry * 100  (≤ 0 for short)
+                # MFE: best unrealised gain  = (entry - min_low) / entry * 100   (≥ 0 for short)
+                mae_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+                mfe_pct = ((entry_price - _trade_min_low) / entry_price * 100.0) if entry_price else 0.0
+            else:
+                # LONG: profit when exit > entry (price went up)
+                pnl_inr = exit_price - entry_price      # absolute per-unit P&L in ₹
+                pnl_abs = pnl_inr / entry_price         # fractional return (for compounding)
+                pnl_pct = pnl_abs * 100.0
+                
+                # MAE: worst unrealised loss = (min_low - entry) / entry * 100  (≤ 0 for long)
+                # MFE: best unrealised gain  = (max_high - entry) / entry * 100 (≥ 0 for long)
+                mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
+                mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
 
             trades.append(Trade(
                 entry_date=entry_date,
                 exit_date=exit_date,
                 symbol=symbol,
-                side="LONG",
+                side="SHORT" if is_short_strategy else "LONG",
                 entry_price=round(entry_price, 4),
                 exit_price=round(exit_price, 4),
                 pnl_pct=round(pnl_pct, 4),
@@ -766,8 +1039,8 @@ def simulate_trades(
             ))
 
             logger.debug(
-                "Exited trade | symbol=%s exit_reason=%s exit_price=%.4f pnl_pct=%.4f holding_candles=%s",
-                symbol, exit_reason, exit_price, pnl_pct, holding_candles,
+                "Exited trade | symbol=%s side=%s exit_reason=%s exit_price=%.4f pnl_pct=%.4f holding_candles=%s",
+                symbol, "SHORT" if is_short_strategy else "LONG", exit_reason, exit_price, pnl_pct, holding_candles,
             )
 
             if is_intraday:
@@ -785,19 +1058,30 @@ def simulate_trades(
 
     # ── Force-close open trade at end of data ─────────────────────────────────
     if in_trade and entry_index >= 0:
-        last_close = _apply_exit_costs(
-            float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
-        )
-        pnl_inr = last_close - entry_price
-        pnl_abs = pnl_inr / entry_price
-        pnl_pct = pnl_abs * 100.0
-        mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
-        mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+        if is_short_strategy:
+            last_close = _apply_entry_costs(
+                float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
+            )
+            pnl_inr = entry_price - last_close
+            pnl_abs = pnl_inr / entry_price
+            pnl_pct = pnl_abs * 100.0
+            mae_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+            mfe_pct = ((entry_price - _trade_min_low) / entry_price * 100.0) if entry_price else 0.0
+        else:
+            last_close = _apply_exit_costs(
+                float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
+            )
+            pnl_inr = last_close - entry_price
+            pnl_abs = pnl_inr / entry_price
+            pnl_pct = pnl_abs * 100.0
+            mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
+            mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+        
         trades.append(Trade(
             entry_date=entry_date,
             exit_date=str(timestamps_iso[-1]),
             symbol=symbol,
-            side="LONG",
+            side="SHORT" if is_short_strategy else "LONG",
             entry_price=round(entry_price, 4),
             exit_price=round(last_close, 4),
             pnl_pct=round(pnl_pct, 4),
@@ -808,7 +1092,10 @@ def simulate_trades(
             mae_pct=round(mae_pct, 4),
             mfe_pct=round(mfe_pct, 4),
         ))
-        logger.debug("Force-closed open trade at end of data | symbol=%s pnl_pct=%.4f", symbol, pnl_pct)
+        logger.debug(
+            "Force-closed open trade at end of data | symbol=%s side=%s pnl_pct=%.4f",
+            symbol, "SHORT" if is_short_strategy else "LONG", pnl_pct
+        )
 
     diag_summary = _summarise_diagnostics(diagnostics)
     logger.info(

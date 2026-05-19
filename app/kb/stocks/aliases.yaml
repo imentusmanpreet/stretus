@@ -1,38 +1,11 @@
 # Manual aliases. Most matches are auto-derived from display_name tokens.
 # Use this file for ambiguous tickers ("adani" → ADANIENT or ADANIPORTS?) or
 # common spellings the auto-deriver wouldn't find.
+
+# Banking
 hdfc:               HDFCBANK.NS
 hdfc bank:          HDFCBANK.NS
 hdfcbank:           HDFCBANK.NS
-
-ril:                RELIANCE.NS
-reliance:           RELIANCE.NS
-reliance industries: RELIANCE.NS
-
-tcs:                TCS.NS
-tata consultancy:   TCS.NS
-
-infy:               INFY.NS
-infosys:            INFY.NS
-
-adani:              ADANIENT.NS
-adani enterprises:  ADANIENT.NS
-adanient:           ADANIENT.NS
-
-nhpc:               NHPC.NS
-
-suzlon:             SUZLON.NS
-suzlon energy:      SUZLON.NS
-
-gmr:                GMRAIRPORT.NS
-gmr airport:        GMRAIRPORT.NS
-gmr airports:       GMRAIRPORT.NS
-gmrairport:         GMRAIRPORT.NS
-
-idea:               IDEA.NS
-vi:                 IDEA.NS
-vodafone:           IDEA.NS
-vodafone idea:      IDEA.NS
 
 icici:              ICICIBANK.NS
 icici bank:         ICICIBANK.NS
@@ -52,25 +25,273 @@ kotak bank:         KOTAKBANK.NS
 kotak mahindra:     KOTAKBANK.NS
 kotakbank:          KOTAKBANK.NS
 
-airtel:             BHARTIARTL.NS
-bharti:             BHARTIARTL.NS
-bharti airtel:      BHARTIARTL.NS
-bhartiartl:         BHARTIARTL.NS
+pnb:                PNB.NS
+punjab national bank: PNB.NS
 
-itc:                ITC.NS
+indusind:           INDUSINDBK.NS
+indusind bank:      INDUSINDBK.NS
 
-lt:                 LT.NS
-l&t:                LT.NS
-larsen:             LT.NS
-larsen & toubro:    LT.NS
+idfc:               IDFCFIRSTB.NS
+idfc first:         IDFCFIRSTB.NS
+idfc first bank:    IDFCFIRSTB.NS
 
-maruti:             MARUTI.NS
-maruti suzuki:      MARUTI.NS
+canara:             CANBK.NS
+canara bank:        CANBK.NS
 
-sun pharma:         SUNPHARMA.NS
-sunpharma:          SUNPHARMA.NS
+union bank:         UNIONBANK.NS
+
+au bank:            AUBANK.NS
+au small finance:   AUBANK.NS
+
+# Adani Group
+adani:              ADANIENT.NS
+adani enterprises:  ADANIENT.NS
+adanient:           ADANIENT.NS
+
+adani ports:        ADANIPORTS.NS
+adaniports:         ADANIPORTS.NS
+
+adani green:        ADANIGREEN.NS
+adani green energy: ADANIGREEN.NS
+adanigreen:         ADANIGREEN.NS
+
+adani power:        ADANIPOWER.NS
+adanipower:         ADANIPOWER.NS
+
+# Energy & Oil
+ril:                RELIANCE.NS
+reliance:           RELIANCE.NS
+reliance industries: RELIANCE.NS
+
+ongc:               ONGC.NS
+
+ioc:                IOC.NS
+indian oil:         IOC.NS
+
+bpcl:               BPCL.NS
+
+hpcl:               HINDPETRO.NS
+hindustan petroleum: HINDPETRO.NS
+
+gail:               GAIL.NS
+
+oil india:          OIL.NS
+
+# IT
+tcs:                TCS.NS
+tata consultancy:   TCS.NS
+
+infy:               INFY.NS
+infosys:            INFY.NS
 
 hcl:                HCLTECH.NS
 hcltech:            HCLTECH.NS
 hcl tech:           HCLTECH.NS
 hcl technologies:   HCLTECH.NS
+
+wipro:              WIPRO.NS
+
+tech mahindra:      TECHM.NS
+techm:              TECHM.NS
+
+# Telecom
+airtel:             BHARTIARTL.NS
+bharti:             BHARTIARTL.NS
+bharti airtel:      BHARTIARTL.NS
+bhartiartl:         BHARTIARTL.NS
+
+idea:               IDEA.NS
+vi:                 IDEA.NS
+vodafone:           IDEA.NS
+vodafone idea:      IDEA.NS
+
+# Auto
+maruti:             MARUTI.NS
+maruti suzuki:      MARUTI.NS
+
+m&m:                M&M.NS
+mahindra:           M&M.NS
+
+bajaj auto:         BAJAJ-AUTO.NS
+
+hero:               HEROMOTOCO.NS
+hero motocorp:      HEROMOTOCO.NS
+
+eicher:             EICHERMOT.NS
+eicher motors:      EICHERMOT.NS
+
+tata motors:        TATAMOTORS.NS
+
+tvs:                TVSMOTOR.NS
+tvs motor:          TVSMOTOR.NS
+
+bosch:              BOSCHLTD.NS
+
+motherson:          MOTHERSON.NS
+
+# Pharma
+sun pharma:         SUNPHARMA.NS
+sunpharma:          SUNPHARMA.NS
+
+cipla:              CIPLA.NS
+
+dr reddy:           DRREDDY.NS
+dr reddys:          DRREDDY.NS
+
+divis:              DIVISLAB.NS
+divi's lab:         DIVISLAB.NS
+
+torrent:            TORNTPHARM.NS
+torrent pharma:     TORNTPHARM.NS
+
+# FMCG
+hul:                HINDUNILVR.NS
+hindustan unilever: HINDUNILVR.NS
+
+itc:                ITC.NS
+
+britannia:          BRITANNIA.NS
+
+nestle:             NESTLEIND.NS
+nestle india:       NESTLEIND.NS
+
+dabur:              DABUR.NS
+
+godrej:             GODREJCP.NS
+godrej consumer:    GODREJCP.NS
+
+colgate:            COLPAL.NS
+
+tata consumer:      TATACONSUM.NS
+
+# Metals & Mining
+tata steel:         TATASTEEL.NS
+
+jsw:                JSWSTEEL.NS
+jsw steel:          JSWSTEEL.NS
+
+hindalco:           HINDALCO.NS
+
+vedanta:            VEDL.NS
+
+jindal:             JINDALSTEL.NS
+jindal steel:       JINDALSTEL.NS
+
+sail:               SAIL.NS
+
+coal india:         COALINDIA.NS
+
+# Infrastructure & Construction
+lt:                 LT.NS
+l&t:                LT.NS
+larsen:             LT.NS
+larsen & toubro:    LT.NS
+
+# Power
+ntpc:               NTPC.NS
+
+power grid:         POWERGRID.NS
+
+nhpc:               NHPC.NS
+
+jsw energy:         JSWENERGY.NS
+
+bhel:               BHEL.NS
+
+# Financial Services
+bajaj finance:      BAJFINANCE.NS
+
+bajaj finserv:      BAJAJFINSV.NS
+
+hdfc amc:           HDFCAMC.NS
+
+hdfc life:          HDFCLIFE.NS
+
+sbi life:           SBILIFE.NS
+
+icici prudential:   ICICIPRULI.NS
+
+icici lombard:      ICICIGI.NS
+
+lic:                LICI.NS
+
+sbi card:           SBICARD.NS
+
+shriram:            SHRIRAMFIN.NS
+shriram finance:    SHRIRAMFIN.NS
+
+cholamandalam:      CHOLAFIN.NS
+
+muthoot:            MUTHOOTFIN.NS
+muthoot finance:    MUTHOOTFIN.NS
+
+pfc:                PFC.NS
+power finance:      PFC.NS
+
+rec:                RECLTD.NS
+
+jio financial:      JIOFIN.NS
+
+# Cement
+ultratech:          ULTRACEMCO.NS
+ultratech cement:   ULTRACEMCO.NS
+
+ambuja:             AMBUJACEM.NS
+ambuja cement:      AMBUJACEM.NS
+
+grasim:             GRASIM.NS
+
+# Others
+gmr:                GMRAIRPORT.NS
+gmr airport:        GMRAIRPORT.NS
+gmr airports:       GMRAIRPORT.NS
+gmrairport:         GMRAIRPORT.NS
+
+suzlon:             SUZLON.NS
+suzlon energy:      SUZLON.NS
+
+asian paints:       ASIANPAINT.NS
+
+titan:              TITAN.NS
+
+trent:              TRENT.NS
+
+indigo:             INDIGO.NS
+
+irctc:              IRCTC.NS
+
+apollo:             APOLLOHOSP.NS
+apollo hospital:    APOLLOHOSP.NS
+
+dlf:                DLF.NS
+
+lodha:              LODHA.NS
+
+indian hotels:      INDHOTEL.NS
+
+naukri:             NAUKRI.NS
+
+page industries:    PAGEIND.NS
+
+pidilite:           PIDILITIND.NS
+
+pi industries:      PIIND.NS
+
+siemens:            SIEMENS.NS
+
+srf:                SRF.NS
+
+havells:            HAVELLS.NS
+
+voltas:             VOLTAS.NS
+
+bel:                BEL.NS
+bharat electronics: BEL.NS
+
+hal:                HAL.NS
+
+cg power:           CGPOWER.NS
+
+varun beverages:    VBL.NS
+
+eternal:            ETERNAL.NS

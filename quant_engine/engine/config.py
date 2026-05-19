@@ -20,6 +20,8 @@ METRICS              — computation parameters (trading calendar, caps, confide
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 # ── Pass / Fail thresholds (objective-aware) ──────────────────────────────────
 # These control whether a backtest result is marked pass=True or pass=False.
 # min_trades=0 disables trade-count gating; total_trades are still reported fully.
@@ -122,8 +124,15 @@ ENTRY_CONDITION_SLOW_WINDOW = 30    # bars for the slow moving average
 
 # ── Backtest market-data window ────────────────────────────────────────────────
 # All backtests are constrained to this inclusive UTC window.
+# Start date is fixed, end date is dynamically set to current date/time.
 BACKTEST_MARKET_DATA_FROM_UTC = "2024-01-01T00:00:00Z"
-BACKTEST_MARKET_DATA_TO_UTC   = "2026-03-31T23:59:59Z"
+
+def _get_current_utc_timestamp() -> str:
+    """Return current UTC timestamp in ISO format with 'Z' suffix."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+# Dynamic end date - always uses current date and time
+BACKTEST_MARKET_DATA_TO_UTC = _get_current_utc_timestamp()
 
 # ── Metrics computation parameters ────────────────────────────────────────────
 DEFAULT_STARTING_BALANCE: float = 10_000.0

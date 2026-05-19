@@ -22,7 +22,7 @@ class StubLLM:
 
 def _builder(**overrides):
     base = dict(
-        symbol="hdfc", timeframe="1m", sentiment="bullish",
+        symbol="hdfc bank", timeframe="1m", sentiment="bullish",
         experience="beginner", objective="positional",
         goal="short profit and quick trades",
     )

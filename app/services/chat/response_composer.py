@@ -44,6 +44,23 @@ def _format_int(value: Any) -> str | None:
         return None
 
 
+def _bare_stock_symbol(value: Any) -> str:
+    text = _compact_text(value)
+    return text.split(".", 1)[0] if text else ""
+
+
+def _format_stock_option(option: Any, index: int) -> str:
+    if isinstance(option, dict):
+        symbol = _bare_stock_symbol(option.get("symbol")).lower()
+        display_name = _compact_text(option.get("display_name"))
+    else:
+        symbol = _bare_stock_symbol(option).lower()
+        display_name = ""
+    if symbol and display_name:
+        return f"{index}. {symbol} ({display_name})"
+    return f"{index}. {symbol or display_name}"
+
+
 def normalize_backtest_failure_reason(reason: str | None) -> str:
     message = _compact_text(reason)
     if not message:
@@ -88,7 +105,6 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
             "• Clear entry and exit rules\n"
             "• Risk and reward parameters\n"
             "• Backtest performance insights\n\n"
-            f"Currently supported stocks: {SUPPORTED_STOCK_SELECTION_PROMPT}.\n\n"
             "Required Inputs (with examples):\n"
             "• Stock Selection: TCS\n"
             "• Timeframe: 5 Min / 15 Min / 1 Hour / Daily\n"
@@ -132,6 +148,25 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
             "This stock is not currently supported for strategy creation and backtesting.\n\n"
             f"Currently supported stocks are: {supported_stocks_display}. "
             "Please select one of these to continue."
+        )
+
+    if code == "validation.ambiguous_stock":
+        stock_query = _compact_text(facts.get("stock_query"), "that")
+        options = facts.get("stock_options")
+        if not isinstance(options, list):
+            options = []
+        option_text = ", ".join(
+            _format_stock_option(option, idx)
+            for idx, option in enumerate(options, start=1)
+        )
+        if option_text:
+            return (
+                f"I found multiple stocks starting with '{stock_query}'. "
+                f"Please choose one: {option_text}."
+            )
+        return (
+            f"I found multiple stocks starting with '{stock_query}'. "
+            "Please type the full stock symbol or company name."
         )
 
     if code == "validation.unsupported_timeframe":
@@ -198,15 +233,6 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         return f"{preface}\n{question}".strip() if preface else question
 
     if code == "workflow.input_summary_confirmation":
-        # When a comprehensive summary body has already been rendered by the
-        # caller (built from the SemanticExtractor over the user's full
-        # prompt), use it verbatim — it covers every dimension the user can
-        # have mentioned. The compact 6-line fallback below is used only on
-        # legacy paths where no extractor has run.
-        summary_text = facts.get("summary_text")
-        if isinstance(summary_text, str) and summary_text.strip():
-            return summary_text.strip()
-
         asset = _compact_text(facts.get("asset"), "this asset")
         timeframe = _compact_text(facts.get("timeframe"))
         objective = _compact_text(facts.get("objective"))
@@ -220,36 +246,6 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
             f"Experience: {experience}\n"
             f"Goal: {goal}\n\n"
             "Please confirm if these details are correct. I will then plan the signals."
-        )
-
-    if code == "workflow.missing_critical_inputs":
-        items = facts.get("missing_items") or []
-        if not isinstance(items, (list, tuple)) or not items:
-            return (
-                "Before I can build the signals, I need a couple of details "
-                "that were not in your prompt. Please describe your stop loss "
-                "and exit condition."
-            )
-        bullets: list[str] = []
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            label = _compact_text(entry.get("label"), "")
-            question = _compact_text(entry.get("question"), "")
-            if label and question:
-                bullets.append(f"- {label}: {question}")
-            elif label:
-                bullets.append(f"- {label}")
-            elif question:
-                bullets.append(f"- {question}")
-        body = "\n".join(bullets) if bullets else "- exit rules"
-        return (
-            "Before I can build the entry and exit signals, I need a few "
-            "details that were not in your prompt. I am not filling these "
-            "in with defaults — please tell me what you want:\n"
-            f"{body}\n\n"
-            "Once you reply, I will update the summary and ask you to "
-            "confirm before building."
         )
 
     if code == "workflow.signal_plan_ready":
@@ -402,6 +398,14 @@ def build_unsupported_stock_message(supported_stocks_display: str) -> str:
     return compose_response(
         "validation.unsupported_stock",
         supported_stocks_display=supported_stocks_display,
+    )
+
+
+def build_ambiguous_stock_message(stock_query: str, stock_options: list[dict[str, Any]]) -> str:
+    return compose_response(
+        "validation.ambiguous_stock",
+        stock_query=stock_query,
+        stock_options=stock_options,
     )
 
 

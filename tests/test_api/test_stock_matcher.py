@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core.supported_stocks import UNSUPPORTED_STOCK_MESSAGE, is_supported_stock_symbol
+from app.core.supported_stocks import SUPPORTED_STOCKS_DISPLAY, UNSUPPORTED_STOCK_MESSAGE, is_supported_stock_symbol
 from app.services.knowledge.stock_matcher import _direct_supported_stock_match
 
 
@@ -8,7 +8,7 @@ def test_resolve_supported_stock_direct_symbol_match_for_supported_names():
     for query, expected_symbol in (
         ("TCS", "TCS"),
         ("HDFCBANK", "HDFCBANK"),
-        ("HDFC", "HDFCBANK"),
+        ("HDFC Bank", "HDFCBANK"),
         ("INFY", "INFY"),
         ("ADANIENT", "ADANIENT"),
         ("RELIANCE", "RELIANCE"),
@@ -25,6 +25,19 @@ def test_resolve_supported_stock_direct_symbol_match_for_supported_names():
 
         assert result is not None
         assert result["symbol"] == expected_symbol
+
+
+def test_direct_supported_stock_match_flags_ambiguous_prefixes():
+    result = _direct_supported_stock_match("hdfc")
+
+    assert result is not None
+    assert result["ambiguous"] is True
+    assert {match["symbol"] for match in result["matches"]} == {
+        "HDFCAMC.NS",
+        "HDFCBANK.NS",
+        "HDFCLIFE.NS",
+    }
+    assert result["validation_code"] == "validation.ambiguous_stock"
 
 
 def test_direct_supported_stock_match_accepts_exchange_suffix_inputs():
@@ -46,10 +59,8 @@ def test_direct_supported_stock_match_accepts_exchange_suffix_inputs():
 def test_supported_stock_message_matches_requested_copy():
     assert UNSUPPORTED_STOCK_MESSAGE == (
         "This stock is not currently supported for strategy creation and backtesting.\n\n"
-        "Currently supported stocks are: Adani Enterprises, Axis Bank, Bharti Airtel, GMR Airports, "
-        "HCL Technologies, HDFC Bank, ICICI Bank, ITC, Infosys, Kotak Mahindra Bank, Larsen & Toubro, "
-        "Maruti Suzuki India, NHPC, Reliance Industries, State Bank of India, Sun Pharmaceutical Industries, "
-        "Suzlon Energy, Tata Consultancy Services, and Vodafone Idea. Please select one of these to continue."
+        f"Currently supported stocks are: {SUPPORTED_STOCKS_DISPLAY}. "
+        "Please select one of these to continue."
     )
 
 
@@ -60,4 +71,5 @@ def test_is_supported_stock_symbol_handles_exchange_suffixes():
     assert is_supported_stock_symbol("SUZLON.NS") is True
     assert is_supported_stock_symbol("GMRAIRPORT.NS") is True
     assert is_supported_stock_symbol("IDEA.NS") is True
-    assert is_supported_stock_symbol("COALINDIA.NS") is False
+    assert is_supported_stock_symbol("COALINDIA.NS") is True
+    assert is_supported_stock_symbol("NOTREAL.NS") is False

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 
@@ -33,6 +35,30 @@ class KBLoadError(RuntimeError):
     """Raised when KB files are malformed or required ones are missing."""
 
 
+@dataclass(frozen=True)
+class StockLookupResolution:
+    """Result of resolving a user-entered stock query."""
+
+    stock: Stock | None = None
+    ambiguous_matches: tuple[Stock, ...] = ()
+
+    @property
+    def is_ambiguous(self) -> bool:
+        return len(self.ambiguous_matches) > 1
+
+
+def _strip_exchange_hint(value: str) -> str:
+    text = str(value or "").strip()
+    if ":" in text:
+        _, text = text.split(":", 1)
+    return re.sub(r"\.(?:NS|BO)$", "", text, flags=re.IGNORECASE).strip()
+
+
+def _stock_key(value: str) -> str:
+    """Compact stock names/symbols for exact and prefix comparisons."""
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
 def _read_yaml(path: Path) -> dict:
     if not path.exists():
         raise KBLoadError(f"KB file not found: {path}")
@@ -49,7 +75,7 @@ class KB:
     Usage:
         from app.kb import kb
         card = kb.signals["ema_cross_up"]
-        stock = kb.lookup_stock("hdfc")
+        stock = kb.lookup_stock("hdfc bank")
     """
 
     def __init__(self, root: Path = _KB_ROOT) -> None:
@@ -166,7 +192,7 @@ class KB:
 
     def _invalidate_indexes(self) -> None:
         # Clear cached_property values so the next access recomputes.
-        for key in ("signals_by_role", "_auto_aliases"):
+        for key in ("signals_by_role", "_auto_aliases", "_stock_exact_index", "_stock_prefix_keys"):
             self.__dict__.pop(key, None)
         # presets is a plain dict (re-populated on _load), so nothing to clear here.
 
@@ -190,29 +216,103 @@ class KB:
             out[full] = symbol                      # full name
         return out
 
+    @cached_property
+    def _stock_exact_index(self) -> dict[str, str]:
+        """Normalized exact stock names/symbols to canonical symbols."""
+        out: dict[str, str] = {}
+        for symbol, stock in self.stocks.items():
+            bare = symbol.split(".", 1)[0]
+            keys = {
+                _stock_key(symbol),
+                _stock_key(bare),
+                _stock_key(stock.display_name),
+            }
+            for key in keys:
+                if key:
+                    out.setdefault(key, symbol)
+        return out
+
+    @cached_property
+    def _stock_prefix_keys(self) -> dict[str, tuple[str, ...]]:
+        """Canonical symbol to normalized strings that users naturally prefix."""
+        out: dict[str, tuple[str, ...]] = {}
+        for symbol, stock in self.stocks.items():
+            bare = symbol.split(".", 1)[0]
+            keys = {
+                _stock_key(bare),
+                _stock_key(stock.display_name),
+            }
+            out[symbol] = tuple(sorted(key for key in keys if key))
+        return out
+
     # ── Public lookups ────────────────────────────────────────────────────────
 
-    def lookup_stock(self, query: str) -> Stock | None:
-        """Resolve a free-text query to a Stock. Returns None if unknown."""
+    def prefix_stock_matches(self, query: str) -> list[Stock]:
+        """Stocks whose symbol or display name starts with the query."""
+        q = _stock_key(_strip_exchange_hint(query))
+        if not q:
+            return []
+
+        matches: dict[str, Stock] = {}
+        for symbol, keys in self._stock_prefix_keys.items():
+            if any(key.startswith(q) for key in keys):
+                stock = self.stocks.get(symbol)
+                if stock is not None:
+                    matches[symbol] = stock
+
+        return sorted(matches.values(), key=lambda stock: stock.symbol)
+
+    def resolve_stock_query(self, query: str) -> StockLookupResolution:
+        """Resolve a user stock query without guessing on ambiguous prefixes.
+
+        Exact symbol/name matches win first. If the query is only a shared
+        prefix (for example "hdfc" or "icici"), the caller gets the matching
+        choices and can ask the user to pick one.
+        """
         if not query:
-            return None
-        q = query.strip().lower()
+            return StockLookupResolution()
+
+        raw = str(query).strip()
+        if not raw:
+            return StockLookupResolution()
+        q_lower = raw.lower()
+        q_key = _stock_key(_strip_exchange_hint(raw))
 
         # Direct symbol match (e.g. "HDFCBANK.NS")
         for symbol, stock in self.stocks.items():
-            if symbol.lower() == q:
-                return stock
+            if symbol.lower() == q_lower:
+                return StockLookupResolution(stock=stock)
 
-        # Manual aliases
-        if q in self.aliases:
-            sym = self.aliases[q]
-            return self.stocks.get(sym)
+        exact_symbol = self._stock_exact_index.get(q_key)
+        if exact_symbol:
+            stock = self.stocks.get(exact_symbol)
+            if stock is not None:
+                return StockLookupResolution(stock=stock)
+
+        prefix_matches = self.prefix_stock_matches(raw)
+        if len(prefix_matches) > 1:
+            return StockLookupResolution(ambiguous_matches=tuple(prefix_matches))
+        if len(prefix_matches) == 1:
+            return StockLookupResolution(stock=prefix_matches[0])
+
+        # Manual aliases are a fallback only after prefix ambiguity has been
+        # ruled out, so broad aliases like "hdfc" cannot silently pick a stock.
+        if q_lower in self.aliases:
+            sym = self.aliases[q_lower]
+            return StockLookupResolution(stock=self.stocks.get(sym))
 
         # Auto-derived aliases
-        if q in self._auto_aliases:
-            return self.stocks.get(self._auto_aliases[q])
+        if q_lower in self._auto_aliases:
+            return StockLookupResolution(stock=self.stocks.get(self._auto_aliases[q_lower]))
 
-        return None
+        return StockLookupResolution()
+
+    def lookup_stock(self, query: str) -> Stock | None:
+        """Resolve a free-text query to a Stock. Returns None if unknown."""
+        resolution = self.resolve_stock_query(query)
+        if resolution.is_ambiguous:
+            return None
+        return resolution.stock
 
     def signals_with_role(self, role: str) -> list[SignalCard]:
         """All cards that can serve in a given role."""
@@ -237,23 +337,119 @@ class KB:
         return None
 
     def detect_preset_in_text(self, text: str) -> StrategyPreset | None:
-        """Scan free text for a preset keyword. Used by the chat layer to
-        pin a preset from the user's goal sentence — e.g. 'I want an ORB
-        strategy on RELIANCE 5m'. Picks the longest matching keyword to avoid
-        'orb' grabbing a sentence that says 'opening range breakout'."""
+        """Scan free text for a preset keyword and return the best match.
+
+        Scoring: for each preset, sum the lengths of *all* matching keywords in
+        the text.  The preset with the highest total score wins.  Ties are
+        broken by the count of matching keywords (more matches = better fit),
+        then by the length of the single longest matching keyword.
+
+        Why sum-of-lengths instead of longest-single-match:
+        - A user saying "ORB strategy with structural SL at opening range low"
+          produces a higher combined score for `orb_structural` (which has a
+          long keyword covering that exact phrase) than for `orb` (which only
+          has shorter keywords matching the first half of the sentence).
+        - This makes every strategy variant self-detecting from its own keyword
+          list without any hard-coded upgrade logic.
+        """
         if not text:
             return None
         haystack = f" {text.strip().lower()} "
-        best: tuple[int, StrategyPreset] | None = None
+
+        # score_map: preset → (total_length, match_count, longest_match)
+        score_map: dict[str, tuple[int, int, int]] = {}
+        preset_map: dict[str, StrategyPreset] = {}
+
         for preset in self.presets.values():
+            total_len = 0
+            count = 0
+            longest = 0
             for keyword in preset.keywords:
                 kw = keyword.strip().lower()
                 if not kw:
                     continue
-                if f" {kw} " in haystack or haystack.startswith(f"{kw} ") or haystack.endswith(f" {kw}"):
-                    if best is None or len(kw) > best[0]:
-                        best = (len(kw), preset)
-        return best[1] if best else None
+                if (
+                    f" {kw} " in haystack
+                    or haystack.startswith(f"{kw} ")
+                    or haystack.endswith(f" {kw}")
+                ):
+                    klen = len(kw)
+                    total_len += klen
+                    count += 1
+                    if klen > longest:
+                        longest = klen
+            if count > 0:
+                score_map[preset.name] = (total_len, count, longest)
+                preset_map[preset.name] = preset
+
+        if not score_map:
+            return None
+
+        best_name = max(
+            score_map,
+            key=lambda n: score_map[n],   # tuple comparison: total_len, count, longest
+        )
+        logger.debug(
+            "kb|detect_preset|scores=%s|winner=%s",
+            {n: score_map[n] for n in score_map},
+            best_name,
+        )
+        return preset_map[best_name]
+
+    def detect_primary_framework_in_text(self, text: str) -> StrategyPreset | None:
+        """Like ``detect_preset_in_text`` but restricted to primary-framework
+        presets (``is_primary_framework=True``).
+
+        Use this when you need the *structural* strategy framework from the
+        user's text and want to prevent filter/modifier presets (e.g.
+        ``relative_strength``) from being promoted to primary-framework status
+        just because their keywords appear in the sentence.
+
+        Example: "ORB strategy with relative strength filter vs NIFTY"
+          - ``detect_preset_in_text``       → might return ``relative_strength``
+          - ``detect_primary_framework_in_text`` → returns ``orb_structural``
+        """
+        if not text:
+            return None
+        haystack = f" {text.strip().lower()} "
+
+        score_map: dict[str, tuple[int, int, int]] = {}
+        preset_map: dict[str, StrategyPreset] = {}
+
+        for preset in self.presets.values():
+            if not preset.is_primary_framework:
+                continue
+            total_len = 0
+            count = 0
+            longest = 0
+            for keyword in preset.keywords:
+                kw = keyword.strip().lower()
+                if not kw:
+                    continue
+                if (
+                    f" {kw} " in haystack
+                    or haystack.startswith(f"{kw} ")
+                    or haystack.endswith(f" {kw}")
+                ):
+                    klen = len(kw)
+                    total_len += klen
+                    count += 1
+                    if klen > longest:
+                        longest = klen
+            if count > 0:
+                score_map[preset.name] = (total_len, count, longest)
+                preset_map[preset.name] = preset
+
+        if not score_map:
+            return None
+
+        best_name = max(score_map, key=lambda n: score_map[n])
+        logger.debug(
+            "kb|detect_primary_framework|scores=%s|winner=%s",
+            {n: score_map[n] for n in score_map},
+            best_name,
+        )
+        return preset_map[best_name]
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

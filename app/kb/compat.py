@@ -8,7 +8,29 @@ use kb.* directly, this module can be deleted.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from app.kb import kb
+from app.kb.schemas import Stock
+
+
+AMBIGUOUS_STOCK_VALIDATION_CODE = "validation.ambiguous_stock"
+
+
+def _stock_option(stock: Stock) -> dict[str, str]:
+    return {
+        "symbol": stock.symbol,
+        "display_name": stock.display_name,
+        "exchange": stock.exchange,
+        "sector": stock.sector,
+    }
+
+
+def ambiguous_stock_validation_facts(query: str, matches: list[Stock] | tuple[Stock, ...]) -> dict[str, Any]:
+    return {
+        "stock_query": " ".join(str(query or "").split()).strip(),
+        "stock_options": [_stock_option(stock) for stock in matches],
+    }
 
 
 def get_all_market_configs() -> dict[str, dict]:
@@ -65,7 +87,17 @@ async def resolve_supported_stock(query: str) -> dict | None:
     """
     if not query or not str(query).strip():
         return None
-    stock = kb.lookup_stock(str(query))
+    resolution = kb.resolve_stock_query(str(query))
+    if resolution.is_ambiguous:
+        facts = ambiguous_stock_validation_facts(str(query), resolution.ambiguous_matches)
+        return {
+            "ambiguous": True,
+            "validation_code": AMBIGUOUS_STOCK_VALIDATION_CODE,
+            "validation_facts": facts,
+            "matches": facts["stock_options"],
+        }
+
+    stock = resolution.stock
     if stock is None:
         return None
     return {

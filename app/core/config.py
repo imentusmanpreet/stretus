@@ -132,8 +132,9 @@ class Settings(BaseSettings):
     historical_data_url: str = ""
     historical_data_timeout_seconds: float = 60.0
     quant_engine_timeout_seconds: float = 180.0
-    # Inclusive range from 2024-01-01 through 2026-03-31.
-    backtest_default_lookback_days: int = 821
+    # Inclusive range from 2024-01-01 through current date (dynamically calculated).
+    # Note: backtest_default_lookback_days is approximate and recalculated at runtime.
+    backtest_default_lookback_days: int = 868
     # Short lookback used ONLY for signal parameter estimation (planner).
     # Kept small to avoid rate-limit errors on 1-minute interval fetches.
     signal_eval_lookback_days: int = 30

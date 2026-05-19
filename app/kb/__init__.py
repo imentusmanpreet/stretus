@@ -11,6 +11,6 @@ Public API:
         TimeframeConfig, IntentTaxonomy, StrategyPlan, PickedSignal,
     )
 """
-from app.kb.loader import kb
+from app.kb.loader import StockLookupResolution, kb
 
-__all__ = ["kb"]
+__all__ = ["StockLookupResolution", "kb"]

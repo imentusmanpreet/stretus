@@ -54,12 +54,30 @@ def _tool(name: AgentToolName, description: str, parameters: dict[str, Any]) -> 
 AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     _tool(
         AgentToolName.MODIFY_STRATEGY_INPUTS,
-        "Create or update strategy inputs. Use whenever the user provides or changes stock, timeframe, objective, sentiment, experience, or goal.",
+        (
+            "Create or update strategy inputs. Use whenever the user provides or changes "
+            "stock, timeframe, objective, sentiment, experience, goal, or strategy preset. "
+            "Also use when the user mentions risk settings (SL, TP, RR, per-trade risk, "
+            "daily cap, position sizing, trailing stop, trading window) for the FIRST time "
+            "during input collection — the backend extracts them automatically from the raw "
+            "user message, so you do not need to parse them yourself."
+        ),
         {
             "type": "object",
             "properties": {
                 "session_id": {"type": "string"},
                 **_CORE_INPUT_PROPERTIES,
+                "strategy_preset": {
+                    "type": "string",
+                    "description": (
+                        "Canonical preset name to pin (e.g. 'orb', 'orb_structural', "
+                        "'trend_following', 'mean_reversion', 'smart_money', 'vwap_reversal', "
+                        "'relative_strength', 'volatility_squeeze', 'opening_drive', "
+                        "'mtf_confluence', 'options_flow_gamma', 'ema_pullback', "
+                        "'ema_pullback_trail', 'range_breakout', 'volume_breakout_52w'). "
+                        "Set when the user names a strategy by name or mechanics."
+                    ),
+                },
                 "preserve_unmentioned_fields": {"type": "boolean", "default": True},
             },
             "required": ["session_id"],
@@ -174,17 +192,49 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         AgentToolName.UPDATE_RISK_EXECUTION_CONFIG,
-        "Update risk and execution settings such as stop loss, target, daily loss cap, per-trade risk, or max trades.",
+        (
+            "Update or confirm risk and execution settings: stop loss, take profit, "
+            "risk:reward ratio, daily loss cap, per-trade risk, max trades, trailing stop, "
+            "or trading window. Use when the user explicitly provides or changes any of these "
+            "values AFTER inputs are already collected, or when confirming proposed defaults."
+        ),
         {
             "type": "object",
             "properties": {
                 "session_id": {"type": "string"},
                 "strategy_id": {"type": "string"},
-                "stop_loss_pct": {"type": "number"},
-                "take_profit_pct": {"type": "number"},
-                "daily_loss_cap": {"type": "number"},
-                "per_trade_risk": {"type": "number"},
-                "max_trades": {"type": "integer"},
+                "stop_loss_pct": {
+                    "type": "number",
+                    "description": "Stop loss as a percentage, e.g. 1.5 for 1.5%.",
+                },
+                "take_profit_pct": {
+                    "type": "number",
+                    "description": "Take profit as a percentage, e.g. 3.0 for 3%.",
+                },
+                "risk_reward": {
+                    "type": "number",
+                    "description": "Risk:reward ratio expressed as the reward side, e.g. 2.0 for 1:2.",
+                },
+                "daily_loss_cap": {
+                    "type": "number",
+                    "description": "Maximum daily loss as a percentage of capital, e.g. 3.0 for 3%.",
+                },
+                "per_trade_risk": {
+                    "type": "number",
+                    "description": "Capital risked per trade as a percentage, e.g. 1.0 for 1%.",
+                },
+                "max_trades": {
+                    "type": "integer",
+                    "description": "Maximum simultaneous open positions.",
+                },
+                "trailing_stop_pct": {
+                    "type": "number",
+                    "description": "Trailing stop distance as a percentage, e.g. 2.0 for 2%.",
+                },
+                "trading_window": {
+                    "type": "string",
+                    "description": "Trading window in IST, e.g. '09:15-11:00' or '09:15-15:15'.",
+                },
             },
             "required": ["session_id"],
             "additionalProperties": False,
@@ -198,6 +248,10 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "session_id": {"type": "string"},
                 **_CORE_INPUT_PROPERTIES,
+                "strategy_preset": {
+                    "type": "string",
+                    "description": "Canonical preset name to pin for the new strategy.",
+                },
             },
             "required": ["session_id"],
             "additionalProperties": False,

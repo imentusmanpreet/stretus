@@ -21,6 +21,7 @@ import logging
 import re
 from typing import Optional
 
+from app.kb.market_aliases import BENCHMARK_ALIASES, normalise_benchmark
 from app.kb.execution_schemas import (
     CandleConfirmation,
     HTFCondition,
@@ -52,46 +53,65 @@ class SemanticExtractor:
     """Parse natural language strategy prompts into structured execution instructions."""
 
     # Strategy family keywords mapped to family names
-    STRATEGY_FAMILIES = {
-        "orb": "ORB",
-        "opening range breakout": "ORB",
-        "vwap": "VWAP_RECLAIM",
-        "vwap reclaim": "VWAP_RECLAIM",
-        "ema pullback": "EMA_PULLBACK",
-        "ema retracement": "EMA_PULLBACK",
-        "momentum": "MOMENTUM",
-        "reversal": "REVERSAL",
-        "ict": "ICT_BOS_FVG",
-        "break of structure": "ICT_BOS_FVG",
-        "bos fvg": "ICT_BOS_FVG",
-        "mean reversion": "MEAN_REVERSION",
-        "breakout": "BREAKOUT",
-        "scalping": "SCALPING",
-    }
+    STRATEGY_FAMILIES: dict[str, str] = {}  # Removed — framework detection is now KB-driven via SemanticIntentNormalizer
 
     # HTF patterns: phrases that indicate higher-timeframe conditions
     HTF_PATTERNS = [
         (r"(?:trend\s+should\s+remain|higher\s+timeframe\s+trend|timeframe.*?trend)\s+(?:bullish|bearish|up|down)", "generic_htf_trend"),
-        (r"(?:higher\s+highs|higher\s+lows|bullish\s+structure|bearish\s+structure).*?(?:should|continue|forming)", "structural_trend"),  # "Higher highs should continue forming"
+        (r"(?:higher\s+highs|higher\s+lows|bullish\s+structure|bearish\s+structure).*?(?:should|continue|forming)", "structural_trend"),
         (r"(\d+[mh]|daily|weekly|hourly)\s+(?:trend|ema|rsi|macd|momentum).*?(?:bullish|bearish|up|down|above|below)", "trend_condition"),
         (r"(?:higher\s+timeframe|htf|upper\s+tf|h\.?t\.?f\.?).*?(?:bullish|bearish|up|down|should)", "htf_direction"),
         (r"(\d+h|daily)\s+(?:trend|close|ema)\s+(?:should\s+be|must\s+be|should\s+remain)\s+(bullish|bearish|up|down)", "htf_requirement"),
         (r"(?:trade\s+only\s+with|trade\s+when|only\s+trade\s+if|when).*?(\d+[mh]|daily)\s+(.+?)(?:\.|,|$)", "conditional_htf"),
+        # Simple patterns: "1h ema above", "daily trend bullish", "above 1h EMA"
+        (r"(?:above|below)\s+(?:the\s+)?(\d+[mh]|daily|weekly)\s+(?:ema|sma|trend|vwap)", "above_below_htf"),
+        (r"(\d+[mh]|daily|weekly)\s+(?:ema|sma|trend|vwap)\s+(?:should\s+be\s+)?(?:above|below|bullish|bearish|rising|falling)", "htf_indicator_direction"),
+        # "Bank Nifty direction should support", "index should be bullish"
+        (r"(?:bank\s*nifty|nifty|index|market)\s+(?:direction|trend)\s+(?:should|must)\s+(?:support|be\s+(?:bullish|bearish|up|down))", "index_direction"),
+        # "trade only in direction of daily trend"
+        (r"(?:direction of|aligned with|in line with)\s+(?:the\s+)?(\d+[mh]|daily|weekly)\s+(?:trend|ema|structure)", "aligned_with_htf"),
     ]
 
-    # SL anchor patterns (more specific patterns first)
+    # SL anchor patterns (more specific patterns first).
+    # Patterns are ordered: forward-order ("anchor as stop") before
+    # backward-order ("stop at anchor") so the most natural phrasing wins.
     SL_PATTERNS = [
-        (r"below\s+(?:\w+\s+)*reclaim\s+candle\s+low", "candle_low"),  # "below VWAP reclaim candle low"
-        (r"below\s+(?:the\s+)?(?:vwap\s+)?reclaim\s+candle", "candle_low"),  # alternate format
-        (r"below\s+(?:recent\s+)?swing\s+low", "swing_low"),  # "below recent swing low" or "below swing low"
-        (r"below\s+(?:the\s+)?recent\s+(?:swing\s+)?low", "swing_low"),  # alternate
+        # ── Forward-order patterns: "anchor as [structural] stop [loss]" ──────
+        # e.g. "use opening range low as structural stop loss"
+        (r"opening\s+range\s+low\s+as\s+(?:(?:structural|the|a)\s+)?stop(?:\s+loss)?", "orb_low"),
+        (r"(?:orb|opening\s+range)\s+low\s+(?:as|is|=)\s+(?:the\s+)?(?:structural\s+)?stop", "orb_low"),
+        (r"(?:candle|bar|breakout\s+candle)\s+low\s+as\s+(?:(?:structural|the|a)\s+)?stop(?:\s+loss)?", "candle_low"),
+        (r"swing\s+low\s+as\s+(?:(?:structural|the|a)\s+)?stop(?:\s+loss)?", "swing_low"),
+        (r"vwap\s+(?:level\s+)?as\s+(?:the\s+)?stop(?:\s+loss)?", "vwap_deviation"),
+        (r"opposite\s+(?:end|side)\s+of\s+(?:the\s+)?(?:orb|range|candle)\s+as\s+(?:the\s+)?stop", "opposite_side"),
+        # ── Backward-order patterns: "stop at/below anchor" ──────────────────
+        (r"below\s+(?:\w+\s+)*reclaim\s+candle\s+low", "candle_low"),
+        (r"below\s+(?:the\s+)?(?:vwap\s+)?reclaim\s+candle", "candle_low"),
+        (r"below\s+(?:recent\s+)?swing\s+low", "swing_low"),
+        (r"below\s+(?:the\s+)?recent\s+(?:swing\s+)?low", "swing_low"),
         (r"below\s+(?:the\s+)?orb\s+low", "orb_low"),
         (r"opposite\s+side\s+(?:of\s+)?(?:the\s+)?candle", "opposite_side"),
         (r"below\s+(?:the\s+)?wick\s+low", "candle_low"),
         (r"below\s+vwap", "vwap_deviation"),
-        (r"(?:stop\s+loss|sl)\s+(?:at\s+)?(?:below\s+)?(?:recent\s+)?swing\s+low", "swing_low"),  # explicit SL reference
-        (r"(\d+\.?\d*)\s*(?:atr|x\s*atr)\s+(?:below|padding|padded)", "atr_padded"),  # ATR padding
-        (r"(?:with\s+)?atr\s+padding", "atr_padded"),  # ATR padding standalone
+        # "below breakout candle low" / "below entry candle low" / "below previous candle low"
+        (r"below\s+(?:the\s+)?(?:breakout|entry|previous|prior|key)\s+candle\s+low", "candle_low"),
+        # "below the candle low" (generic)
+        (r"below\s+(?:the\s+)?candle(?:\s+low)?", "candle_low"),
+        # "structure-based stop loss" / "structural stop loss" / "use structure as stop"
+        (r"struct(?:ure|ural)\s*[- ]?based\s+stop(?:\s+loss)?", "swing_low"),
+        (r"struct(?:ure|ural)\s+stop(?:\s+loss)?", "swing_low"),
+        (r"use\s+struct(?:ure|ural)\s+(?:as|for)\s+(?:the\s+)?stop", "swing_low"),
+        # "previous candle low" / "prior candle low" as implicit SL
+        (r"(?:stop|sl)\s+(?:at\s+)?(?:the\s+)?(?:previous|prior|last)\s+candle\s+low", "candle_low"),
+        (r"(?:stop\s+loss|sl)\s+(?:at\s+)?(?:below\s+)?(?:recent\s+)?swing\s+low", "swing_low"),
+        (r"(\d+\.?\d*)\s*(?:atr|x\s*atr)\s+(?:below|padding|padded)", "atr_padded"),
+        (r"(?:with\s+)?atr\s+padding", "atr_padded"),
+        (r"(?:sl|stop(?:\s*loss)?)\s+(?:at\s+)?(?:the\s+)?opening\s+range\s+low", "orb_low"),
+        (r"(?:sl|stop(?:\s*loss)?)\s+(?:at\s+)?(?:the\s+)?9[:h]15\s+candle\s+low", "candle_low"),
+        (r"(?:sl|stop(?:\s*loss)?)\s+(?:at\s+)?(?:the\s+)?first\s+candle\s+low", "candle_low"),
+        (r"below\s+(?:the\s+)?(?:9[:h]15|opening)\s+candle", "candle_low"),
+        (r"(?:sl|stop)\s+=\s*(?:opening\s+range|orb)\s+low", "orb_low"),
+        (r"sl\s+at\s+(?:the\s+)?(?:opposite|other)\s+end\s+of\s+(?:the\s+)?(?:orb|range|candle)", "opposite_side"),
     ]
 
     # Trailing stop patterns
@@ -99,7 +119,13 @@ class SemanticExtractor:
         (r"ema\s+trailing\s+(?:stop|exit)", "ema_based"),
         (r"atr\s+trailing\s+(?:stop|exit)", "atr_based"),
         (r"chandelier\s+(?:exit|stop)", "chandelier"),
-        (r"trail(?:ing)?\s+(?:stop|exit).*?(?:after|once)\s+(\d+\.?\d*)\s*%", "activate_after_pct"),
+        # Combined: "percent trailing stop after X% gain" / "trailing X% stop after Y% move"
+        # Captures activation threshold in group(1)
+        (r"percent\s+trailing\s+stop\s+after\s+(\d+\.?\d*)\s*%", "percent_with_activation"),
+        (r"trail(?:ing)?\s+(?:stop|exit)\s+after\s+(\d+\.?\d*)\s*%", "percent_with_activation"),
+        (r"trail(?:ing)?\s+(?:stop|exit).*?(?:after|once)\s+(?:a\s+)?(\d+\.?\d*)\s*%\s*(?:gain|move|profit|up)?", "percent_with_activation"),
+        # Standalone type patterns (no activation threshold)
+        (r"percent\s+trailing", "percent_based"),
         (r"dynamic\s+(?:trail|trailing)", "dynamic"),
     ]
 
@@ -109,14 +135,28 @@ class SemanticExtractor:
         (r"(\d+\.?\d*)\s*:\s*1\s+(?:risk|rr)", "rr_inverted"),
         (r"minimum\s+(?:1\s*:\s*)?(\d+\.?\d*)\s+(?:rr|risk[:\s]+reward)", "minimum_rr"),
         (r"rr\s+of\s+1:(\d+\.?\d*)", "rr_ratio"),
+        # Suffix patterns: "1:2 RR", "1:3 r:r", "1:2 risk reward"
+        (r"\b1\s*[:/]\s*(\d+\.?\d*)\s+(?:rr|r:r|risk[:\s]*reward|reward)", "rr_ratio"),
+        # "R:R 1:2", "risk reward 1:2"
+        (r"(?:r:r|rr|risk[\s:]+reward)\s+1\s*[:/]\s*(\d+\.?\d*)", "rr_ratio"),
+        # "minimum 1:2", "at least 1:2", "min RR 1:3"
+        (r"(?:minimum|min|at\s+least)\s+(?:rr\s+)?1\s*[:/]\s*(\d+\.?\d*)", "minimum_rr"),
     ]
 
     # Reference symbol patterns
     REF_SYMBOL_PATTERNS = [
-        (r"(?:outperforming|stronger than|vs\.?|relative to|compared to)\s+([A-Z]+(?:NIFTY|BANK|INDEX)?)", "relative_strength"),
+        # Explicit uppercase tickers: "outperforming BANKNIFTY", "vs NIFTY50"
+        (r"(?:outperforming|stronger than|vs\.?|relative to|compared to)\s+([A-Z][A-Z0-9_]{2,})", "relative_strength"),
+        # Lowercase common benchmarks: "outperforming nifty", "relative to bank nifty"
+        (r"(?:outperforming|stronger than|vs\.?|relative to|compared to|beats?)\s+(nifty\s*50|nifty\s*bank|bank\s*nifty|nifty|sensex|banknifty|finnifty|nifty\s*it|nifty\s*pharma|nifty\s*midcap)", "relative_strength"),
+        # "stock outperforms nifty", "outperforms the index"
+        (r"outperform(?:s|ing)?\s+(?:the\s+)?(?:nifty|nifty\s*50|bank\s*nifty|banknifty|index|market|benchmark)", "relative_strength"),
+        # Index confirmation: "BANKNIFTY should be bullish"
         (r"([A-Z]+(?:NIFTY|BANK)?)\s+(?:should be|must be|direction)\s+(bullish|bearish)", "index_confirmation"),
-        (r"(?:in line with|with)\s+([A-Z]+NIFTY)", "benchmark"),
-        (r"relative\s+strength\s+(?:to|vs\.?|compared to)\s+([A-Z0-9]+)", "rs_explicit"),
+        # "in line with nifty", "with NIFTY"
+        (r"(?:in line with|align(?:ed)? with|with)\s+(nifty\s*50|nifty|NIFTY50|NIFTY\s*50|banknifty|bank\s*nifty)", "benchmark"),
+        # "relative strength to/vs nifty"
+        (r"relative\s+strength\s+(?:to|vs\.?|compared to|against)\s+([A-Z0-9a-z\s]+?)(?:\s|$|,|\.)", "rs_explicit"),
     ]
 
     # Session/timing patterns
@@ -125,7 +165,6 @@ class SemanticExtractor:
         (r"(?:before|trade before|until)\s+(\d{1,2}):?(\d{2})?\s*(?:pm|p\.m\.|PM)", "end_time"),
         (r"(?:first|initial)\s+(\d+)\s+(?:minutes?|min)", "duration_from_open"),
         (r"(?:avoid|skip)\s+(?:market\s+)?open.*?(\d+)\s+(?:minutes?|min)", "blackout_from_open"),
-        (r"(?:avoid|skip)\s+(?:the\s+)?first\s+(\d+)\s+(?:minutes?|min)\s+(?:from\s+|of\s+|after\s+)?(?:open)?", "blackout_from_open"),
         (r"(?:during\s+)?(?:high\s+)?liquidity\s+(?:market\s+)?hours?", "session_type"),  # "high liquidity market hours"
         (r"(?:morning|afternoon)\s+session", "session_type"),
         (r"(?:market\s+)?timing.*?(?:high\s+)?liquidity", "session_type"),
@@ -160,6 +199,18 @@ class SemanticExtractor:
         (r"mfi\s+(?:rising|increasing)", "mfi_rising"),
         (r"momentum\s+(?:confirmation|bullish)", "momentum_bullish"),
         (r"macd\s+(?:bullish|positive|above\s+signal)", "macd_bullish"),
+        # EMA slope — common in breakout and trend strategies
+        (r"(?:bullish|rising|positive|upward)\s+ema\s+slope", "ema_slope_bullish"),
+        (r"ema\s+(?:slope|direction|trend)\s+(?:bullish|rising|positive|upward|up)", "ema_slope_bullish"),
+        (r"(?:bearish|falling|negative|downward)\s+ema\s+slope", "ema_slope_bearish"),
+        (r"ema\s+(?:slope|direction|trend)\s+(?:bearish|falling|negative|downward|down)", "ema_slope_bearish"),
+        (r"slope\s+of\s+(?:the\s+)?ema\s+(?:is\s+)?(?:bullish|rising|positive|upward)", "ema_slope_bullish"),
+        (r"slope\s+of\s+(?:the\s+)?ema\s+(?:is\s+)?(?:bearish|falling|negative|downward)", "ema_slope_bearish"),
+        # Price vs EMA — entry-level (no HTF timeframe prefix)
+        (r"price\s+(?:is\s+)?above\s+(?:the\s+)?ema", "ema_bullish"),
+        (r"price\s+(?:is\s+)?below\s+(?:the\s+)?ema", "ema_bearish"),
+        (r"close\s+(?:is\s+|should\s+be\s+)?above\s+(?:the\s+)?ema", "ema_bullish"),
+        (r"close\s+(?:is\s+|should\s+be\s+)?below\s+(?:the\s+)?ema", "ema_bearish"),
     ]
 
     def __init__(self):
@@ -174,7 +225,11 @@ class SemanticExtractor:
         instructions = SemanticInstructions(original_prompt=prompt)
 
         # Extract each component
-        instructions.strategy_family = self._detect_strategy_family(normalized)
+        # NOTE: strategy_family detection removed — the normalizer uses
+        # KB.detect_primary_framework_in_text(source_prompt) instead, which
+        # finds the framework directly from KB preset keywords without any
+        # hardcoded family name table in the extractor.
+        instructions.strategy_family = None
         instructions.htf_rules = self._extract_htf_rules(normalized)
         instructions.stop_loss = self._extract_stop_loss(normalized)
         instructions.trailing_stop = self._extract_trailing_stop(normalized)
@@ -202,22 +257,10 @@ class SemanticExtractor:
 
         return instructions
 
-    # ── Strategy Family Detection ──────────────────────────────────────────────
-
-    def _detect_strategy_family(self, text: str) -> str | None:
-        """Detect strategy family from keywords."""
-        text_lower = text.lower()
-        best_match = None
-        best_len = 0
-
-        for keyword, family in self.STRATEGY_FAMILIES.items():
-            if keyword in text_lower:
-                # Prefer longer matches to avoid "momentum" matching "breakout momentum"
-                if len(keyword) > best_len:
-                    best_match = family
-                    best_len = len(keyword)
-
-        return best_match
+    # ── Strategy Family Detection (removed) ────────────────────────────────────
+    # Framework detection has been moved to SemanticIntentNormalizer which uses
+    # KB.detect_primary_framework_in_text(source_prompt).  The KB preset keyword
+    # lists are the single source of truth — no parallel table here.
 
     # ── Multi-Timeframe Rules ──────────────────────────────────────────────────
 
@@ -311,13 +354,30 @@ class SemanticExtractor:
         # Check for padding (ATR, percent, points)
         padding = self._extract_sl_padding(full_text, match.start())
 
-        sl_anchor = None
-        if "reclaim" in text.lower():
+        # Derive anchor from the matched text first, then fall back to sl_type.
+        # The canonical anchor names used downstream (builder, normalizer, YAML):
+        #   opening_range_low, opening_range_high, swing_low_recent,
+        #   orb_candle, candle_low, reclaim_candle, vwap_deviation, opposite_side
+        text_lower = text.lower()
+        if "reclaim" in text_lower:
             sl_anchor = "reclaim_candle"
-        elif "orb" in text.lower():
-            sl_anchor = "orb_candle"
-        elif "swing" in text.lower():
+        elif "opening range low" in text_lower or "orb low" in text_lower or sl_type == "orb_low":
+            sl_anchor = "opening_range_low"
+        elif "opening range high" in text_lower:
+            sl_anchor = "opening_range_high"
+        elif "swing" in text_lower:
             sl_anchor = "swing_low_recent"
+        elif "candle" in text_lower or "wick" in text_lower or "bar" in text_lower:
+            sl_anchor = "candle_low"
+        elif "vwap" in text_lower or sl_type == "vwap_deviation":
+            sl_anchor = "vwap_deviation"
+        elif "opposite" in text_lower or sl_type == "opposite_side":
+            sl_anchor = "opposite_side"
+        elif "orb" in text_lower:
+            sl_anchor = "opening_range_low"
+        else:
+            # Use sl_type as anchor when text doesn't have explicit anchor keywords
+            sl_anchor = sl_type if sl_type not in ("atr_padded",) else None
 
         return StructuralStopLoss(
             type=sl_type,
@@ -385,24 +445,32 @@ class SemanticExtractor:
             description=text,
         )
 
-        if "ema" in ts_type.lower():
+        if "ema" in ts_type:
             config.type = "ema_based"
-            # Look for EMA period
             period_match = re.search(r"ema\s*\(?(\d+)\)?", full_text, re.IGNORECASE)
             if period_match:
                 config.ema_period = int(period_match.group(1))
-        elif "atr" in ts_type.lower():
+        elif "atr" in ts_type:
             config.type = "atr_based"
-        elif "chandelier" in ts_type.lower():
+        elif "chandelier" in ts_type:
             config.type = "chandelier"
-        elif "dynamic" in ts_type.lower():
+        elif "dynamic" in ts_type:
             config.type = "dynamic"
+        else:
+            # percent_based, percent_with_activation, activate_after_pct — all are percent trailing
+            config.type = "percent_based"
 
-        # Look for activation percentage
-        if "activate_after_pct" in ts_type:
-            activate_match = re.search(r"(\d+\.?\d*)\s*%", text)
-            if activate_match:
-                config.activate_after_pct = float(activate_match.group(1))
+        # Extract activation threshold from group(1) if the pattern captured it,
+        # or fall back to searching the matched text for "after X%"
+        if "activation" in ts_type or "activate" in ts_type or "percent_with" in ts_type:
+            activate_pct: float | None = None
+            try:
+                activate_pct = float(match.group(1))
+            except (IndexError, ValueError, TypeError):
+                pct_m = re.search(r"(?:after|once)\s+(?:a\s+)?(\d+\.?\d*)\s*%", text, re.IGNORECASE)
+                if pct_m:
+                    activate_pct = float(pct_m.group(1))
+            config.activate_after_pct = activate_pct
 
         return config if config.type else None
 
@@ -455,13 +523,28 @@ class SemanticExtractor:
                 seen.add(match_str)
 
                 try:
-                    ref_symbol = match.group(1).upper()
+                    # group(1) may be a benchmark name or None for patterns
+                    # that don't capture it (e.g. "outperforms the index")
+                    raw_sym = None
+                    try:
+                        raw_sym = match.group(1)
+                    except IndexError:
+                        pass
+
+                    if raw_sym is None:
+                        # Patterns that don't capture a specific symbol — use
+                        # the default benchmark from market_aliases
+                        raw_sym = "NIFTY50"
+
+                    # Normalise via the shared market_aliases module
+                    ref_symbol = normalise_benchmark(raw_sym)
+
                     condition = self._parse_reference_match(match, ref_type, text)
                     if ref_symbol and condition:
                         condition.reference_symbol = ref_symbol
                         conditions.append(condition)
-                except IndexError:
-                    pass
+                except (IndexError, Exception) as exc:
+                    logger.debug("Failed to parse reference symbol: %s", exc)
 
         return conditions
 
@@ -476,7 +559,10 @@ class SemanticExtractor:
             elif "benchmark" in ref_type:
                 relation = "benchmark"
 
+            # reference_symbol is required by the schema; pass a placeholder
+            # that the caller immediately overwrites with the resolved symbol.
             return ReferenceSymbolCondition(
+                reference_symbol="NIFTY50",  # placeholder — overwritten by caller
                 relation=relation,
                 condition=text,
                 description=text,
@@ -588,88 +674,61 @@ class SemanticExtractor:
     def _extract_indicators(self, text: str) -> dict[str, list[int]]:
         """Extract indicators explicitly mentioned in prompt.
 
-        Phase 2: walks the full indicator catalog. For each catalog entry,
-        scans the prompt for the canonical name and every alias. Periodic
-        indicators look for an explicit window (RSI(14), 20 EMA, EMA 20) and
-        fall back to the catalog default if a name appears without a window.
-        Multi-param indicators (Supertrend, Keltner, …) are recorded with
-        their default param tuple unless the user typed an explicit
-        argument list.
+        Only returns indicators the user actually mentioned, never adds defaults.
+        This prevents the mystery EMA(29) problem.
         """
-        from app.kb.indicator_catalog import CATALOG, IndicatorSpec
+        indicators = {}
 
-        indicators: dict[str, list] = {}
-        lowered = text.lower()
-        for spec in CATALOG.values():
-            tokens = {spec.name.lower(), *spec.aliases}
-            mentioned = False
-            for tok in tokens:
-                if tok and re.search(r"\b" + re.escape(tok) + r"\b", lowered):
-                    mentioned = True
-                    break
-            if not mentioned:
-                continue
-            indicators[spec.name] = self._indicator_periods_for_spec(spec, text, lowered)
+        # EMA windows - multiple patterns to catch variations
+        ema_patterns = [
+            r"ema\s*\(?(\d+)\)?",  # EMA(20) or EMA 20
+            r"(\d+)\s*ema\b",      # 20 EMA
+            r"(?:exponential|exp)\s+moving\s+average\s+(?:of\s+)?(\d+)",  # Exponential moving average of 20
+        ]
+        ema_matches = []
+        for pattern in ema_patterns:
+            ema_matches.extend(re.findall(pattern, text, re.IGNORECASE))
 
-        # Multi-pattern EMA / SMA window detection — the catalog walk above
-        # records the canonical token; this loop captures the natural
-        # variants ("20 EMA", "Exponential moving average of 50") that
-        # users tend to type. Merges into the catalog-extracted windows so
-        # we don't lose anything.
-        ema_extra: list[int] = []
-        for pattern in (r"(\d+)\s*ema\b", r"(?:exponential|exp)\s+moving\s+average\s+(?:of\s+)?(\d+)"):
-            ema_extra.extend(int(m) for m in re.findall(pattern, lowered) if m.isdigit())
-        if ema_extra:
-            current = set(indicators.get("EMA", []))
-            current.update(ema_extra)
-            indicators["EMA"] = sorted(current)
+        if ema_matches:
+            ema_windows = sorted(set(int(m) for m in ema_matches if m.isdigit()))
+            if ema_windows:
+                indicators["EMA"] = ema_windows
+                logger.debug(f"semantic_extractor|extracted_ema|windows={ema_windows}")
 
-        sma_extra = [int(m) for m in re.findall(r"(\d+)\s*sma\b", lowered) if m.isdigit()]
-        if sma_extra:
-            current = set(indicators.get("SMA", []))
-            current.update(sma_extra)
-            indicators["SMA"] = sorted(current)
+        # SMA windows
+        sma_matches = re.findall(r"sma\s*\(?(\d+)\)?", text, re.IGNORECASE)
+        if sma_matches:
+            sma_windows = sorted(set(int(m) for m in sma_matches))
+            indicators["SMA"] = sma_windows
+
+        # ATR (usually period 14 by default, but record if mentioned)
+        if re.search(r"\batr\b", text, re.IGNORECASE):
+            atr_match = re.search(r"atr\s*\(?(\d+)\)?", text, re.IGNORECASE)
+            if atr_match:
+                indicators["ATR"] = [int(atr_match.group(1))]
+            else:
+                # Only include if explicitly mentioned
+                indicators["ATR"] = [14]  # Default ATR period
+
+        # ADX (usually period 14 by default)
+        if re.search(r"\badx\b", text, re.IGNORECASE):
+            adx_match = re.search(r"adx\s*\(?(\d+)\)?", text, re.IGNORECASE)
+            if adx_match:
+                indicators["ADX"] = [int(adx_match.group(1))]
+            else:
+                indicators["ADX"] = [14]  # Default ADX period
+
+        # RSI
+        rsi_matches = re.findall(r"rsi\s*\(?(\d+)\)?", text, re.IGNORECASE)
+        if rsi_matches:
+            rsi_windows = sorted(set(int(m) for m in rsi_matches))
+            indicators["RSI"] = rsi_windows
+
+        # MACD
+        if re.search(r"\bmacd\b", text, re.IGNORECASE):
+            indicators["MACD"] = [12, 26, 9]  # Standard MACD periods
 
         return indicators
-
-    def _indicator_periods_for_spec(self, spec: Any, text: str, lowered: str) -> list:
-        """Best-effort period extraction for a single catalog spec.
-
-        • Single-param indicators with `int` first param: returns a list of
-          int windows found in the prompt (e.g. RSI(14), 20 RSI) — falling
-          back to the catalog default if no number is paired with the name.
-        • Multi-param indicators (Supertrend, Keltner, …): returns a list
-          containing one tuple with the catalog default values. Detailed
-          two-arg parsing is left to threshold_conditions / explicit user
-          configuration.
-        • Zero-param indicators: returns an empty list.
-        """
-        if not spec.params:
-            return []
-        first_param = spec.params[0]
-        names = [spec.name.lower(), *spec.aliases]
-        # Try every alias form: NAME(N), NAME N, N NAME.
-        windows: set[int] = set()
-        for alias in names:
-            esc = re.escape(alias)
-            for pattern in (
-                rf"\b{esc}\s*\(\s*(\d+)\s*\)",   # NAME(20)
-                rf"\b{esc}\s*(\d+)\b",           # NAME 20
-                rf"\b(\d+)\s+{esc}\b",           # 20 NAME
-            ):
-                for m in re.finditer(pattern, lowered, re.IGNORECASE):
-                    try:
-                        windows.add(int(m.group(1)))
-                    except (TypeError, ValueError):
-                        continue
-        if len(spec.params) == 1:
-            if windows:
-                return sorted(windows)
-            return [first_param.default] if first_param.default is not None else []
-        # Multi-param: anchor to the catalog defaults; user can override via
-        # explicit threshold expressions captured elsewhere in the snapshot.
-        default_tuple = tuple(p.default for p in spec.params if p.default is not None)
-        return [default_tuple] if default_tuple else []
 
     # ── Utilities ──────────────────────────────────────────────────────────────
 

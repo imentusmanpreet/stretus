@@ -466,14 +466,6 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
             return _resolve_macd_signal(df, i)
         return float(value) if not pd.isna(value) else float("nan")
 
-    # Phase 2 — scalar identifiers from the extended indicator pack. These
-    # are precomputed by add_extended_indicators(); when the runner forgot
-    # to request them, the column is missing and we return NaN (comparisons
-    # against NaN are False, so the condition silently stays inactive).
-    if name in _SCALAR_INDICATORS:
-        value = row.get(name, float("nan"))
-        return float(value) if not pd.isna(value) else float("nan")
-
     # Phase 4 — REF_* identifiers resolve to the reference symbol's OHLCV
     # columns. NaN when the runner wasn't given reference data; comparisons
     # against NaN return False so reference-dependent conditions stay safely
@@ -492,15 +484,6 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
         return float(value) if not pd.isna(value) else float("nan")
 
     return float("nan")
-
-
-def _float_suffix(value: float) -> str:
-    """Render a parameter value into the identifier-safe suffix the extended
-    indicator orchestrator uses: ints stay '10', floats become '3p0' / '2p5'.
-    Must stay in sync with indicators_ext.column_suffix()."""
-    if value == int(value):
-        return str(int(value))
-    return str(value).replace(".", "p").replace("-", "neg")
 
 
 def _resolve_vwap(df: pd.DataFrame, i: int) -> float:
@@ -530,19 +513,14 @@ def _evaluate_function(
     name = node.name
     args = node.args
 
-    if name in _PERIODIC_INDICATORS:
+    if name in {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}:
         if len(args) == 1:
             period = int(_as_float(_eval_node(args[0], df, i, variables)))
             precomputed = f"{name}_{period}"
             if precomputed in df.columns:
                 value = df.iloc[i].get(precomputed, float("nan"))
                 return float(value) if not pd.isna(value) else float("nan")
-            # Only the original core indicators have a slow-path fallback.
-            if name in {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}:
-                return _resolve_indicator(df, name, period, i)
-            # Phase-2 indicators must be precomputed via add_extended_indicators
-            # — if the runner forgot to request them, return NaN safely.
-            return float("nan")
+            return _resolve_indicator(df, name, period, i)
         if len(args) == 2 and isinstance(args[0], IdentifierNode):
             field = args[0].name
             period = int(_as_float(_eval_node(args[1], df, i, variables)))
@@ -551,24 +529,6 @@ def _evaluate_function(
             if name == "EMA":
                 return _rolling_ema(df, field, period, i)
         raise ParseError(f"{name} expects either 1 period argument or FIELD, period.")
-
-    # Phase 2 — multi-arg indicators (Supertrend(period, multiplier), Keltner,
-    # ATR Bands, PSAR). Column name suffix is "_<param1>_<param2>" with
-    # floats rendered as identifier-safe strings (3.0 → '3', 2.5 → '2p5').
-    if name in _MULTI_PARAM_INDICATORS:
-        if not args:
-            raise ParseError(f"{name} expects at least one parameter.")
-        suffix_parts: list[str] = []
-        for arg_node in args:
-            value = _as_float(_eval_node(arg_node, df, i, variables))
-            if value != value:  # NaN
-                return float("nan")
-            suffix_parts.append(_float_suffix(value))
-        precomputed = f"{name}_{'_'.join(suffix_parts)}"
-        if precomputed in df.columns:
-            value = df.iloc[i].get(precomputed, float("nan"))
-            return float(value) if not pd.isna(value) else float("nan")
-        return float("nan")
 
     if name == "AVG":
         if len(args) != 2 or not isinstance(args[0], IdentifierNode):
@@ -820,7 +780,6 @@ class CompiledCondition:
     scalar_refs: tuple[str, ...]  # MACD, MACD_SIGNAL, VWAP — no period
     fast_path_safe: bool = True
     pattern_refs: tuple[str, ...] = ()
-    multi_param_refs: tuple[tuple[str, tuple[float, ...]], ...] = ()
 
     def evaluate(self, df: pd.DataFrame, i: int, variables: dict[str, float] | None = None) -> bool:
         if i < 0 or i >= len(df):
@@ -864,42 +823,8 @@ class CompiledCondition:
             return False
 
 
-# Single-period indicators precomputed as <NAME>_<N> columns by
-# add_all_indicators(). The parser looks up NAME(period) → column.
-_PERIODIC_INDICATORS = {
-    "SMA", "EMA", "RSI",
-    "BB_UPPER", "BB_LOWER", "BB_MID",
-    # Phase 2 extended pack
-    "ADX", "DI_PLUS", "DI_MINUS",
-    "STOCH_K", "STOCH_D", "WILLR",
-    "ROC", "MOMENTUM", "CMO", "CCI", "TRIX", "DISPARITY",
-    "STDEV", "HV", "CHOPPINESS",
-    "BB_WIDTH", "BB_PCT_B",
-    "VOLUME_SMA", "VROC", "MFI", "CMF",
-    "AROON_UP", "AROON_DOWN", "AROON_OSC",
-    "HHV", "LLV",
-    "DON_UPPER", "DON_LOWER", "DON_MID",
-}
-
-# Multi-arg indicators precomputed under a suffix derived from every param
-# (e.g. SUPERTREND(10, 3.0) → SUPERTREND_10_3). Parser handles them in the
-# multi-arg branch of _evaluate_function.
-_MULTI_PARAM_INDICATORS = {
-    "SUPERTREND", "SUPERTREND_DIR",
-    "KC_UPPER", "KC_LOWER", "KC_MID",
-    "ATR_UPPER", "ATR_LOWER",
-    "PSAR",
-}
-
-# Scalar (no-period) indicators with a fixed column name.
-_SCALAR_INDICATORS = {
-    "MACD", "MACD_SIGNAL", "MACD_HIST", "VWAP",
-    # Phase 2 extended pack
-    "OBV", "ACCDIST",
-    "PIVOT", "R1", "R2", "S1", "S2",
-    "MEDIAN_PRICE", "TYPICAL_PRICE", "WEIGHTED_CLOSE",
-    "HIGH_LOW", "TRUE_RANGE",
-}
+_PERIODIC_INDICATORS = {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}
+_SCALAR_INDICATORS = {"MACD", "MACD_SIGNAL", "MACD_HIST", "VWAP"}
 
 # Phase 6 — structural-pattern identifiers. Kept in sync with the keys of
 # patterns.PATTERN_COLUMNS via a startup assertion in tests/test_patterns.py.
@@ -910,11 +835,6 @@ _PATTERN_IDENTIFIERS = {
     "IS_HIGHER_HIGH", "IS_LOWER_LOW",
     "IS_BULLISH_FVG", "IS_BEARISH_FVG",
     "IS_BOS_BULLISH", "IS_BOS_BEARISH",
-    # Phase 4 — candlestick patterns.
-    "IS_HAMMER", "IS_HANGING_MAN",
-    "IS_ENGULFING", "IS_BULLISH_ENGULFING", "IS_BEARISH_ENGULFING",
-    "IS_PIN_BAR", "IS_DOJI",
-    "IS_MORNING_STAR", "IS_EVENING_STAR",
 }
 
 # Identifier name → array key in the prebuilt arrays dict.
@@ -923,12 +843,6 @@ _IDENT_TO_ARRAY = {
     "VOL": "volume", "VOLUME": "volume",
     "VWAP": "VWAP", "MACD": "MACD",
     "MACD_SIGNAL": "MACD_SIGNAL", "MACD_HIST": "MACD_HIST",
-    # Phase 2 — scalar identifiers from the extended indicator pack.
-    "OBV": "OBV", "ACCDIST": "ACCDIST",
-    "PIVOT": "PIVOT", "R1": "R1", "R2": "R2", "S1": "S1", "S2": "S2",
-    "MEDIAN_PRICE": "MEDIAN_PRICE", "TYPICAL_PRICE": "TYPICAL_PRICE",
-    "WEIGHTED_CLOSE": "WEIGHTED_CLOSE", "HIGH_LOW": "HIGH_LOW",
-    "TRUE_RANGE": "TRUE_RANGE",
     # Phase 4 — reference symbol columns. build_arrays_from_df() only
     # populates these when the runner has merged in reference data.
     "REF_CLOSE": "REF_close", "REF_OPEN": "REF_open",
@@ -940,16 +854,6 @@ _IDENT_TO_ARRAY = {
     "IS_HIGHER_HIGH": "IS_HIGHER_HIGH", "IS_LOWER_LOW":  "IS_LOWER_LOW",
     "IS_BULLISH_FVG": "IS_BULLISH_FVG", "IS_BEARISH_FVG": "IS_BEARISH_FVG",
     "IS_BOS_BULLISH": "IS_BOS_BULLISH", "IS_BOS_BEARISH": "IS_BOS_BEARISH",
-    # Phase 4 — candlestick patterns.
-    "IS_HAMMER":             "IS_HAMMER",
-    "IS_HANGING_MAN":        "IS_HANGING_MAN",
-    "IS_ENGULFING":          "IS_ENGULFING",
-    "IS_BULLISH_ENGULFING":  "IS_BULLISH_ENGULFING",
-    "IS_BEARISH_ENGULFING":  "IS_BEARISH_ENGULFING",
-    "IS_PIN_BAR":            "IS_PIN_BAR",
-    "IS_DOJI":               "IS_DOJI",
-    "IS_MORNING_STAR":       "IS_MORNING_STAR",
-    "IS_EVENING_STAR":       "IS_EVENING_STAR",
 }
 
 
@@ -1089,17 +993,6 @@ def _evaluate_function_arr(
             return float("nan")
         return float(arr[i])
 
-    # Multi-param indicators (Supertrend, Keltner, ATR Bands, PSAR). Each
-    # arg becomes part of the column suffix using the same convention as
-    # the extended-indicator orchestrator.
-    if name in _MULTI_PARAM_INDICATORS and args and all(type(a) is NumberNode for a in args):
-        suffix = "_".join(_float_suffix(a.value) for a in args)
-        col = f"{name}_{suffix}"
-        arr = arrays.get(col)
-        if arr is None:
-            return float("nan")
-        return float(arr[i])
-
     if name == "PREV":
         if len(args) != 2:
             raise ParseError("PREV expects (FIELD or EXPR), offset.")
@@ -1146,7 +1039,6 @@ def _collect_refs(
     scalars: set[str],
     patterns: set[str],
     flags: dict[str, bool],
-    multi_param_refs: set[tuple[str, tuple[float, ...]]] | None = None,
 ) -> None:
     """Walk the AST: collect indicator refs, scalar refs, pattern refs, and
     detect any fast-path-unsafe func."""
@@ -1163,23 +1055,18 @@ def _collect_refs(
         elif node.name in _PERIODIC_INDICATORS:
             # Two-arg form e.g. SMA(CLOSE, 20) — can't be pre-served from a column.
             flags["fast_path_safe"] = False
-        elif node.name in _MULTI_PARAM_INDICATORS:
-            if multi_param_refs is not None and all(isinstance(a, NumberNode) for a in node.args):
-                multi_param_refs.add((node.name, tuple(float(a.value) for a in node.args)))
-            else:
-                flags["fast_path_safe"] = False
         for arg in node.args:
-            _collect_refs(arg, indicators, scalars, patterns, flags, multi_param_refs)
+            _collect_refs(arg, indicators, scalars, patterns, flags)
     elif isinstance(node, IdentifierNode):
         if node.name in _SCALAR_INDICATORS:
             scalars.add(node.name)
         elif node.name in _PATTERN_IDENTIFIERS:
             patterns.add(node.name)
     elif isinstance(node, (UnaryNode, NotNode)):
-        _collect_refs(getattr(node, "operand", None), indicators, scalars, patterns, flags, multi_param_refs)
+        _collect_refs(getattr(node, "operand", None), indicators, scalars, patterns, flags)
     elif isinstance(node, (BinaryNode, ComparisonNode, BooleanNode)):
-        _collect_refs(node.left, indicators, scalars, patterns, flags, multi_param_refs)
-        _collect_refs(node.right, indicators, scalars, patterns, flags, multi_param_refs)
+        _collect_refs(node.left, indicators, scalars, patterns, flags)
+        _collect_refs(node.right, indicators, scalars, patterns, flags)
 
 
 def compile_condition(condition: str) -> CompiledCondition | None:
@@ -1195,9 +1082,8 @@ def compile_condition(condition: str) -> CompiledCondition | None:
     indicators: set[IndicatorRef] = set()
     scalars: set[str] = set()
     patterns: set[str] = set()
-    multi_param_refs: set[tuple[str, tuple[float, ...]]] = set()
     flags: dict[str, bool] = {"fast_path_safe": True}
-    _collect_refs(tree, indicators, scalars, patterns, flags, multi_param_refs)
+    _collect_refs(tree, indicators, scalars, patterns, flags)
     return CompiledCondition(
         raw=condition,
         tree=tree,
@@ -1205,5 +1091,4 @@ def compile_condition(condition: str) -> CompiledCondition | None:
         scalar_refs=tuple(sorted(scalars)),
         fast_path_safe=flags["fast_path_safe"],
         pattern_refs=tuple(sorted(patterns)),
-        multi_param_refs=tuple(sorted(multi_param_refs)),
     )

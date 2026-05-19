@@ -3,6 +3,7 @@ category: trend
 direction: bearish
 kind: regime
 roles: [entry_filter]
+tags: [relative_strength]
 formula: "REF_CLOSE < AVG(REF_CLOSE, {window})"
 description: "Reference benchmark (e.g. Nifty 50) is below its N-period SMA — broad-market downtrend filter. Requires reference_symbol on the strategy."
 

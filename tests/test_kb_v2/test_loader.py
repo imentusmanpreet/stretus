@@ -25,12 +25,33 @@ def test_stocks_load() -> None:
 
 
 def test_alias_resolution() -> None:
-    assert kb.lookup_stock("hdfc") is not None
-    assert kb.lookup_stock("hdfc").symbol == "HDFCBANK.NS"
+    assert kb.lookup_stock("hdfc bank") is not None
+    assert kb.lookup_stock("hdfc bank").symbol == "HDFCBANK.NS"
     assert kb.lookup_stock("ADANIENT.NS").symbol == "ADANIENT.NS"
-    assert kb.lookup_stock("adani").symbol == "ADANIENT.NS"
+    assert kb.lookup_stock("adani enterprises").symbol == "ADANIENT.NS"
     assert kb.lookup_stock("infy").symbol == "INFY.NS"
     assert kb.lookup_stock("not-a-real-stock") is None
+
+
+def test_ambiguous_stock_prefix_resolution() -> None:
+    resolution = kb.resolve_stock_query("hdfc")
+
+    assert resolution.stock is None
+    assert resolution.is_ambiguous is True
+    assert {stock.symbol for stock in resolution.ambiguous_matches} == {
+        "HDFCAMC.NS",
+        "HDFCBANK.NS",
+        "HDFCLIFE.NS",
+    }
+    assert kb.lookup_stock("hdfc") is None
+
+
+def test_unambiguous_stock_prefix_resolution() -> None:
+    resolution = kb.resolve_stock_query("hdfcb")
+
+    assert resolution.is_ambiguous is False
+    assert resolution.stock is not None
+    assert resolution.stock.symbol == "HDFCBANK.NS"
 
 
 def test_timeframe_normalization() -> None:

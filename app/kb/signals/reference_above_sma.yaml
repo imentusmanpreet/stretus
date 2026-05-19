@@ -3,6 +3,7 @@ category: trend
 direction: bullish
 kind: regime
 roles: [entry_filter]
+tags: [relative_strength]
 formula: "REF_CLOSE > AVG(REF_CLOSE, {window})"
 description: "Reference benchmark (e.g. Nifty 50) is above its N-period SMA — broad-market uptrend filter. Requires reference_symbol on the strategy."
 

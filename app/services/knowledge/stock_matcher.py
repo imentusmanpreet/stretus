@@ -12,76 +12,46 @@ import json
 import re
 from typing import Any
 
-from app.core.supported_stocks import (
-    is_supported_stock_symbol,
-    normalize_supported_stock_symbol,
-)
 from app.core.errors import AppError
+from app.kb import kb
+from app.kb.compat import AMBIGUOUS_STOCK_VALIDATION_CODE, ambiguous_stock_validation_facts
+from app.kb.schemas import Stock
 from app.services.ai.llm import LLMService
-from app.services.knowledge.embedder import (
-    COLLECTION_NAME,
-    STOCK_UNIVERSE_RECORD_TYPE,
-    get_chroma_client,
-)
-from app.services.knowledge.embeddings import embed_texts
-
-_DIRECT_SUPPORTED_SYMBOLS = {
-    "TCS": {"company_name": "Tata Consultancy Services", "symbol": "TCS"},
-    "HDFCBANK": {"company_name": "HDFC Bank", "symbol": "HDFCBANK"},
-    "INFY": {"company_name": "Infosys", "symbol": "INFY"},
-    "ADANIENT": {"company_name": "Adani Enterprises", "symbol": "ADANIENT"},
-    "GMRAIRPORT": {"company_name": "GMR Airports", "symbol": "GMRAIRPORT"},
-    "IDEA": {"company_name": "Vodafone Idea", "symbol": "IDEA"},
-    "NHPC": {"company_name": "NHPC", "symbol": "NHPC"},
-    "RELIANCE": {"company_name": "Reliance Industries", "symbol": "RELIANCE"},
-    "SUZLON": {"company_name": "Suzlon Energy", "symbol": "SUZLON"},
-}
-_DIRECT_SUPPORTED_ALIASES = {
-    "tcs": "TCS",
-    "tataconsultancyservices": "TCS",
-    "hdfcbank": "HDFCBANK",
-    "hdfcbankltd": "HDFCBANK",
-    "hdfc": "HDFCBANK",
-    "infy": "INFY",
-    "infosys": "INFY",
-    "adanient": "ADANIENT",
-    "adanienterprises": "ADANIENT",
-    "gmrairport": "GMRAIRPORT",
-    "gmrairports": "GMRAIRPORT",
-    "gmrairportsltd": "GMRAIRPORT",
-    "idea": "IDEA",
-    "vodafoneidea": "IDEA",
-    "vodafoneidealtd": "IDEA",
-    "nhpc": "NHPC",
-    "nhpcltd": "NHPC",
-    "reliance": "RELIANCE",
-    "relianceindustries": "RELIANCE",
-    "suzlon": "SUZLON",
-    "suzlonenergy": "SUZLON",
-    "suzlonenergyltd": "SUZLON",
-}
-
 
 def _normalise_company_key(company_name: str) -> str:
     return "".join(ch.lower() for ch in str(company_name or "") if ch.isalnum())
 
 
+def _direct_stock_payload(stock: Stock) -> dict[str, Any]:
+    return {
+        "company_name": stock.display_name,
+        "symbol": stock.symbol.split(".", 1)[0],
+        "exchange": stock.exchange,
+        "sector": stock.sector,
+        "confidence": 1.0,
+        "reason": "kb_stock_match",
+    }
+
+
 def _direct_supported_stock_match(query: str) -> dict[str, Any] | None:
-    normalized_query = _normalise_company_key(query)
-    if not normalized_query:
+    if not str(query or "").strip():
         return None
 
-    normalized_symbol_query = normalize_supported_stock_symbol(query).lower()
-    symbol = _DIRECT_SUPPORTED_ALIASES.get(normalized_query) or _DIRECT_SUPPORTED_ALIASES.get(
-        normalized_symbol_query
-    )
-    if not symbol:
-        return None
+    resolution = kb.resolve_stock_query(query)
+    if resolution.is_ambiguous:
+        facts = ambiguous_stock_validation_facts(query, resolution.ambiguous_matches)
+        return {
+            "ambiguous": True,
+            "validation_code": AMBIGUOUS_STOCK_VALIDATION_CODE,
+            "validation_facts": facts,
+            "matches": facts["stock_options"],
+            "confidence": 1.0,
+            "reason": "ambiguous_stock_prefix",
+        }
 
-    stock = dict(_DIRECT_SUPPORTED_SYMBOLS[symbol])
-    stock["confidence"] = 1.0
-    stock["reason"] = "direct_supported_symbol_match"
-    return stock
+    if resolution.stock is None:
+        return None
+    return _direct_stock_payload(resolution.stock)
 
 
 def _dedupe_candidates(
@@ -137,6 +107,13 @@ def search_supported_stock_candidates(query: str, n_results: int = 12) -> list[d
         return []
 
     try:
+        from app.services.knowledge.embedder import (
+            COLLECTION_NAME,
+            STOCK_UNIVERSE_RECORD_TYPE,
+            get_chroma_client,
+        )
+        from app.services.knowledge.embeddings import embed_texts
+
         client = get_chroma_client()
         collection = client.get_collection(COLLECTION_NAME)
         if collection.count() == 0:

@@ -13,6 +13,10 @@ description: |
   intraday positions can't carry overnight.
 
 keywords:
+  # Phase 9c — broadened to match the natural-language variants users
+  # actually type. The detector matches whole-word substrings (case-
+  # insensitive); each entry below covers a distinct phrasing.
+  # Original Phase 8a/9 keywords:
   - volume breakout
   - volume spike breakout
   - 52 week breakout
@@ -22,6 +26,32 @@ keywords:
   - 52-week low breakdown
   - intraday volume breakout
   - relative volume breakout
+  # Volume-spike phrasings:
+  - volume spike
+  - volume spike up
+  - 2x volume
+  - 2x daily volume
+  - 2x relative volume
+  - high relative volume
+  - high volume today
+  - high volume nse
+  # 52-week proximity phrasings:
+  - 52 weeks high
+  - 52 weeks low
+  - 52 weeks high or low
+  - near 52 week
+  - near 52-week high
+  - near 52-week low
+  - on verge of 52 week
+  - on verge of 52 weeks
+  - verge of 52 week
+  - 52 week high or low
+  - breaking 52 week
+  - breaking 52 weeks
+  # Combined / scenario-style:
+  - intraday breakout nse
+  - intraday strategy nse
+  - low pullback breakout
 
 supported_timeframes: [5m, 10m, 15m, 30m]
 
@@ -64,3 +94,73 @@ trailing_stop:
 time_exit:
   exit_time: "15:15"
   timezone:  "Asia/Kolkata"
+
+# Phase 9c — runtime universe scanner. The user does NOT need to specify a
+# stock; the chat layer scans the KB universe today, narrows to stocks
+# matching the conditions below, and asks the user which tie-break method
+# to use if more than one survives.
+#
+# Original user intent:
+#   "create intraday strategy on NSE stock whose volume spike up today 2x
+#    AND is having low pull back OR is on breaking on verge of 52 weeks
+#    high or low"
+#
+# Translated to the AST: volume × 2 is mandatory, then ANY of three setups
+# qualifies — shallow EMA pullback (either direction), within 2% of the
+# 52-week high (long), or within 2% of the 52-week low (short).
+discovery:
+  enabled: true
+  universe: kb_default            # all enabled stocks in app/kb/stocks/
+  # scan_timeframe overrides the strategy's main TF for the scan only.
+  # The conditions below are inherently DAILY ("today's volume vs 20-day
+  # average", "52-week high"). Without this override the conditions would
+  # evaluate on 5m bars (252 5m bars ≈ 3 trading days, NOT 52 weeks) and
+  # silently produce wrong results.
+  scan_timeframe: 1d
+  lookback_days: 280              # need ≥ 252 daily bars for 52w filters
+  # Phase 9h — tunable thresholds. The chat layer parses values like
+  # "1.5x volume" or "within 5% of 52-week high" out of the user's
+  # message and overrides these defaults via
+  # builder.discovery_parameter_overrides. The orchestrator substitutes
+  # {placeholder} tokens in `conditions` before passing them to the
+  # scanner — keep this block in sync with the placeholder names below.
+  parameters:
+    # Required relative volume vs 20-day average (e.g. user typing
+    # "volume spike 1.2x today" lowers this to 1.2).
+    volume_multiplier: 2.0
+    # Multiplicative factors for the high/low proximity tests. Defaults
+    # encode 2% (long: 0.98 of high; short: 1.02 of low). The chat layer
+    # accepts percentages like "within 5% of 52-week high" and converts
+    # them to the corresponding factor.
+    near_52w_high_factor: 0.98
+    near_52w_low_factor:  1.02
+    # Phase 9i — the lookback window for the high/low tests. 252 ≈ 1
+    # trading year (the classic "52-week" indicator). Tunable so users
+    # who type "20-day high" or "6-month breakout" get a window matched
+    # to their request. The orchestrator clamps lookback_days upward
+    # automatically when a longer window is requested.
+    lookback_window_bars: 252
+  conditions:
+    # Mandatory: today's volume ≥ N× its 20-day average
+    - "VOL > AVG(VOL, 20) * {volume_multiplier}"
+    # AND any one of three setups qualifies (OR semantics inside one
+    # parenthesised expression — the AST supports parens + AND/OR):
+    - >-
+      (MIN(LOW, 3) <= EMA(20) AND CLOSE > EMA(20))
+      OR (MAX(HIGH, 3) >= EMA(20) AND CLOSE < EMA(20))
+      OR CLOSE >= MAX(HIGH, {lookback_window_bars}) * {near_52w_high_factor}
+      OR CLOSE <= MIN(LOW, {lookback_window_bars}) * {near_52w_low_factor}
+  tie_break_options:
+    # Listed in preferred order — first option is the suggested default.
+    - method: highest_relative_volume
+      label:  "Highest relative volume"
+      description: "Pick the stock with the strongest volume vs its 20-bar average"
+    - method: closest_to_52w_high
+      label:  "Closest to 52-week high"
+      description: "Pick the stock whose close is nearest its 52-week high"
+    - method: closest_to_52w_low
+      label:  "Closest to 52-week low"
+      description: "Pick the stock whose close is nearest its 52-week low"
+    - method: highest_rsi
+      label:  "Highest RSI(14)"
+      description: "Pick the strongest momentum reading"

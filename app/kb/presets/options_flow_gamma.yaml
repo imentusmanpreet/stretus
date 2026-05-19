@@ -1,0 +1,42 @@
+name: options_flow_gamma
+display_name: Options Flow / Gamma Proxy
+description: |
+  Cash-equity proxy for options-driven dealer-hedging moves. Real options flow
+  data is not available in this engine, so the preset approximates the
+  equity-side footprint of a gamma squeeze / dealer hedging cycle:
+    1. Abnormal volume (institutional + retail crowding the same direction).
+    2. ATR expansion (realized volatility breaking out of compression — the
+       hedge-flow signature on the underlying).
+    3. Directional breakout / MACD impulse confirming the dealers are being
+       forced to chase, not fade.
+  Exits when the impulse fails (opposite MACD cross). Best used on liquid
+  large-caps around expiry weeks; this preset does NOT read OI, IV, or
+  greeks — treat it as a momentum-of-volatility play, not literal options data.
+
+keywords:
+  - options flow
+  - options flow strategy
+  - gamma strategy
+  - gamma squeeze
+  - gamma flow
+  - dealer flow
+  - dealer hedging
+  - expiry flow
+  - oi build up
+  - greeks based
+
+supported_timeframes: [5m, 15m, 30m, 1h, 1d]
+
+bullish:
+  entry_trigger: macd_bullish_cross
+  entry_filters:
+    - volume_spike
+    - atr_high_volatility
+  exit_trigger: macd_bearish_cross
+
+bearish:
+  entry_trigger: macd_bearish_cross
+  entry_filters:
+    - volume_spike
+    - atr_high_volatility
+  exit_trigger: macd_bullish_cross

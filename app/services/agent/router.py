@@ -82,6 +82,10 @@ class AgentDecision:
                     route["recognized_fields"].append(
                         "symbol" if param_key == "symbol" else param_key
                     )
+            # Propagate strategy_preset when the agent explicitly names one.
+            if params.get("strategy_preset"):
+                route["strategy_preset"] = params["strategy_preset"]
+                route["recognized_fields"].append("strategy_preset")
             return route
 
         if self.tool_name == AgentToolName.ASK_USER_FOR_CLARIFICATION.value:

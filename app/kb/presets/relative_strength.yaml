@@ -11,9 +11,13 @@ keywords:
   - relative strength
   - rs strategy
   - rs vs nifty
-  - outperformer
-  - outperforming nifty
-  - sector strength
+  - relative strength strategy
+  - rs momentum
+
+# This preset is a FILTER/MODIFIER, not a primary strategy framework.
+# It must not be promoted as the base framework when the KB keyword scorer
+# detects it alongside primary framework keywords (e.g. "ORB with RS filter").
+is_primary_framework: false
 
 supported_timeframes: [15m, 30m, 1h, 1d]
 

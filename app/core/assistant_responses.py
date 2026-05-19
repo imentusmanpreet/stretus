@@ -4,6 +4,7 @@ Compatibility wrapper for the centralized assistant response composer.
 from __future__ import annotations
 
 from app.services.chat.response_composer import (
+    build_ambiguous_stock_message,
     build_invalid_input_message,
     build_low_confidence_clarification_message,
     build_sebi_boundary_message,
@@ -24,6 +25,7 @@ __all__ = [
     "AssistantResponseCode",
     "GOAL_EXAMPLES_TEXT",
     "SUPPORTED_STOCK_SELECTION_PROMPT",
+    "build_ambiguous_stock_message",
     "build_invalid_input_message",
     "build_low_confidence_clarification_message",
     "build_sebi_boundary_message",

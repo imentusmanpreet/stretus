@@ -1,20 +1,107 @@
 symbol,display_name,exchange,upstox_key,sector,enabled
-HDFCBANK.NS,HDFC Bank,NSE,NSE_EQ|INE040A01034,banking,true
-RELIANCE.NS,Reliance Industries,NSE,NSE_EQ|INE002A01018,energy,true
-TCS.NS,Tata Consultancy Services,NSE,NSE_EQ|INE467B01029,it,true
-INFY.NS,Infosys,NSE,NSE_EQ|INE009A01021,it,true
+ABB.NS,ABB India,NSE,NSE_EQ|INE117A01022,industrials,true
 ADANIENT.NS,Adani Enterprises,NSE,NSE_EQ|INE423A01024,conglomerate,true
-NHPC.NS,NHPC,NSE,NSE_EQ|INE848E01016,power,true
-SUZLON.NS,Suzlon Energy,NSE,NSE_EQ|INE040H01021,energy,true
-GMRAIRPORT.NS,GMR Airports,NSE,NSE_EQ|INE776C01039,infrastructure,true
-IDEA.NS,Vodafone Idea,NSE,NSE_EQ|INE669E01016,telecom,true
-ICICIBANK.NS,ICICI Bank,NSE,NSE_EQ|INE090A01021,banking,true
-SBIN.NS,State Bank of India,NSE,NSE_EQ|INE062A01020,banking,true
+ADANIGREEN.NS,Adani Green Energy,NSE,NSE_EQ|INE364U01010,energy,true
+ADANIPORTS.NS,Adani Ports,NSE,NSE_EQ|INE742F01042,infrastructure,true
+ADANIPOWER.NS,Adani Power,NSE,NSE_EQ|INE814H01029,power,true
+AMBUJACEM.NS,Ambuja Cements,NSE,NSE_EQ|INE079A01024,cement,true
+APOLLOHOSP.NS,Apollo Hospitals,NSE,NSE_EQ|INE437A01024,healthcare,true
+ASIANPAINT.NS,Asian Paints,NSE,NSE_EQ|INE021A01026,paints,true
+AUBANK.NS,AU Small Finance Bank,NSE,NSE_EQ|INE949L01017,banking,true
 AXISBANK.NS,Axis Bank,NSE,NSE_EQ|INE238A01034,banking,true
-KOTAKBANK.NS,Kotak Mahindra Bank,NSE,NSE_EQ|INE237A01028,banking,true
+BAJAJ-AUTO.NS,Bajaj Auto,NSE,NSE_EQ|INE917I01010,auto,true
+BAJAJFINSV.NS,Bajaj Finserv,NSE,NSE_EQ|INE918I01026,financial_services,true
+BAJFINANCE.NS,Bajaj Finance,NSE,NSE_EQ|INE296A01032,financial_services,true
+BEL.NS,Bharat Electronics,NSE,NSE_EQ|INE263A01024,defense,true
 BHARTIARTL.NS,Bharti Airtel,NSE,NSE_EQ|INE397D01024,telecom,true
-ITC.NS,ITC,NSE,NSE_EQ|INE154A01025,fmcg,true
-LT.NS,Larsen & Toubro,NSE,NSE_EQ|INE018A01030,construction,true
-MARUTI.NS,Maruti Suzuki India,NSE,NSE_EQ|INE585B01010,auto,true
-SUNPHARMA.NS,Sun Pharmaceutical Industries,NSE,NSE_EQ|INE044A01036,pharma,true
+BHEL.NS,BHEL,NSE,NSE_EQ|INE257A01026,power,true
+BOSCHLTD.NS,Bosch,NSE,NSE_EQ|INE323A01026,auto,true
+BPCL.NS,BPCL,NSE,NSE_EQ|INE029A01011,energy,true
+BRITANNIA.NS,Britannia Industries,NSE,NSE_EQ|INE216A01030,fmcg,true
+CANBK.NS,Canara Bank,NSE,NSE_EQ|INE476A01022,banking,true
+CGPOWER.NS,CG Power,NSE,NSE_EQ|INE067A01029,industrials,true
+CHOLAFIN.NS,Cholamandalam Investment,NSE,NSE_EQ|INE121A01024,financial_services,true
+CIPLA.NS,Cipla,NSE,NSE_EQ|INE059A01026,pharma,true
+COALINDIA.NS,Coal India,NSE,NSE_EQ|INE522F01014,mining,true
+COLPAL.NS,Colgate Palmolive,NSE,NSE_EQ|INE259A01022,fmcg,true
+DABUR.NS,Dabur India,NSE,NSE_EQ|INE016A01026,fmcg,true
+DIVISLAB.NS,Divi's Laboratories,NSE,NSE_EQ|INE361B01024,pharma,true
+DLF.NS,DLF,NSE,NSE_EQ|INE271C01023,realty,true
+DRREDDY.NS,Dr Reddy's Laboratories,NSE,NSE_EQ|INE089A01031,pharma,true
+EICHERMOT.NS,Eicher Motors,NSE,NSE_EQ|INE066A01021,auto,true
+ETERNAL.NS,Eternity Laminates,NSE,NSE_EQ|INE758T01015,materials,true
+GAIL.NS,GAIL India,NSE,NSE_EQ|INE129A01019,energy,true
+GMRAIRPORT.NS,GMR Airports,NSE,NSE_EQ|INE776C01039,infrastructure,true
+GODREJCP.NS,Godrej Consumer Products,NSE,NSE_EQ|INE102D01028,fmcg,true
+GRASIM.NS,Grasim Industries,NSE,NSE_EQ|INE047A01021,cement,true
+HAL.NS,Hindustan Aeronautics,NSE,NSE_EQ|INE066F01020,defense,true
+HAVELLS.NS,Havells India,NSE,NSE_EQ|INE176B01034,electricals,true
 HCLTECH.NS,HCL Technologies,NSE,NSE_EQ|INE860A01027,it,true
+HDFCAMC.NS,HDFC AMC,NSE,NSE_EQ|INE127D01025,financial_services,true
+HDFCBANK.NS,HDFC Bank,NSE,NSE_EQ|INE040A01034,banking,true
+HDFCLIFE.NS,HDFC Life Insurance,NSE,NSE_EQ|INE795G01014,insurance,true
+HEROMOTOCO.NS,Hero MotoCorp,NSE,NSE_EQ|INE158A01026,auto,true
+HINDALCO.NS,Hindalco Industries,NSE,NSE_EQ|INE038A01020,metals,true
+HINDPETRO.NS,Hindustan Petroleum,NSE,NSE_EQ|INE094A01015,energy,true
+HINDUNILVR.NS,Hindustan Unilever,NSE,NSE_EQ|INE030A01027,fmcg,true
+ICICIBANK.NS,ICICI Bank,NSE,NSE_EQ|INE090A01021,banking,true
+ICICIGI.NS,ICICI Lombard,NSE,NSE_EQ|INE765G01017,insurance,true
+ICICIPRULI.NS,ICICI Prudential Life,NSE,NSE_EQ|INE726G01019,insurance,true
+IDEA.NS,Vodafone Idea,NSE,NSE_EQ|INE669E01016,telecom,true
+IDFCFIRSTB.NS,IDFC First Bank,NSE,NSE_EQ|INE092T01019,banking,true
+INDHOTEL.NS,Indian Hotels,NSE,NSE_EQ|INE053A01029,hospitality,true
+INDIGO.NS,IndiGo,NSE,NSE_EQ|INE646L01027,aviation,true
+INDUSINDBK.NS,IndusInd Bank,NSE,NSE_EQ|INE095A01012,banking,true
+INFY.NS,Infosys,NSE,NSE_EQ|INE009A01021,it,true
+IOC.NS,Indian Oil Corporation,NSE,NSE_EQ|INE242A01010,energy,true
+IRCTC.NS,IRCTC,NSE,NSE_EQ|INE335Y01020,travel,true
+ITC.NS,ITC,NSE,NSE_EQ|INE154A01025,fmcg,true
+JINDALSTEL.NS,Jindal Steel,NSE,NSE_EQ|INE749A01030,metals,true
+JIOFIN.NS,Jio Financial Services,NSE,NSE_EQ|INE758E01017,financial_services,true
+JSWENERGY.NS,JSW Energy,NSE,NSE_EQ|INE121E01018,power,true
+JSWSTEEL.NS,JSW Steel,NSE,NSE_EQ|INE019A01038,metals,true
+KOTAKBANK.NS,Kotak Mahindra Bank,NSE,NSE_EQ|INE237A01036,banking,true
+LICI.NS,LIC India,NSE,NSE_EQ|INE0J1Y01017,insurance,true
+LODHA.NS,Macrotech Developers,NSE,NSE_EQ|INE670K01029,realty,true
+LT.NS,Larsen & Toubro,NSE,NSE_EQ|INE018A01030,infrastructure,true
+M&M.NS,Mahindra & Mahindra,NSE,NSE_EQ|INE101A01026,auto,true
+MARUTI.NS,Maruti Suzuki,NSE,NSE_EQ|INE585B01010,auto,true
+MOTHERSON.NS,Motherson Sumi,NSE,NSE_EQ|INE775A01035,auto,true
+MUTHOOTFIN.NS,Muthoot Finance,NSE,NSE_EQ|INE414G01012,financial_services,true
+NAUKRI.NS,Naukri.com,NSE,NSE_EQ|INE663F01032,internet,true
+NESTLEIND.NS,Nestle India,NSE,NSE_EQ|INE239A01024,fmcg,true
+NHPC.NS,NHPC,NSE,NSE_EQ|INE848E01016,power,true
+NTPC.NS,NTPC,NSE,NSE_EQ|INE733E01010,power,true
+OIL.NS,Oil India,NSE,NSE_EQ|INE274J01014,energy,true
+ONGC.NS,ONGC,NSE,NSE_EQ|INE213A01029,energy,true
+PAGEIND.NS,Page Industries,NSE,NSE_EQ|INE761H01022,apparel,true
+PFC.NS,Power Finance Corporation,NSE,NSE_EQ|INE134E01011,financial_services,true
+PIDILITIND.NS,Pidilite Industries,NSE,NSE_EQ|INE318A01026,chemicals,true
+PIIND.NS,PI Industries,NSE,NSE_EQ|INE603J01030,chemicals,true
+PNB.NS,Punjab National Bank,NSE,NSE_EQ|INE160A01022,banking,true
+POWERGRID.NS,Power Grid Corporation,NSE,NSE_EQ|INE752E01010,power,true
+RECLTD.NS,REC Limited,NSE,NSE_EQ|INE020B01018,financial_services,true
+RELIANCE.NS,Reliance Industries,NSE,NSE_EQ|INE002A01018,energy,true
+SAIL.NS,SAIL,NSE,NSE_EQ|INE114A01011,metals,true
+SBICARD.NS,SBI Card,NSE,NSE_EQ|INE018E01016,financial_services,true
+SBILIFE.NS,SBI Life Insurance,NSE,NSE_EQ|INE123W01016,insurance,true
+SBIN.NS,State Bank of India,NSE,NSE_EQ|INE062A01020,banking,true
+SHRIRAMFIN.NS,Shriram Finance,NSE,NSE_EQ|INE721A01047,financial_services,true
+SIEMENS.NS,Siemens,NSE,NSE_EQ|INE003A01024,industrials,true
+SRF.NS,SRF,NSE,NSE_EQ|INE647A01010,chemicals,true
+SUNPHARMA.NS,Sun Pharma,NSE,NSE_EQ|INE044A01036,pharma,true
+SUZLON.NS,Suzlon Energy,NSE,NSE_EQ|INE040H01021,energy,true
+TATACONSUM.NS,Tata Consumer Products,NSE,NSE_EQ|INE192A01025,fmcg,true
+TATASTEEL.NS,Tata Steel,NSE,NSE_EQ|INE081A01020,metals,true
+TCS.NS,Tata Consultancy Services,NSE,NSE_EQ|INE467B01029,it,true
+TECHM.NS,Tech Mahindra,NSE,NSE_EQ|INE669C01036,it,true
+TITAN.NS,Titan Company,NSE,NSE_EQ|INE280A01028,consumer_durables,true
+TORNTPHARM.NS,Torrent Pharma,NSE,NSE_EQ|INE685A01028,pharma,true
+TRENT.NS,Trent,NSE,NSE_EQ|INE849A01020,retail,true
+TVSMOTOR.NS,TVS Motor,NSE,NSE_EQ|INE494B01023,auto,true
+ULTRACEMCO.NS,UltraTech Cement,NSE,NSE_EQ|INE481G01011,cement,true
+UNIONBANK.NS,Union Bank of India,NSE,NSE_EQ|INE692A01016,banking,true
+VBL.NS,Varun Beverages,NSE,NSE_EQ|INE200M01039,beverages,true
+VEDL.NS,Vedanta,NSE,NSE_EQ|INE205A01025,metals,true
+VOLTAS.NS,Voltas,NSE,NSE_EQ|INE226A01021,consumer_durables,true
+WIPRO.NS,Wipro,NSE,NSE_EQ|INE075A01022,it,true

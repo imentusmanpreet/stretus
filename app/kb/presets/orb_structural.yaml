@@ -12,6 +12,11 @@ keywords:
   - orb with structural sl
   - orb sl at orb low
   - orb with structural stop
+  - opening range low as stop
+  - opening range low as structural stop
+  - structural stop at opening range
+  - orb candle low as stop
+  - orb sl at opening range low
 
 supported_timeframes: [1m, 3m, 5m, 10m, 15m]
 

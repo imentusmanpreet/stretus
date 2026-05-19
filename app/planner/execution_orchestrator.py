@@ -76,6 +76,71 @@ class ExecutionOrchestrator:
                 enhanced_plan, semantic_instructions.stop_loss, audit_trail
             )
 
+        # ── Bridge semantic results into plan underscore keys ────────────────
+        # These keys are consumed by StrategyBuilder.apply_signal_plan so that
+        # semantic-extracted specs are persisted on the builder (single source
+        # of truth), not just injected as loose "entry_filters" / "exit" items.
+
+        # HTF rules: merge semantic conditions into the existing _htf_rules list
+        # (which may already carry rules from the KB preset leg).
+        if semantic_instructions.htf_rules:
+            existing_htf: list[dict] = list(enhanced_plan.get("_htf_rules") or [])
+            existing_keys = {
+                (r.get("timeframe", ""), r.get("condition", ""))
+                for r in existing_htf
+                if isinstance(r, dict)
+            }
+            for htf_rule in semantic_instructions.htf_rules:
+                tf = (htf_rule.timeframe or "").strip()
+                cond = (htf_rule.condition or "").strip()
+                if tf and cond and (tf, cond) not in existing_keys:
+                    existing_htf.append({"timeframe": tf, "condition": cond})
+                    existing_keys.add((tf, cond))
+            enhanced_plan["_htf_rules"] = existing_htf
+
+        # Reference symbol: first RS condition wins; never overwrite preset value.
+        if semantic_instructions.reference_symbols and not enhanced_plan.get("_reference_symbol"):
+            first_rs = semantic_instructions.reference_symbols[0]
+            if first_rs.reference_symbol:
+                enhanced_plan["_reference_symbol"] = first_rs.reference_symbol.upper()
+                audit_trail.append(f"ref_symbol:{first_rs.reference_symbol}")
+
+        # Structural SL: only set if the planner didn't already attach one
+        # (builder.stop_loss_spec already takes priority in the pipeline).
+        if semantic_instructions.stop_loss and not enhanced_plan.get("_stop_loss_spec"):
+            sl = semantic_instructions.stop_loss
+            enhanced_plan["_stop_loss_spec"] = {
+                "type": sl.type,
+                "anchor": sl.anchor,
+                "source": "semantic",
+                "description": sl.description,
+            }
+            audit_trail.append(f"structural_sl:{sl.type}")
+
+        # Trailing stop: only set if not already provided by the preset.
+        if (
+            semantic_instructions.trailing_stop
+            and semantic_instructions.trailing_stop.enabled
+            and not enhanced_plan.get("_trailing_stop_spec")
+        ):
+            ts = semantic_instructions.trailing_stop
+            enhanced_plan["_trailing_stop_spec"] = {
+                "type": ts.type,
+                "activate_after_pct": ts.activate_after_pct,
+                "ema_period": ts.ema_period,
+                "source": "semantic",
+            }
+            audit_trail.append(f"trailing:{ts.type}")
+
+        # Risk:Reward: expose in plan so that the chat layer can sync it back
+        # to builder.risk_execution_config without reading SemanticInstructions.
+        if semantic_instructions.risk_reward and semantic_instructions.risk_reward.ratio:
+            enhanced_plan.setdefault("_semantic_risk_reward", {
+                "ratio": semantic_instructions.risk_reward.ratio,
+                "type": semantic_instructions.risk_reward.type,
+            })
+            audit_trail.append(f"rr:{semantic_instructions.risk_reward.ratio}")
+
         # Log audit trail
         enhanced_plan["_semantic_gates_applied"] = audit_trail
         logger.info(

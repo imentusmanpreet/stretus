@@ -139,7 +139,15 @@ class SessionFilter(BaseModel):
 # ── Volume & Momentum Confirmation ────────────────────────────────────────────
 
 VolumeFilterType = Literal["spike", "above_average", "obv_rising", "chaikin_positive"]
-MomentumFilterType = Literal["adx_strong", "adx_threshold", "mfi_rising", "rsi_extreme", "macd_bullish"]
+MomentumFilterType = Literal[
+    "adx_strong", "adx_threshold",
+    "mfi_rising",
+    "rsi_extreme",
+    "macd_bullish",
+    "ema_slope_bullish", "ema_slope_bearish",
+    "ema_bullish", "ema_bearish",
+    "momentum_bullish",
+]
 
 
 class VolumeConfirmation(BaseModel):

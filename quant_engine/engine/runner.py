@@ -280,12 +280,14 @@ def run_backtest(
         trailing_stop_spec=cfg.trailing_stop_spec,
         htf_contexts=htf_contexts,
         time_exit_spec=cfg.time_exit_spec,
+        trade_direction="AUTO",  # Auto-detect from entry signals
     )
 
-    # Derive strategy side from the trades produced (LONG if majority are long)
+    # Derive strategy side from the trades produced
     if trades:
         long_count   = sum(1 for t in trades if str(t.side).upper() == "LONG")
-        strategy_side = "LONG" if long_count >= len(trades) / 2 else "SHORT"
+        short_count  = sum(1 for t in trades if str(t.side).upper() == "SHORT")
+        strategy_side = "LONG" if long_count >= short_count else "SHORT"
     else:
         strategy_side = "LONG"
 
@@ -372,41 +374,20 @@ def _merge_indicator_requirements(
     formula — e.g. an ATR(14) needed only by the trailing-stop spec.
     """
     merged: dict[str, set[int]] = {}
-    multi_param: dict[str, set[tuple]] = {}
     for name, periods in (yaml_indicators or {}).items():
-        key = str(name).upper()
-        normalised: list = []
-        for entry in periods or []:
-            if isinstance(entry, (list, tuple)):
-                multi_param.setdefault(key, set()).add(tuple(entry))
-            else:
-                normalised.append(int(entry))
-        if normalised:
-            merged.setdefault(key, set()).update(normalised)
+        merged.setdefault(str(name).upper(), set()).update(int(p) for p in (periods or []))
 
     for compiled in compiled_conditions:
         if compiled is None:
             continue
         for ref in compiled.indicator_refs:
             merged.setdefault(ref.name, set()).add(ref.period)
-        for name, params in getattr(compiled, "multi_param_refs", ()) or ():
-            multi_param.setdefault(name, set()).add(params)
 
     for name, periods in (extra or {}).items():
-        key = str(name).upper()
-        for entry in periods or []:
-            if isinstance(entry, (list, tuple)):
-                multi_param.setdefault(key, set()).add(tuple(entry))
-            else:
-                merged.setdefault(key, set()).add(int(entry))
+        merged.setdefault(str(name).upper(), set()).update(int(p) for p in (periods or []))
 
     # Preserve list shape that add_all_indicators expects.
-    out: dict[str, list] = {name: sorted(periods) for name, periods in merged.items()}
-    for name, sets in multi_param.items():
-        # Multi-param indicators (Supertrend, Keltner, …) are tuples not ints.
-        # add_extended_indicators consumes them as the periods value.
-        out[name] = sorted(list(sets))
-    return out
+    return {name: sorted(periods) for name, periods in merged.items()}
 
 
 def _stop_spec_indicator_requirements(

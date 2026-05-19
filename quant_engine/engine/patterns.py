@@ -42,16 +42,6 @@ PATTERN_COLUMNS = {
     "IS_BEARISH_FVG":    "IS_BEARISH_FVG",
     "IS_BOS_BULLISH":    "IS_BOS_BULLISH",
     "IS_BOS_BEARISH":    "IS_BOS_BEARISH",
-    # Phase 4 — candlestick pattern columns (rule #22).
-    "IS_HAMMER":             "IS_HAMMER",
-    "IS_HANGING_MAN":        "IS_HANGING_MAN",
-    "IS_ENGULFING":          "IS_ENGULFING",
-    "IS_BULLISH_ENGULFING":  "IS_BULLISH_ENGULFING",
-    "IS_BEARISH_ENGULFING":  "IS_BEARISH_ENGULFING",
-    "IS_PIN_BAR":            "IS_PIN_BAR",
-    "IS_DOJI":               "IS_DOJI",
-    "IS_MORNING_STAR":       "IS_MORNING_STAR",
-    "IS_EVENING_STAR":       "IS_EVENING_STAR",
 }
 
 # Default parameters. A strategy can override via the `patterns:` YAML block.
@@ -168,111 +158,6 @@ def lower_low(
     return out
 
 
-# ─── Candlestick patterns (Phase 4 — rule #22) ───────────────────────────────
-
-
-def _body_and_shadow(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-    """Return (body_size, range_size, upper_shadow, lower_shadow) series."""
-    o = df["open"].astype(float)
-    h = df["high"].astype(float)
-    l = df["low"].astype(float)
-    c = df["close"].astype(float)
-    body = (c - o).abs()
-    rng  = (h - l).clip(lower=1e-9)
-    upper_shadow = h - c.where(c >= o, o)
-    lower_shadow = c.where(c <= o, o) - l
-    return body, rng, upper_shadow, lower_shadow
-
-
-def hammer(df: pd.DataFrame) -> pd.Series:
-    """Bullish hammer: small body near the top, long lower wick (≥ 2× body),
-    short upper wick (≤ 0.5× body). Detected on any bar, regardless of
-    preceding trend (callers can layer trend context separately)."""
-    body, rng, upper, lower = _body_and_shadow(df)
-    body_ratio = body / rng
-    return (
-        (lower >= 2 * body)
-        & (upper <= 0.5 * body.clip(lower=1e-9))
-        & (body_ratio <= 0.35)
-    ).astype(bool)
-
-
-def hanging_man(df: pd.DataFrame) -> pd.Series:
-    """Hanging man: same candle shape as hammer but the prior trend should
-    have been up. We return the candle-shape match; downstream conditions
-    can require an uptrend confirmation."""
-    return hammer(df)
-
-
-def bullish_engulfing(df: pd.DataFrame) -> pd.Series:
-    """Bar (i): bullish (close > open) AND prev bar (i-1) bearish AND
-    bar(i).body fully engulfs bar(i-1).body (open[i] <= close[i-1] AND
-    close[i] >= open[i-1])."""
-    o, c = df["open"].astype(float), df["close"].astype(float)
-    prev_o, prev_c = o.shift(1), c.shift(1)
-    return (
-        (c > o)
-        & (prev_c < prev_o)
-        & (o <= prev_c)
-        & (c >= prev_o)
-    ).astype(bool)
-
-
-def bearish_engulfing(df: pd.DataFrame) -> pd.Series:
-    o, c = df["open"].astype(float), df["close"].astype(float)
-    prev_o, prev_c = o.shift(1), c.shift(1)
-    return (
-        (c < o)
-        & (prev_c > prev_o)
-        & (o >= prev_c)
-        & (c <= prev_o)
-    ).astype(bool)
-
-
-def pin_bar(df: pd.DataFrame) -> pd.Series:
-    """Either side. Body ≤ 30% of range AND one shadow ≥ 2× the body AND ≥
-    60% of range."""
-    body, rng, upper, lower = _body_and_shadow(df)
-    body_ratio = body / rng
-    long_lower = (lower >= 2 * body.clip(lower=1e-9)) & (lower / rng >= 0.6)
-    long_upper = (upper >= 2 * body.clip(lower=1e-9)) & (upper / rng >= 0.6)
-    return ((body_ratio <= 0.3) & (long_lower | long_upper)).astype(bool)
-
-
-def doji(df: pd.DataFrame, body_pct_max: float = 0.10) -> pd.Series:
-    """Body ≤ `body_pct_max` of the bar range."""
-    body, rng, _, _ = _body_and_shadow(df)
-    return ((body / rng) <= body_pct_max).astype(bool)
-
-
-def morning_star(df: pd.DataFrame) -> pd.Series:
-    """3-bar pattern: bearish, small body, bullish closing above midpoint of
-    first body."""
-    o, c = df["open"].astype(float), df["close"].astype(float)
-    body = (c - o).abs()
-    rng  = (df["high"] - df["low"]).clip(lower=1e-9)
-    body_pct = body / rng
-
-    b1_bearish = (c.shift(2) < o.shift(2))
-    b2_small   = (body_pct.shift(1) <= 0.30)
-    b3_bullish = (c > o)
-    b3_recovers = c > (o.shift(2) + c.shift(2)) / 2.0
-    return (b1_bearish & b2_small & b3_bullish & b3_recovers).astype(bool)
-
-
-def evening_star(df: pd.DataFrame) -> pd.Series:
-    o, c = df["open"].astype(float), df["close"].astype(float)
-    body = (c - o).abs()
-    rng  = (df["high"] - df["low"]).clip(lower=1e-9)
-    body_pct = body / rng
-
-    b1_bullish = (c.shift(2) > o.shift(2))
-    b2_small   = (body_pct.shift(1) <= 0.30)
-    b3_bearish = (c < o)
-    b3_falls   = c < (o.shift(2) + c.shift(2)) / 2.0
-    return (b1_bullish & b2_small & b3_bearish & b3_falls).astype(bool)
-
-
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 
@@ -354,33 +239,6 @@ def add_all_patterns(
             swing_low_col, out["low"], window=swing_window_low,
         ).astype(float)
 
-    # Phase 4 — candlestick patterns. Each is a pure single-bar (or 2-3 bar)
-    # detector with no dependency on swing markers.
-    if "hammer" in pattern_config:
-        out["IS_HAMMER"] = hammer(out).astype(float)
-    if "hanging_man" in pattern_config:
-        out["IS_HANGING_MAN"] = hanging_man(out).astype(float)
-    if "engulfing" in pattern_config:
-        bull = bullish_engulfing(out).astype(float)
-        bear = bearish_engulfing(out).astype(float)
-        out["IS_BULLISH_ENGULFING"] = bull
-        out["IS_BEARISH_ENGULFING"] = bear
-        out["IS_ENGULFING"]         = ((bull > 0) | (bear > 0)).astype(float)
-    if "bullish_engulfing" in pattern_config:
-        out["IS_BULLISH_ENGULFING"] = bullish_engulfing(out).astype(float)
-    if "bearish_engulfing" in pattern_config:
-        out["IS_BEARISH_ENGULFING"] = bearish_engulfing(out).astype(float)
-    if "pin_bar" in pattern_config:
-        out["IS_PIN_BAR"] = pin_bar(out).astype(float)
-    if "doji" in pattern_config:
-        params = pattern_config.get("doji") or {}
-        body_max = float(params.get("body_pct_max", 0.10))
-        out["IS_DOJI"] = doji(out, body_pct_max=body_max).astype(float)
-    if "morning_star" in pattern_config:
-        out["IS_MORNING_STAR"] = morning_star(out).astype(float)
-    if "evening_star" in pattern_config:
-        out["IS_EVENING_STAR"] = evening_star(out).astype(float)
-
     return out
 
 
@@ -398,16 +256,6 @@ IDENT_TO_PATTERN_NAME = {
     "IS_BEARISH_FVG":    "bearish_fvg",
     "IS_BOS_BULLISH":    "bos_bullish",
     "IS_BOS_BEARISH":    "bos_bearish",
-    # Phase 4 — candlestick patterns (rule #22).
-    "IS_HAMMER":              "hammer",
-    "IS_HANGING_MAN":         "hanging_man",
-    "IS_ENGULFING":           "engulfing",
-    "IS_BULLISH_ENGULFING":   "bullish_engulfing",
-    "IS_BEARISH_ENGULFING":   "bearish_engulfing",
-    "IS_PIN_BAR":             "pin_bar",
-    "IS_DOJI":                "doji",
-    "IS_MORNING_STAR":        "morning_star",
-    "IS_EVENING_STAR":        "evening_star",
 }
 
 

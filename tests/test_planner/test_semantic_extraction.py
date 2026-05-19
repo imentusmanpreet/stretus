@@ -62,7 +62,6 @@ class TestSemanticExtraction:
 
     # ── Capability 2: Reference Symbol / Relative Strength ───────────────────
 
-    @pytest.mark.xfail(reason="Reference symbol extraction not yet fully implemented")
     def test_relative_strength_detection(self, extractor):
         """Test detection: 'outperforming NIFTY'"""
         prompt = """
@@ -77,7 +76,6 @@ class TestSemanticExtraction:
         assert "outperforming" in instructions.reference_symbols[0].description.lower() or \
                "relative" in instructions.reference_symbols[0].description.lower()
 
-    @pytest.mark.xfail(reason="Reference symbol extraction not yet fully implemented")
     def test_index_confirmation_detection(self, extractor):
         """Test detection: 'Bank Nifty should be bullish'"""
         prompt = """
@@ -92,7 +90,6 @@ class TestSemanticExtraction:
 
     # ── Capability 3: Structural Stop-Loss ────────────────────────────────────
 
-    @pytest.mark.xfail(reason="Structural stop-loss extraction not yet fully implemented")
     def test_below_swing_low_sl(self, extractor):
         """Test detection: 'below swing low'"""
         prompt = """
@@ -120,7 +117,6 @@ class TestSemanticExtraction:
         assert "reclaim" in (instructions.stop_loss.description or "").lower()
         assert instructions.stop_loss.anchor == "reclaim_candle"
 
-    @pytest.mark.xfail(reason="ORB stop-loss extraction not yet fully implemented")
     def test_orb_low_sl(self, extractor):
         """Test detection: 'below ORB low'"""
         prompt = """
@@ -137,7 +133,6 @@ class TestSemanticExtraction:
 
     # ── Capability 4: Trailing Stop ───────────────────────────────────────────
 
-    @pytest.mark.xfail(reason="EMA trailing stop extraction not yet fully implemented")
     def test_ema_trailing_stop(self, extractor):
         """Test detection: 'EMA trailing stop'"""
         prompt = """
@@ -152,7 +147,6 @@ class TestSemanticExtraction:
         assert instructions.trailing_stop.type == "ema_based"
         assert instructions.trailing_stop.ema_period == 9
 
-    @pytest.mark.xfail(reason="ATR trailing stop extraction not yet fully implemented")
     def test_atr_trailing_stop_with_activation(self, extractor):
         """Test detection: 'ATR trailing stop, activate after 1% profit'"""
         prompt = """
@@ -182,7 +176,6 @@ class TestSemanticExtraction:
         assert instructions.risk_reward is not None
         assert instructions.risk_reward.ratio == 2.0
 
-    @pytest.mark.xfail(reason="Risk:Reward type extraction not yet fully implemented")
     def test_rr_minimum_enforcement(self, extractor):
         """Test detection: 'minimum 1:3'"""
         prompt = """
@@ -245,7 +238,6 @@ class TestSemanticExtraction:
 
     # ── Capability 7: Dual-Direction Strategies ───────────────────────────────
 
-    @pytest.mark.xfail(reason="Dual direction detection not yet fully implemented")
     def test_dual_direction_detection(self, extractor):
         """Test detection of both BUY and SELL conditions"""
         prompt = """
@@ -309,7 +301,6 @@ class TestSemanticExtraction:
 
     # ── Capability 9: Semantic Strategy Preservation ────────────────────────
 
-    @pytest.mark.xfail(reason="Strategy family detection needs refinement")
     def test_vwap_reclaim_family_detection(self, extractor):
         """Test family detection: VWAP Reclaim strategy"""
         prompt = """
@@ -358,7 +349,6 @@ class TestSemanticExtraction:
 
     # ── Capability 10: Extraction Quality & Completeness ──────────────────────
 
-    @pytest.mark.xfail(reason="Complete extraction quality scoring needs refinement")
     def test_full_semantic_completeness_vwap_prompt(self, extractor):
         """Test complete extraction from comprehensive VWAP prompt"""
         prompt = """

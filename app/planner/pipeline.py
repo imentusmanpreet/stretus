@@ -40,6 +40,7 @@ from app.planner.param_resolver import (
 )
 from app.planner.trace import DecisionTrace
 from app.planner.validator import PlanInvariantViolation, validate_plan
+from app.planner.semantic_signal_composer import SemanticSignalComposer
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,24 @@ class Pipeline:
                 trace=trace,
             )
 
+        # ── Step 3c: Semantic signal injection ──────────────────────────────
+        # After preset-or-ranker signal selection, inject entry filter signals
+        # derived from the canonical semantic intent (HTF confluence rules,
+        # relative-strength conditions, ADX/volume confirmations).  This
+        # ensures the planner CONSUMES the semantic object rather than ignoring
+        # it.  The composer respects MAX_ENTRY_FILTERS and deduplication.
+        semantic_intent_dict = getattr(builder, "semantic_intent", None) or {}
+        if semantic_intent_dict:
+            composer = SemanticSignalComposer(self.kb)
+            entry_filter_cards = composer.inject_entry_filters(
+                semantic_intent_dict,
+                sentiment=sentiment,
+                entry_trigger_card=entry_trigger_card,
+                existing_filter_cards=entry_filter_cards,
+                timeframe=timeframe,
+                max_total_filters=MAX_ENTRY_FILTERS,
+            )
+
         # ── Step 5: Resolve params ──────────────────────────────────────────
         et_params, et_src = resolve_params(
             entry_trigger_card, timeframe=timeframe, symbol=stock.symbol,
@@ -261,17 +280,29 @@ class Pipeline:
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             risk=build_risk_dict(risk_tier),
-            stop_loss_spec=preset.stop_loss if preset is not None else None,
-            trailing_stop_spec=preset.trailing_stop if preset is not None else None,
-            reference_symbol=preset.reference_symbol if preset is not None else None,
+            # User-specified structural SL/trailing overrides the preset default.
+            stop_loss_spec=(
+                getattr(builder, "stop_loss_spec", None)
+                or (preset.stop_loss if preset is not None else None)
+            ),
+            trailing_stop_spec=(
+                getattr(builder, "trailing_stop_spec", None)
+                or (preset.trailing_stop if preset is not None else None)
+            ),
+            reference_symbol=(
+                (preset.reference_symbol if preset is not None else None)
+                or getattr(builder, "reference_symbol", None)
+            ),
             # HTF rules are leg-scoped (direction-dependent), so we resolve
             # them against the chosen sentiment leg of the preset.
+            # Also include any HTF rules already on the builder (put there by
+            # a prior turn's semantic extraction or by the user explicitly).
             htf_rules=(
                 list(preset.leg(sentiment).htf)
                 if (preset is not None
                     and preset.leg(sentiment) is not None
                     and preset.leg(sentiment).htf)
-                else []
+                else list(getattr(builder, "htf_rules", None) or [])
             ),
             time_exit=preset.time_exit if preset is not None else None,
             trace=trace.to_dict(),
@@ -312,18 +343,90 @@ class Pipeline:
         """Return the preset pinned by the user, or None.
 
         Resolution order:
-          1. Explicit `builder.strategy_preset` (set by chat layer or API)
-          2. Keyword scan over `builder.goal` so a user can just type
+          1. Explicit `builder.strategy_preset` (set by chat layer or API),
+             but only when it is compatible with the requested timeframe.
+             If the stored preset doesn't support the timeframe (e.g. because
+             a prior turn matched the wrong keyword or the user later changed
+             the timeframe), fall through to goal-text detection rather than
+             raising UnsupportedTimeframe immediately.
+          2. Semantic family mapping from `builder.semantic_intent.strategy_family`.
+             The SemanticExtractor identifies the *primary framework* of the
+             strategy (ORB, EMA_PULLBACK, VWAP_RECLAIM…) from prose structure,
+             not just keyword co-occurrence.  When the KB keyword scorer would
+             otherwise latch onto a secondary filter/modifier preset (e.g.
+             relative_strength when the user said "ORB with RS filter"), this
+             layer corrects the selection by using the structurally-identified
+             framework as the primary preset.
+          3. Keyword scan over `builder.goal` so a user can just type
              "ORB strategy on RELIANCE 5m" and get the ORB preset.
         """
+        timeframe = (getattr(builder, "timeframe", None) or "").strip()
         explicit = (getattr(builder, "strategy_preset", None) or "").strip()
         if explicit:
             preset = self.kb.lookup_preset(explicit)
             if preset is not None:
-                return preset
-            logger.info("planner|preset|explicit_unknown|name=%r", explicit)
+                if (
+                    not timeframe
+                    or not preset.supported_timeframes
+                    or timeframe in preset.supported_timeframes
+                ):
+                    return preset
+                logger.warning(
+                    "planner|preset|explicit_timeframe_mismatch|name=%r"
+                    "|tf=%r|supported=%s — falling back to semantic/goal-text detection",
+                    explicit, timeframe, preset.supported_timeframes,
+                )
+            else:
+                logger.info("planner|preset|explicit_unknown|name=%r", explicit)
+
+        # ── Layer 2: semantic base_framework → preset via KB ────────────────
+        # The canonical intent stores base_framework — a preset name that the
+        # SemanticIntentNormalizer resolved directly via
+        # KB.detect_primary_framework_in_text(source_prompt).  We ask the KB
+        # directly; no hardcoded family-name tables exist anywhere.
+        semantic_intent: dict = getattr(builder, "semantic_intent", None) or {}
+        canonical_framework: str = (semantic_intent.get("base_framework") or "").strip()
+
+        if canonical_framework:
+            family_preset = self.kb.lookup_preset(canonical_framework)
+            # Exact lookup failed — let the KB keyword scorer resolve the name.
+            # This avoids hardcoded suffix patterns like "_structural", "_trail";
+            # instead we treat the framework string as free text and let the KB
+            # detect the best matching primary-framework preset from its own
+            # keyword lists.
+            if family_preset is None:
+                family_preset = self.kb.detect_primary_framework_in_text(canonical_framework)
+            if family_preset is not None:
+                if (
+                    not timeframe
+                    or not family_preset.supported_timeframes
+                    or timeframe in family_preset.supported_timeframes
+                ):
+                    logger.info(
+                        "planner|preset|semantic_framework_override"
+                        "|framework=%r|preset=%r|tf=%r",
+                        canonical_framework, family_preset.name, timeframe,
+                    )
+                    return family_preset
+                logger.info(
+                    "planner|preset|semantic_framework_tf_mismatch|framework=%r"
+                    "|preset=%r|tf=%r|supported=%s — falling through to goal-text",
+                    canonical_framework, family_preset.name, timeframe,
+                    family_preset.supported_timeframes,
+                )
+
+        # ── Layer 3: goal-text keyword detection ───────────────────────────
         goal_text = getattr(builder, "goal", None) or ""
-        return self.kb.detect_preset_in_text(goal_text)
+        detected = self.kb.detect_preset_in_text(goal_text)
+        if detected is not None and timeframe and detected.supported_timeframes:
+            if timeframe not in detected.supported_timeframes:
+                logger.info(
+                    "planner|preset|goal_detected_timeframe_mismatch|name=%r"
+                    "|tf=%r|supported=%s — no preset applied",
+                    detected.name, timeframe, detected.supported_timeframes,
+                )
+                return None
+        return detected
 
     def _apply_preset(
         self,

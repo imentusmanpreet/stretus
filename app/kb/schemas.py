@@ -58,6 +58,12 @@ class SignalCard(BaseModel):
     pairs_well_with: list[str] = Field(default_factory=list)
     contradicts: list[str] = Field(default_factory=list)
 
+    # Free-form semantic tags for downstream filtering without hard-coded name
+    # matching.  Examples: ["relative_strength", "benchmark_relative"],
+    # ["ema_slope"], ["structural_sl"].  Any consumer can check
+    # ``"relative_strength" in signal.tags`` instead of guessing from name.
+    tags: list[str] = Field(default_factory=list)
+
     params_by_timeframe: dict[str, dict[str, float | int]] = Field(default_factory=dict)
     experience_fit: dict[str, float] = Field(default_factory=dict)
     intent_fit: dict[str, float] = Field(default_factory=dict)
@@ -123,6 +129,21 @@ class StrategyPreset(BaseModel):
     # strategy YAML. Shape: {exit_time: "15:15", timezone: "Asia/Kolkata"}.
     # Loader converts this to UTC minutes-of-day for the simulator.
     time_exit: dict | None = None
+    # Phase 9 — when set, the preset is "dynamic": no symbol is required
+    # from the user; instead the runtime universe scanner picks one from
+    # the KB stock universe based on these conditions. The chat layer asks
+    # the user to confirm a tie-break method when more than one stock
+    # matches. Stored as a dict here (not the strongly-typed DiscoveryConfig)
+    # to avoid an import cycle between the KB schema and the discovery
+    # service; the loader/scanner cast as needed.
+    discovery: dict | None = None
+
+    # When True this preset is the PRIMARY strategy framework (e.g. ORB,
+    # VWAP reclaim, EMA pullback).  When False it is a modifier/filter
+    # preset (e.g. relative_strength) that should never be promoted to the
+    # primary framework role by the KB keyword scorer.  Consumers that want
+    # only framework presets should filter ``is_primary_framework=True``.
+    is_primary_framework: bool = True
 
     def leg(self, sentiment: SignalDirection) -> PresetLeg | None:
         if sentiment == "bullish":

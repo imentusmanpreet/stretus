@@ -85,6 +85,15 @@ def build_agent_state(
     recent_messages: list[Any] | None = None,
 ) -> dict[str, Any]:
     context = latest_strategy_context if isinstance(latest_strategy_context, dict) else {}
+    # Phase 9f — surface dynamic-discovery state to the agent. Without
+    # these fields the LLM cannot tell that the active preset will supply
+    # the symbol at runtime, so it asks the user for a specific stock —
+    # exactly what the discovery flow exists to avoid.
+    discovery_active = False
+    try:
+        discovery_active = builder.requires_discovery()
+    except Exception:
+        discovery_active = False
     return {
         "session_id": session_id,
         "mode": previous_state or builder.get_mode(),
@@ -101,6 +110,11 @@ def build_agent_state(
         "user_input_confirmed": bool(builder.user_input_confirmed),
         "has_signal_plan": bool(builder.signal_plan),
         "signal_plan": _signal_plan_summary(builder),
+        # Phase 9f — dynamic-discovery hints. The agent uses these to know
+        # NOT to ask the user for a specific stock when the backend will
+        # scan the universe and pick one automatically.
+        "strategy_preset": getattr(builder, "strategy_preset", None),
+        "discovery_will_supply_symbol": bool(discovery_active),
         "strategy": {
             "strategy_id": context.get("strategy_id"),
             "yaml_path": context.get("yaml_path"),

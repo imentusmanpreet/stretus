@@ -212,29 +212,7 @@ def add_all_indicators(df: pd.DataFrame, indicator_config: dict) -> pd.DataFrame
         elif ind == "VWAP":
             df["VWAP"] = vwap(df)
 
-    # Hand off to the extended-indicator pack for everything outside the
-    # original eight-indicator core (ADX, Stochastic, OBV, MFI, Donchian,
-    # Keltner, Supertrend, …). Indicators the extended pack doesn't know
-    # are ignored silently — the chat layer's catalog is the source of
-    # truth for what's supported, and unknown names are dead weight here.
-    from .indicators_ext import add_extended_indicators
-    df = add_extended_indicators(df, indicator_config)
-
     return df
-
-
-_EXTENDED_INDICATOR_WARMUP: dict[str, int] = {
-    "ADX": 14, "DMI": 14,
-    "STOCH_K": 14, "STOCH_D": 17, "WILLR": 14,
-    "ROC": 10, "CCI": 20, "MOMENTUM": 10, "CMO": 9, "TRIX": 45,
-    "STDEV": 20, "HV": 20, "CHOPPINESS": 14, "DISPARITY": 14,
-    "BB_WIDTH": 20, "BB_PCT_B": 20,
-    "VOLUME_SMA": 20, "VROC": 12, "MFI": 14, "CMF": 20,
-    "AROON_UP": 15, "AROON_DOWN": 15, "AROON_OSC": 15,
-    "HHV": 20, "LLV": 20, "DONCHIAN": 20,
-    "SUPERTREND": 10, "KELTNER": 20, "ATR_UPPER": 14, "ATR_LOWER": 14,
-    "PSAR": 5,
-}
 
 
 def max_indicator_warmup(indicator_config: dict) -> int:
@@ -257,17 +235,5 @@ def max_indicator_warmup(indicator_config: dict) -> int:
 
         elif ind == "MACD":
             warmup = max(warmup, 26 + 9)  # EMA(26) + signal EMA(9)
-
-        elif ind in _EXTENDED_INDICATOR_WARMUP:
-            base = _EXTENDED_INDICATOR_WARMUP[ind]
-            for entry in (periods or [base]):
-                if isinstance(entry, (list, tuple)) and entry:
-                    candidate = entry[0]
-                else:
-                    candidate = entry
-                try:
-                    warmup = max(warmup, int(candidate))
-                except (TypeError, ValueError):
-                    warmup = max(warmup, base)
 
     return warmup

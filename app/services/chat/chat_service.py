@@ -52,7 +52,6 @@ from app.services.chat.strategy_flow import (
     build_final_strategy_payload,
     build_grounded_clarification_reply,
     build_input_modification_invalid_field_reply,
-    build_missing_critical_inputs_reply,
     build_pause_workflow_reply,
     build_plan_signals_reminder,
     build_plan_signals_reply,
@@ -62,7 +61,7 @@ from app.services.chat.strategy_flow import (
 )
 from app.core.signal_performance_cache import record_performance
 from app.core.config import get_settings
-from app.kb.compat import resolve_supported_stock
+from app.kb.compat import AMBIGUOUS_STOCK_VALIDATION_CODE, resolve_supported_stock
 from app.planner.legacy_bridge import (
     NoValidCandidate,
     UnsupportedStock,
@@ -71,46 +70,6 @@ from app.planner.legacy_bridge import (
 )
 from app.planner.semantic_extractor import SemanticExtractor
 from app.planner.execution_orchestrator import ExecutionOrchestrator
-from app.planner.prompt_summary import (
-    build_prompt_summary,
-    enforce_zero_loss_capture,
-    find_missing_critical_inputs,
-)
-from app.planner.signal_filters import (
-    SignalFilterConfig,
-    apply_filters_to_plan,
-    build_signal_filters,
-    render_filters_for_summary,
-)
-from app.planner.trade_management import (
-    TradeManagementConfig,
-    apply_trade_management_to_plan,
-    build_trade_management_config,
-    find_missing_trade_management,
-    render_trade_management_for_summary,
-)
-from app.planner.mirror_side import (
-    assess_trading_window,
-    mirror_plan,
-)
-from app.planner.market_context import (
-    MarketContextConfig,
-    apply_market_context_to_plan,
-    build_market_context_config,
-    find_missing_market_context,
-    render_market_context_for_summary,
-)
-from app.planner.stock_recommender import (
-    recommend as recommend_stocks,
-    render_recommendations_for_summary,
-)
-from app.planner.trade_journal import (
-    append_to_builder as append_journal_entry,
-    build_signal_entry,
-    confirmation_factors_from_plan,
-    grade_setup,
-    render_journal_for_summary,
-)
 from app.planner.strategy_assembler import (
     build_retrieval_meta,
     build_strategy_config,
@@ -128,6 +87,7 @@ from app.services.execution.risk_execution_config_service import (
 )
 from app.services.strategy.builder import (
     CORE_USER_INPUT_FIELDS,
+    MARKET_CONFIG,
     StrategyBuilder,
     UNSUPPORTED_USER_TIMEFRAME_CODE,
     extract_company_name_query,
@@ -138,6 +98,13 @@ from app.services.strategy.builder import (
     unsupported_user_timeframe_validation_facts,
 )
 from app.services.strategy.yaml_generator import generate_yaml
+# Phase 9b — discovery integration helpers (thin wrappers around the
+# orchestrator that return a DiscoveryStepResult so the integration here
+# stays a small if-block instead of a state machine).
+from app.services.discovery.chat_integration import (
+    handle_pending_tie_break,
+    maybe_dispatch_discovery,
+)
 
 FLOW_MODEL_NAME = "stretus-kb-planner"
 logger = logging.getLogger(__name__)
@@ -849,195 +816,6 @@ def _core_snapshot(builder: StrategyBuilder) -> tuple[Optional[str], ...]:
     return tuple(getattr(builder, field, None) for field in _CORE_SNAPSHOT_FIELDS)
 
 
-def _collect_full_prompt_text(
-    builder: StrategyBuilder,
-    all_messages: list[ChatMessage] | None,
-    user_content: str,
-) -> str:
-    """Concatenate every user-side message in this session plus the captured
-    goal and the latest turn, so the SemanticExtractor sees the full
-    description rather than just the most recent message. Order: history,
-    goal, current turn — the extractor is order-insensitive (regex-based)
-    but this keeps logs readable.
-    """
-    parts: list[str] = []
-    seen: set[str] = set()
-    for message in all_messages or []:
-        if getattr(message, "role", None) != ChatRole.user:
-            continue
-        text = (getattr(message, "content", None) or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        parts.append(text)
-    goal = (getattr(builder, "goal", None) or "").strip()
-    if goal and goal not in seen:
-        parts.append(goal)
-        seen.add(goal)
-    latest = (user_content or "").strip()
-    if latest and latest not in seen:
-        parts.append(latest)
-    return "\n".join(parts)
-
-
-def _ensure_prompt_summary_built(
-    builder: StrategyBuilder,
-    *,
-    user_content: str,
-    all_messages: list[ChatMessage] | None,
-) -> None:
-    """Populate builder.prompt_summary + builder.missing_critical_inputs
-    from a fresh SemanticExtractor pass over the user's accumulated prompt
-    text. Idempotent — the comprehensive snapshot is rebuilt every time
-    this is called so that confirmation reflects the latest captured
-    fields. Cheap (regex-only); safe to invoke per turn.
-    """
-    try:
-        full_text = _collect_full_prompt_text(builder, all_messages, user_content)
-        instructions = SemanticExtractor().extract(full_text)
-        summary = build_prompt_summary(
-            builder,
-            instructions,
-            extra_prompt_text=full_text,
-        )
-
-        # Filter framework: detect which behavioural filters the user
-        # asked for, fall back to defaults for the rest, and render them
-        # into the summary so the user sees the toggles before confirming.
-        existing_filters = SignalFilterConfig.from_dict(builder.signal_filters or {})
-        filter_cfg = build_signal_filters(
-            full_text,
-            instructions,
-            builder,
-            existing=existing_filters,
-        )
-        builder.signal_filters = filter_cfg.to_dict()
-
-        # Trade-management rule pack (Phase 3 #9-#17). Same toggle pattern:
-        # detect from prompt, fall back to defaults, surface required-but-
-        # unspecified rules in missing_critical_inputs so the user is asked.
-        existing_tm = TradeManagementConfig.from_dict(builder.trade_management or {})
-        tm_cfg = build_trade_management_config(
-            full_text, instructions, builder, existing=existing_tm,
-        )
-        builder.trade_management = tm_cfg.to_dict()
-        tm_missing = find_missing_trade_management(tm_cfg)
-
-        # Phase 4 — market-context filters (rules #18-#23). Built every
-        # turn from the user prompt; required toggles (gap_handling,
-        # news_event_filter) bubble into missing_critical_inputs.
-        existing_mc = MarketContextConfig.from_dict(builder.market_context or {})
-        mc_cfg = build_market_context_config(
-            full_text, instructions, builder, existing=existing_mc,
-        )
-        builder.market_context = mc_cfg.to_dict()
-        mc_missing = find_missing_market_context(mc_cfg)
-
-        # Phase 4 — stock recommender (rule #24). Runs every turn so the
-        # user sees the recommendation alongside the summary. If they
-        # already pinned a stock from the supported universe, the picks
-        # validate the choice; otherwise they propose the best fits.
-        builder.stock_recommendations = recommend_stocks(
-            full_text, instructions, builder, top_n=3,
-        )
-
-        # Trading-window stability check (Phase 3 #7) — flag overlap with
-        # known unstable Indian-market periods so the user can tighten the
-        # session before signal planning.
-        window_warnings: list = []
-        if instructions is not None and instructions.session_filters is not None:
-            session_dict = {
-                "valid_windows":    [w.dict() for w in instructions.session_filters.valid_windows or []],
-                "blackout_windows": [w.dict() for w in instructions.session_filters.blackout_windows or []],
-                "session":          instructions.session_filters.session,
-            }
-            window_warnings = assess_trading_window(session_dict)
-        else:
-            window_warnings = assess_trading_window(None)
-        builder.window_warnings = window_warnings
-
-        # Auto-generate the opposite-direction setup (Phase 3 #8). The
-        # mirror is derived from whatever entry/exit_condition the planner
-        # produces; until plan_signals runs we mirror the user's own
-        # threshold conditions so the summary still shows both directions.
-        primary_entry = " AND ".join(
-            t["expression"]
-            for t in (summary.get("snapshot", {}).get("extracted", {}) or {}).get(
-                "threshold_conditions", []
-            ) or []
-        ) or ""
-        primary_direction = "long" if (
-            (getattr(builder, "sentiment", "") or "").lower() in {"bullish", "bull", "long"}
-        ) else "short"
-        if primary_entry:
-            stub_plan = {"entry_condition": primary_entry, "exit_condition": ""}
-            builder.mirror_plan = {
-                "primary_direction":  primary_direction,
-                "mirror_direction":   "short" if primary_direction == "long" else "long",
-                "primary_entry":      primary_entry,
-                "mirror_entry":       mirror_plan(stub_plan, primary_direction=primary_direction).get("entry_condition", ""),
-            }
-
-        # Render every Phase-1/2/3 section into the summary.
-        summary_text = summary.get("text") or ""
-        section_blocks: list[str] = []
-        filter_lines = render_filters_for_summary(filter_cfg)
-        if filter_lines:
-            section_blocks.append("\n".join(filter_lines))
-        tm_lines = render_trade_management_for_summary(tm_cfg)
-        if tm_lines:
-            section_blocks.append("\n".join(tm_lines))
-        if window_warnings:
-            warn_lines = ["── Trading window warnings ──"]
-            for w in window_warnings:
-                warn_lines.append(f"⚠ {w['window']}: {w['why']}")
-                warn_lines.append(f"   suggestion → {w['suggestion']}")
-            section_blocks.append("\n".join(warn_lines))
-        if builder.mirror_plan and builder.mirror_plan.get("mirror_entry"):
-            mp = builder.mirror_plan
-            mirror_lines = [
-                "── Opposite-side setup (auto-generated) ──",
-                f"Primary direction: {mp.get('primary_direction', 'long').upper()}",
-                f"  entry: {mp.get('primary_entry') or '(planner-defined)'}",
-                f"Mirror direction:  {mp.get('mirror_direction', 'short').upper()}",
-                f"  entry: {mp.get('mirror_entry')}",
-                "The mirror setup is ready but inactive until you say 'trade both directions'.",
-            ]
-            section_blocks.append("\n".join(mirror_lines))
-
-        # Phase 4 sections.
-        mc_lines = render_market_context_for_summary(mc_cfg)
-        if mc_lines:
-            section_blocks.append("\n".join(mc_lines))
-        rec_lines = render_recommendations_for_summary(builder.stock_recommendations or {})
-        if rec_lines:
-            section_blocks.append("\n".join(rec_lines))
-        journal_lines = render_journal_for_summary(builder)
-        if journal_lines:
-            section_blocks.append("\n".join(journal_lines))
-
-        if section_blocks:
-            summary_text = summary_text.rstrip() + "\n\n" + "\n\n".join(section_blocks)
-
-        builder.prompt_summary = {
-            "text":     summary_text,
-            "snapshot": summary.get("snapshot"),
-        }
-
-        # Combined missing-critical list: prompt-level (Phase 1) + TM rules
-        # (Phase 3) + market-context decisions (Phase 4) the user must
-        # specify before building.
-        combined_missing = list(summary.get("missing_critical") or [])
-        combined_missing.extend(tm_missing)
-        combined_missing.extend(mc_missing)
-        builder.missing_critical_inputs = combined_missing
-    except Exception:
-        logger.warning(
-            "⚠️ chat_flow|event=prompt_summary_build_failed — falling back to legacy summary",
-            exc_info=True,
-        )
-
-
 def _format_capture_value(builder: StrategyBuilder, field: str, value: Any) -> str:
     if field == "symbol":
         return str(builder.format_symbol() or value)
@@ -1236,6 +1014,705 @@ def _extract_latest_backtest_result(messages: list[ChatMessage]) -> Optional[dic
     return backtest_result if isinstance(backtest_result, dict) else None
 
 
+# Phase 9g — generic English words that must NEVER be treated as
+# tickers. They show up in natural-language discovery prompts like
+# "create a strategy on NSE stock..." and would otherwise short-
+# circuit the chat flow with a spurious "unsupported stock" error
+# before discovery dispatches.
+_NON_TICKER_WORDS = frozenset({
+    "strategy", "strategies", "stock", "stocks", "share", "shares",
+    "trade", "trades", "trading", "company", "companies", "equity",
+    "equities", "security", "securities", "market", "markets",
+    "setup", "system", "position", "intraday", "swing", "scalp",
+    "scalping", "future", "futures", "option", "options",
+    "any", "some", "all", "the", "this", "that", "these", "those",
+    "investment", "investments", "portfolio", "asset", "assets",
+    "anything", "something", "everything", "an",
+})
+
+
+# Generic nouns that follow "NSE"/"BSE" when the user is describing
+# market scope, not a specific ticker (e.g. "...on NSE stock", "...in
+# BSE company"). Used to suppress the natural-exchange regex match.
+_NSE_SCOPE_NOUN_RE = re.compile(
+    r"\s+(?:stock|stocks|share|shares|equity|equities|securit\w*|company|"
+    r"companies|listed|firm|firms|ticker|tickers)\b",
+    re.IGNORECASE,
+)
+
+
+# Phase 9k — primitive extractors for compositional discovery. Each
+# function detects ONE concept (volume spike, RSI threshold, pullback,
+# VWAP confirmation, …) in the user's prose and returns either None or
+# a `{name, params}` dict. The aggregate _extract_discovery_conditions
+# helper runs them all and returns the ordered list. The orchestrator
+# then renders that list into AST conditions and runs the scanner with
+# EXACTLY those constraints — nothing implicit, nothing the user
+# didn't ask for.
+
+# Phase 9h — extract user-typed discovery thresholds from prose. The
+# orchestrator then substitutes them into the preset's condition
+# placeholders so the user's "1.2x volume" actually lowers the scanner
+# threshold (instead of the preset's hardcoded 2x being applied
+# regardless of what the user typed).
+_VOLUME_MULTIPLIER_RE = re.compile(
+    # Catches: "1.5x", "2X", "3×", "1.2 x", "above 2x", "more than 1.5x",
+    # "2 times", "above 3 times", "2x higher", "3x average", "3x normal".
+    r"\b(\d+(?:\.\d+)?)\s*(?:[xX×]|times?)\b",
+)
+_NEAR_52W_HIGH_PCT_RE = re.compile(
+    r"\bwithin\s+(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:the\s+)?"
+    r"52[-\s]?week[s]?[-\s]?high\b",
+    re.IGNORECASE,
+)
+_NEAR_52W_LOW_PCT_RE = re.compile(
+    r"\bwithin\s+(\d+(?:\.\d+)?)\s*%\s*(?:of\s+)?(?:the\s+)?"
+    r"52[-\s]?week[s]?[-\s]?low\b",
+    re.IGNORECASE,
+)
+_VOLUME_CONTEXT_RE = re.compile(
+    r"\b(?:volume|spike|relative\s+volume|rel\s*vol)\b",
+    re.IGNORECASE,
+)
+
+# Phase 9i — the high/low window is tunable. Users phrase it as
+# "20-day high", "10 week breakdown", "6-month breakout", "1-year high".
+# We only honor the match when the surrounding context mentions
+# high/low/breakout/breakdown/verge so a bare "5 days" in unrelated
+# prose can't accidentally set the window.
+_LOOKBACK_WINDOW_RE = re.compile(
+    r"\b(\d+)[-\s]+(day|days|week|weeks|month|months|year|years)\b",
+    re.IGNORECASE,
+)
+_LOOKBACK_CONTEXT_RE = re.compile(
+    r"\b(?:high|low|breakout|breakdown|breaking|verge)\b",
+    re.IGNORECASE,
+)
+_BARS_PER_UNIT: dict[str, int] = {
+    # Trading-day conversions used to map calendar units to scan bars
+    # (the scanner runs on the preset's `scan_timeframe`, which is
+    # daily for volume_breakout_52w).
+    "day":    1, "days":   1,
+    "week":   5, "weeks":  5,
+    "month":  21, "months": 21,
+    "year":   252, "years": 252,
+}
+
+
+# Issue 2 — recognise messages where the user explicitly narrows the
+# discovery universe to a hand-picked stock list, e.g.:
+#   "choose among these stocks: TCS, Infosys, Reliance"
+#   "scan only HDFC Bank, ICICI, SBI"
+#   "from these stocks - TCS, INFY which matches"
+# The trigger phrase must appear; otherwise stray symbol mentions in
+# a prose message (e.g. "RELIANCE did 1.8× volume yesterday") won't
+# silently constrain the scan.
+_STOCK_LIST_TRIGGER_RE = re.compile(
+    r"\b("
+    r"choose\s+(?:among|from|between)"
+    r"|pick\s+(?:from|among|between)"
+    r"|select\s+(?:from|among|between)"
+    r"|scan\s+only"
+    r"|from\s+these\s+stocks"
+    r"|among\s+these\s+stocks"
+    r"|restrict\s+to"
+    r"|limit\s+(?:to|the\s+scan\s+to)"
+    r"|only\s+these\s+stocks"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Separators that can sit between list items. Hyphen and colon require
+# surrounding whitespace so company names containing them ("L&T",
+# "Larsen & Toubro", a future ":NS" suffix) aren't split apart — except
+# colon is also allowed without a leading space because users often
+# type "stocks: TCS, INFY" with no space before the colon.
+_LIST_ITEM_SPLIT_RE = re.compile(
+    r"\s*(?:,|/|\bor\b|\band\b|;|•|\||\s-\s|\s:\s|:\s+|^-\s|\s-$)\s*",
+    re.IGNORECASE,
+)
+
+
+def _extract_user_supplied_stock_list(message: str) -> list[str] | None:
+    """Detect a user-supplied stock-list narrowing and resolve each name
+    to a canonical KB symbol (with the .NS suffix the scanner expects).
+
+    Returns:
+      list[str]  — when the trigger phrase matched AND at least one
+                   name resolved to a known KB stock.
+      None       — when no trigger phrase fired or nothing resolved.
+                   The caller treats None as "don't touch the override"
+                   so a prior turn's narrowing stays sticky.
+    """
+    if not message:
+        return None
+    if not _STOCK_LIST_TRIGGER_RE.search(message):
+        return None
+
+    # Lazy import of the KB so this module stays light at import time
+    # and we don't pay for the KB load when the trigger phrase never
+    # fires. (Bypasses the legacy app.services.knowledge.stock_matcher
+    # module which is currently broken — its top-level imports a
+    # non-existent `embedder` submodule.)
+    try:
+        from app.kb import kb as _kb
+    except Exception:
+        return None
+
+    # Take the slice of text from the first trigger phrase to the end;
+    # the list almost always sits after the trigger ("choose among
+    # these stocks: A, B, C ...").
+    match = _STOCK_LIST_TRIGGER_RE.search(message)
+    tail = message[match.end():] if match else message
+
+    # Drop trailing clauses that change the scope back ("...which
+    # matches above condition and timeframe should be 1min"). NOTE:
+    # ':' is NOT a stop phrase — users often type "from these stocks:
+    # TCS, INFY" where the colon is the LIST INTRODUCER, not a
+    # boundary. The split regex treats ':' as a separator instead.
+    for stop_phrase in (
+        " which ", " that ", " and timeframe", " and tf",
+        " for the ", " with the ", " whose ", "\n",
+    ):
+        idx = tail.lower().find(stop_phrase)
+        if 0 < idx < len(tail):
+            tail = tail[:idx]
+
+    # Strip leading punctuation/separators.
+    tail = re.sub(r"^[\s\-:–—,]+", "", tail).strip()
+    if not tail:
+        return None
+
+    raw_items = [item.strip(" .'\"`-") for item in _LIST_ITEM_SPLIT_RE.split(tail)]
+    raw_items = [item for item in raw_items if item]
+    if not raw_items:
+        return None
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        # kb.lookup_stock handles direct symbol match, manual aliases
+        # ("hdfc bank"), and auto-derived aliases ("infosys" → INFY.NS).
+        # Items that don't resolve are silently skipped — we can't scan
+        # a stock the KB doesn't know about, and the user already typed
+        # other items that did resolve.
+        stock = _kb.lookup_stock(item)
+        if stock is None:
+            continue
+        canonical = stock.symbol
+        if canonical and canonical not in seen:
+            resolved.append(canonical)
+            seen.add(canonical)
+
+    return resolved or None
+
+
+def _extract_discovery_parameter_overrides(message: str) -> dict[str, float]:
+    """Pull user-typed discovery thresholds out of free-form chat.
+    Returns the override dict (possibly empty). Only sets a key when
+    the parsed value passes basic sanity bounds — out-of-range numbers
+    are dropped so a typo (e.g. "200x") can't break the scanner."""
+    if not message:
+        return {}
+    overrides: dict[str, float] = {}
+
+    # Volume multiplier ("1.2x", "2x", "1.5×"). Only honor when the
+    # surrounding text mentions volume / spike / relative volume so a
+    # bare "1x" in unrelated prose doesn't get mis-classified.
+    if _VOLUME_CONTEXT_RE.search(message):
+        m = _VOLUME_MULTIPLIER_RE.search(message)
+        if m:
+            try:
+                val = float(m.group(1))
+            except ValueError:
+                val = None
+            if val is not None and 0.5 <= val <= 10.0:
+                overrides["volume_multiplier"] = val
+
+    # 52-week proximity ("within 5% of 52-week high / low"). Convert
+    # percentage to the multiplicative factor the preset expects.
+    m_hi = _NEAR_52W_HIGH_PCT_RE.search(message)
+    if m_hi:
+        try:
+            pct = float(m_hi.group(1))
+        except ValueError:
+            pct = None
+        if pct is not None and 0.0 < pct <= 25.0:
+            overrides["near_52w_high_factor"] = round(1.0 - pct / 100.0, 6)
+
+    m_lo = _NEAR_52W_LOW_PCT_RE.search(message)
+    if m_lo:
+        try:
+            pct = float(m_lo.group(1))
+        except ValueError:
+            pct = None
+        if pct is not None and 0.0 < pct <= 25.0:
+            overrides["near_52w_low_factor"] = round(1.0 + pct / 100.0, 6)
+
+    # Phase 9i — lookback window for the high/low test. Only honored
+    # when the user's wording connects the duration to a high/low/
+    # breakout context (e.g. "near 20-day high", "on verge of 26 week
+    # breakout"). Bounds 5..1260 cover 1 trading week to 5 trading
+    # years; out-of-range values are dropped so e.g. "5000 days" can't
+    # blow up the OHLCV fetch.
+    if _LOOKBACK_CONTEXT_RE.search(message):
+        m_win = _LOOKBACK_WINDOW_RE.search(message)
+        if m_win:
+            try:
+                n = int(m_win.group(1))
+            except ValueError:
+                n = None
+            unit = m_win.group(2).lower()
+            multiplier = _BARS_PER_UNIT.get(unit)
+            if n is not None and multiplier is not None:
+                bars = n * multiplier
+                if 5 <= bars <= 1260:
+                    overrides["lookback_window_bars"] = float(bars)
+
+    return overrides
+
+
+# ── Phase 9k — compositional discovery primitives ───────────────────────────
+
+
+# RSI: catches "RSI above 60", "RSI > 60", "RSI is greater than 60",
+# "RSI exceeds 60", "RSI in overbought zone above 70", etc.
+_RSI_ABOVE_RE = re.compile(
+    r"\brsi[\s\(\d\)]{0,8}\b[^.]{0,40}?"
+    r"(?:above|>|>=|over|greater\s+than|exceed(?:ing|s)?|higher\s+than|crosses?\s+(?:above|over))"
+    r"\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_RSI_BELOW_RE = re.compile(
+    r"\brsi[\s\(\d\)]{0,8}\b[^.]{0,40}?"
+    r"(?:below|<|<=|under|less\s+than|lower\s+than|crosses?\s+(?:below|under))"
+    r"\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+# VWAP: "above VWAP", "above the VWAP", "price > VWAP", "VWAP confirmation",
+# "closes above VWAP", "is above VWAP", "trading above VWAP"
+_VWAP_ABOVE_RE = re.compile(
+    r"\b(?:above|over|>)\s+(?:the\s+)?vwap\b"
+    r"|\bvwap\s+confirmation\b"
+    r"|\b(?:close[sd]?|closes?|closing|trading)\s+above\s+(?:the\s+)?vwap\b"
+    r"|\bprice\s+(?:is\s+)?above\s+(?:the\s+)?vwap\b"
+    r"|\bcandle\s+(?:close[sd]?\s+)?above\s+(?:the\s+)?vwap\b"
+    r"|\babove\s+vwap\s+(?:line|level)?\b",
+    re.IGNORECASE,
+)
+_VWAP_BELOW_RE = re.compile(
+    r"\b(?:below|under|<)\s+(?:the\s+)?vwap\b"
+    r"|\b(?:close[sd]?|closes?|closing|trading)\s+below\s+(?:the\s+)?vwap\b"
+    r"|\bprice\s+(?:is\s+)?below\s+(?:the\s+)?vwap\b"
+    r"|\bcandle\s+(?:close[sd]?\s+)?below\s+(?:the\s+)?vwap\b",
+    re.IGNORECASE,
+)
+# EMA: "above 20 EMA", "above EMA(20)", "above the 50 day EMA",
+# "above 200-day EMA", "above 9 ema", "price > EMA(20)"
+# EMA — `\b` is dropped before `>` because `>` isn't a word character
+# and would prevent the boundary from matching. Use explicit `\b` only
+# for word verbs (above/over). Order: alt 1 catches `above 20 EMA`,
+# alt 2 catches `above EMA(20)` or `> EMA(20)`, alt 3 catches the
+# verb-prefixed form (`price above 20 EMA`, `price > EMA(20)`).
+_ABOVE_EMA_RE = re.compile(
+    r"(?:\babove|\bover|>)\s+(?:the\s+)?(\d+)[\s-]?(?:day[\s-]+)?ema\b"
+    r"|(?:\babove|\bover|>)\s+ema\s*\(?\s*(\d+)\s*\)?"
+    r"|\b(?:close[sd]?|closes?|trading|price)\s+(?:is\s+)?(?:above|over|>)\s+(?:the\s+)?(\d+)[\s-]?(?:day[\s-]+)?ema\b"
+    r"|\b(?:close[sd]?|closes?|trading|price)\s+(?:is\s+)?(?:above|over|>)\s+ema\s*\(?\s*(\d+)\s*\)?",
+    re.IGNORECASE,
+)
+_BELOW_EMA_RE = re.compile(
+    r"(?:\bbelow|\bunder|<)\s+(?:the\s+)?(\d+)[\s-]?(?:day[\s-]+)?ema\b"
+    r"|(?:\bbelow|\bunder|<)\s+ema\s*\(?\s*(\d+)\s*\)?"
+    r"|\b(?:close[sd]?|closes?|trading|price)\s+(?:is\s+)?(?:below|under|<)\s+(?:the\s+)?(\d+)[\s-]?(?:day[\s-]+)?ema\b"
+    r"|\b(?:close[sd]?|closes?|trading|price)\s+(?:is\s+)?(?:below|under|<)\s+ema\s*\(?\s*(\d+)\s*\)?",
+    re.IGNORECASE,
+)
+# Day high / low: "near day high", "close to today's high",
+# "approaching day's high", "at session high", "near intraday high"
+_NEAR_DAY_HIGH_RE = re.compile(
+    r"\b(?:near|close\s+to|approaching|at|stock\s+is\s+close\s+to)"
+    r"\s+(?:the\s+)?(?:day(?:\'s)?|today(?:\'s)?|session|intraday)\s+high\b",
+    re.IGNORECASE,
+)
+_NEAR_DAY_LOW_RE = re.compile(
+    r"\b(?:near|close\s+to|approaching|at|stock\s+is\s+close\s+to)"
+    r"\s+(?:the\s+)?(?:day(?:\'s)?|today(?:\'s)?|session|intraday)\s+low\b",
+    re.IGNORECASE,
+)
+# Pullback context: bias for long vs short variant
+_PULLBACK_LONG_CONTEXT_RE = re.compile(
+    r"\b(?:bullish|long|up(?:trend|side)?|bull|buying)\b",
+    re.IGNORECASE,
+)
+_PULLBACK_SHORT_CONTEXT_RE = re.compile(
+    r"\b(?:bearish|short|down(?:trend|side)?|bear|weak\s+recovery|selling)\b",
+    re.IGNORECASE,
+)
+# Pullback detection: "low pullback", "shallow pullback", "pullback < 1%",
+# "pullback is less than 2%", "minor retrace", "shallow retracement",
+# "pullback is shallow", "weak recovery after pullback"
+_PULLBACK_RE = re.compile(
+    r"\b(?:low|shallow|small|minor|tiny|slight|short)\s+(?:pull[-\s]?back|retrace(?:ment)?)\b"
+    r"|\b(?:pull[-\s]?back|retrace(?:ment)?)\s+is\s+(?:shallow|small|minor|low|tiny|slight|short)\b"
+    r"|\b(?:pull[-\s]?back|retrace(?:ment)?)\s+(?:is\s+)?(?:less\s+than|under|<|below|<=)\s*\d+(?:\.\d+)?\s*%"
+    r"|\b(?:pull[-\s]?back|retrace(?:ment)?)\s+of\s+(?:less\s+than\s+|under\s+|<\s*|below\s+)?\d+(?:\.\d+)?\s*%"
+    r"|\bweak\s+recovery\s+(?:after\s+)?(?:pull[-\s]?back|retrace(?:ment)?)\b"
+    r"|\b(?:limited|controlled|brief)\s+pull[-\s]?back\b",
+    re.IGNORECASE,
+)
+# 52-week high (or any window-N high): "near 52-week high", "near 20-day high",
+# "approaching 52w high", "verge of 52 weeks high", "close to year high",
+# "near yearly peak", "near record high", "at 52-week peak"
+_NEAR_52W_HIGH_RE = re.compile(
+    r"\b(?:near|close\s+to|approaching|on\s+verge\s+of|verge\s+of|at|nearing)\s+"
+    r"(?:the\s+)?\d*\s*"
+    r"(?:[-\s]?week|w\b|[-\s]?year|y\b|[-\s]?month|m\b|[-\s]?day|d\b|year(?:ly)?|recent|record|all[-\s]?time)?"
+    r"[\s-]?(?:high|peak|top)\b"
+    r"|\b(?:near|close\s+to|approaching)\s+\d+[-\s]?(?:day|week|month|year)s?\s+(?:high|peak|top)\b"
+    r"|\bnear\s+52[-\s]?week[s]?\s+high\b",
+    re.IGNORECASE,
+)
+_NEAR_52W_LOW_RE = re.compile(
+    r"\b(?:near|close\s+to|approaching|on\s+verge\s+of|verge\s+of|at|nearing)\s+"
+    r"(?:the\s+)?\d*\s*"
+    r"(?:[-\s]?week|w\b|[-\s]?year|y\b|[-\s]?month|m\b|[-\s]?day|d\b|year(?:ly)?|recent|record|all[-\s]?time)?"
+    r"[\s-]?(?:low|bottom)\b"
+    r"|\b(?:near|close\s+to|approaching)\s+\d+[-\s]?(?:day|week|month|year)s?\s+(?:low|bottom)\b"
+    r"|\bnear\s+52[-\s]?week[s]?\s+low\b",
+    re.IGNORECASE,
+)
+# Above/breaking high: "breaking 52-week high", "breaks above 52w high",
+# "above all-time high", "new 52-week high", "fresh breakout above 52w high"
+_ABOVE_52W_HIGH_RE = re.compile(
+    r"\b(?:break(?:ing|s|out)?|fresh\s+breakout|new(?:ly)?(?:\s+made)?|crossing|crosses)\s+"
+    r"(?:above|over|past|through)?\s*"
+    r"(?:the\s+)?(?:52[-\s]?week[s]?|52w|\d+[-\s]?(?:day|week|month|year)s?|year(?:ly)?|all[-\s]?time|record)\s+(?:highs?|peaks?)\b"
+    r"|\b(?:above|over)\s+(?:the\s+)?(?:52[-\s]?week[s]?|52w|\d+[-\s]?(?:day|week|month|year)s?|year(?:ly)?|all[-\s]?time)\s+(?:highs?|peaks?)\b"
+    r"|\bnew\s+52[-\s]?week[s]?\s+highs?\b",
+    re.IGNORECASE,
+)
+_BELOW_52W_LOW_RE = re.compile(
+    r"\b(?:break(?:ing|s|down)?|fresh\s+breakdown|new(?:ly)?(?:\s+made)?|crossing|crosses)\s+"
+    r"(?:below|under|past|through)?\s*"
+    r"(?:the\s+)?(?:52[-\s]?week[s]?|52w|\d+[-\s]?(?:day|week|month|year)s?|year(?:ly)?|all[-\s]?time|record)\s+(?:lows?|bottoms?)\b"
+    r"|\b(?:below|under)\s+(?:the\s+)?(?:52[-\s]?week[s]?|52w|\d+[-\s]?(?:day|week|month|year)s?|year(?:ly)?|all[-\s]?time)\s+(?:lows?|bottoms?)\b"
+    r"|\bnew\s+52[-\s]?week[s]?\s+lows?\b",
+    re.IGNORECASE,
+)
+_HIGH_LOW_MENTION_RE = re.compile(
+    r"\b(?:high\s+or\s+low|low\s+or\s+high|extreme[s]?)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_discovery_conditions(
+    message: str,
+    overrides: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """Parse the user's prose into an ordered list of discovery
+    primitives. Each item is `{name, params}` ready for
+    `app.services.discovery.primitives.render_primitive`.
+
+    Phase 9k — REPLACES the old "always run the preset's hardcoded
+    conditions" behavior. The orchestrator runs ONLY the primitives
+    extracted here, so a prompt that mentions volume but not 52-week
+    proximity gets a volume-only scan (no implicit 52w clause).
+
+    `overrides` is the dict from `_extract_discovery_parameter_overrides`;
+    primitives consume them so e.g. `volume_spike` honors the user's
+    "1.2x" multiplier and `near_52w_high` honors "within 5%".
+    """
+    if not message:
+        return []
+    overrides = overrides or {}
+    conditions: list[dict[str, Any]] = []
+
+    # ── Volume ─────────────────────────────────────────────────────────
+    if _VOLUME_CONTEXT_RE.search(message):
+        multiplier = overrides.get("volume_multiplier")
+        if multiplier is not None:
+            conditions.append(
+                {"name": "volume_spike", "params": {"multiplier": float(multiplier)}}
+            )
+        elif re.search(
+            r"\bhigh[-\s]+volume\b"
+            r"|\bstrong[-\s]+volume\b"
+            r"|\belevated[-\s]+volume\b",
+            message, re.IGNORECASE,
+        ):
+            # User said "high/strong/elevated volume" (with hyphen or
+            # space) without a multiplier — default 2x.
+            conditions.append(
+                {"name": "volume_spike", "params": {"multiplier": 2.0}}
+            )
+        elif re.search(r"\b(?:volume\s+spike|spike\s+up|relative\s+volume)\b",
+                       message, re.IGNORECASE):
+            # "volume spike" without a number — default 2x.
+            conditions.append(
+                {"name": "volume_spike", "params": {"multiplier": 2.0}}
+            )
+
+    # ── 52-week / lookback proximity ──────────────────────────────────
+    window = overrides.get("lookback_window_bars")
+    near_high_factor = overrides.get("near_52w_high_factor")
+    near_low_factor  = overrides.get("near_52w_low_factor")
+
+    # "above 52-week high" / "breaking 52-week high" → above_52w_high
+    if _ABOVE_52W_HIGH_RE.search(message):
+        params: dict[str, Any] = {}
+        if window is not None:
+            params["window"] = float(window)
+        conditions.append({"name": "above_52w_high", "params": params})
+    elif _NEAR_52W_HIGH_RE.search(message) or (
+        _HIGH_LOW_MENTION_RE.search(message) and re.search(r"\b(?:52|year|week)\b", message, re.IGNORECASE)
+    ):
+        params = {}
+        if window is not None:
+            params["window"] = float(window)
+        if near_high_factor is not None:
+            params["factor"] = float(near_high_factor)
+        conditions.append({"name": "near_52w_high", "params": params})
+
+    if _BELOW_52W_LOW_RE.search(message):
+        params = {}
+        if window is not None:
+            params["window"] = float(window)
+        conditions.append({"name": "below_52w_low", "params": params})
+    elif _NEAR_52W_LOW_RE.search(message) or (
+        _HIGH_LOW_MENTION_RE.search(message) and re.search(r"\b(?:52|year|week)\b", message, re.IGNORECASE)
+    ):
+        params = {}
+        if window is not None:
+            params["window"] = float(window)
+        if near_low_factor is not None:
+            params["factor"] = float(near_low_factor)
+        conditions.append({"name": "near_52w_low", "params": params})
+
+    # ── Pullback ──────────────────────────────────────────────────────
+    if _PULLBACK_RE.search(message):
+        # Bias: bearish/short context → short pullback, else default to long.
+        if _PULLBACK_SHORT_CONTEXT_RE.search(message):
+            conditions.append({"name": "shallow_pullback_short", "params": {}})
+        else:
+            conditions.append({"name": "shallow_pullback_long", "params": {}})
+
+    # ── RSI ───────────────────────────────────────────────────────────
+    m_rsi_hi = _RSI_ABOVE_RE.search(message)
+    if m_rsi_hi:
+        try:
+            threshold = float(m_rsi_hi.group(1))
+        except ValueError:
+            threshold = None
+        if threshold is not None and 0.0 < threshold < 100.0:
+            conditions.append(
+                {"name": "rsi_above", "params": {"threshold": threshold}}
+            )
+    m_rsi_lo = _RSI_BELOW_RE.search(message)
+    if m_rsi_lo:
+        try:
+            threshold = float(m_rsi_lo.group(1))
+        except ValueError:
+            threshold = None
+        if threshold is not None and 0.0 < threshold < 100.0:
+            conditions.append(
+                {"name": "rsi_below", "params": {"threshold": threshold}}
+            )
+
+    # ── VWAP ──────────────────────────────────────────────────────────
+    if _VWAP_ABOVE_RE.search(message):
+        conditions.append({"name": "above_vwap", "params": {}})
+    if _VWAP_BELOW_RE.search(message):
+        conditions.append({"name": "below_vwap", "params": {}})
+
+    # ── EMA ───────────────────────────────────────────────────────────
+    m_ema_hi = _ABOVE_EMA_RE.search(message)
+    if m_ema_hi:
+        # Period may be in any of the 4 capture groups (one per alt).
+        period_str = next(
+            (g for g in m_ema_hi.groups() if g),
+            None,
+        )
+        try:
+            period = int(period_str) if period_str else 20
+        except (TypeError, ValueError):
+            period = 20
+        if 1 <= period <= 200:
+            conditions.append(
+                {"name": "above_ema", "params": {"period": period}}
+            )
+    m_ema_lo = _BELOW_EMA_RE.search(message)
+    if m_ema_lo:
+        period_str = next(
+            (g for g in m_ema_lo.groups() if g),
+            None,
+        )
+        try:
+            period = int(period_str) if period_str else 20
+        except (TypeError, ValueError):
+            period = 20
+        if 1 <= period <= 200:
+            conditions.append(
+                {"name": "below_ema", "params": {"period": period}}
+            )
+
+    # ── Day high / low ────────────────────────────────────────────────
+    if _NEAR_DAY_HIGH_RE.search(message):
+        conditions.append({"name": "near_day_high", "params": {}})
+    if _NEAR_DAY_LOW_RE.search(message):
+        conditions.append({"name": "near_day_low", "params": {}})
+
+    return conditions
+
+
+# Phase 9l — context detector. The LLM extractor is only invoked when
+# the message LOOKS like discovery prose so we don't burn an LLM call
+# on every single chat turn (e.g. when the user just sends a timeframe
+# like "5m" or a bare confirmation like "ok").
+_DISCOVERY_CONTEXT_RE = re.compile(
+    r"\b(?:volume|spike|rsi|vwap|ema|sma|bollinger|macd|"
+    r"pull[-\s]?back|retrace(?:ment)?|breakout|breakdown|breaking|"
+    r"high|low|peak|bottom|top|verge|near|above|below|over|under|"
+    r"52[-\s]?week|year(?:ly)?|month|week|day|all[-\s]?time|"
+    r"momentum|overbought|oversold|relative\s+strength|"
+    r"day\s+high|session\s+high|intraday\s+high|day\s+low|session\s+low|"
+    r"strong\s+volume|high\s+volume|elevated\s+volume|relative\s+volume|"
+    r"scanner|screener|filter|stocks?\s+(?:where|with|that))\b",
+    re.IGNORECASE,
+)
+
+
+# Per-process cache so identical messages don't burn duplicate LLM
+# calls within a session. Trimmed to the last 256 entries (LRU-ish).
+_LLM_EXTRACTOR_CACHE: dict[str, list[dict[str, Any]]] = {}
+_LLM_EXTRACTOR_CACHE_MAX = 256
+
+
+def _looks_like_discovery_prose(message: str) -> bool:
+    """Cheap context check before paying for an LLM call."""
+    if not message or len(message.strip()) < 5:
+        return False
+    return bool(_DISCOVERY_CONTEXT_RE.search(message))
+
+
+def _merge_condition_lists(
+    primary: list[dict[str, Any]],
+    secondary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine two parsed condition lists. Primary entries win when
+    the same primitive name appears on both sides — secondary's
+    contribution is only the primitives primary missed."""
+    seen = {c["name"] for c in primary if isinstance(c, dict) and c.get("name")}
+    merged = list(primary)
+    for c in secondary:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not name or name in seen:
+            continue
+        merged.append(c)
+        seen.add(name)
+    return merged
+
+
+async def _extract_discovery_conditions_hybrid(
+    message: str,
+    overrides: dict[str, float] | None = None,
+    *,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Hybrid regex + LLM extractor.
+
+    Behavior:
+      • Regex extractor runs first — fast, deterministic, free.
+      • If the message clearly isn't discovery prose, return regex
+        result (which is also empty in this case) — saves the LLM call.
+      • If regex captured ≥ 2 primitives, trust it and skip the LLM.
+        The combo of "user typed something specific" + "regex matched
+        multiple things" is a strong signal we already have the right
+        list.
+      • Otherwise call the LLM extractor and merge: regex is canonical
+        for primitives it caught, LLM fills in the rest.
+
+    LLM responses are cached per-process so a repeated identical
+    message (e.g. user resends after a network hiccup) doesn't burn
+    a second call.
+    """
+    regex_conditions = _extract_discovery_conditions(message, overrides)
+
+    if not _looks_like_discovery_prose(message):
+        return regex_conditions
+    if len(regex_conditions) >= 2:
+        return regex_conditions
+
+    cache_key = (message or "").strip().lower()
+    if cache_key in _LLM_EXTRACTOR_CACHE:
+        cached = _LLM_EXTRACTOR_CACHE[cache_key]
+        return _merge_condition_lists(regex_conditions, cached) or regex_conditions
+
+    try:
+        from app.services.discovery.llm_extractor import extract_via_llm
+        llm_conditions = await extract_via_llm(message)
+    except Exception as exc:
+        logger.info(
+            "chat_flow|event=llm_extractor_error|session_id=%s|err=%s",
+            session_id, exc,
+        )
+        llm_conditions = []
+
+    # Reapply user-typed parameter overrides on top of the LLM's
+    # output — the LLM may have used the primitive's defaults even
+    # when the user explicitly typed a different number.
+    if llm_conditions and overrides:
+        llm_conditions = _apply_overrides_to_llm_conditions(llm_conditions, overrides)
+
+    if llm_conditions:
+        if len(_LLM_EXTRACTOR_CACHE) >= _LLM_EXTRACTOR_CACHE_MAX:
+            # Drop oldest entry to keep memory bounded.
+            try:
+                _LLM_EXTRACTOR_CACHE.pop(next(iter(_LLM_EXTRACTOR_CACHE)))
+            except StopIteration:
+                pass
+        _LLM_EXTRACTOR_CACHE[cache_key] = llm_conditions
+        logger.info(
+            "chat_flow|event=llm_extractor_supplemented|session_id=%s|"
+            "regex_count=%d|llm_count=%d|llm_names=%s",
+            session_id, len(regex_conditions), len(llm_conditions),
+            [c.get("name") for c in llm_conditions],
+        )
+
+    return _merge_condition_lists(regex_conditions, llm_conditions)
+
+
+def _apply_overrides_to_llm_conditions(
+    conditions: list[dict[str, Any]],
+    overrides: dict[str, float],
+) -> list[dict[str, Any]]:
+    """When the regex extractor pulled out a numeric override
+    (volume_multiplier=1.2, near_52w_high_factor=0.95, …), make sure
+    the LLM's primitive uses that value rather than its own default.
+    The user typed it explicitly; the LLM might have rounded or
+    skipped it."""
+    out: list[dict[str, Any]] = []
+    for c in conditions:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        params = dict(c.get("params") or {})
+        if name == "volume_spike" and "volume_multiplier" in overrides:
+            params["multiplier"] = float(overrides["volume_multiplier"])
+        elif name in ("near_52w_high", "above_52w_high") and "lookback_window_bars" in overrides:
+            params["window"] = float(overrides["lookback_window_bars"])
+            if name == "near_52w_high" and "near_52w_high_factor" in overrides:
+                params["factor"] = float(overrides["near_52w_high_factor"])
+        elif name in ("near_52w_low", "below_52w_low") and "lookback_window_bars" in overrides:
+            params["window"] = float(overrides["lookback_window_bars"])
+            if name == "near_52w_low" and "near_52w_low_factor" in overrides:
+                params["factor"] = float(overrides["near_52w_low_factor"])
+        out.append({"name": name, "params": params})
+    return out
+
+
 def _extract_explicit_stock_query(message: str) -> Optional[str]:
     if not message:
         return None
@@ -1254,7 +1731,68 @@ def _extract_explicit_stock_query(message: str) -> Optional[str]:
         re.IGNORECASE,
     )
     if natural_exchange:
-        return natural_exchange.group(1).upper()
+        candidate = natural_exchange.group(1)
+        # Phase 9g — generic English words ("strategy", "stock", etc.)
+        # are never tickers. Reject so discovery prompts like "create
+        # strategy on NSE stock..." don't get misparsed.
+        if candidate.lower() in _NON_TICKER_WORDS:
+            return None
+        # Phase 9g — if NSE/BSE is followed by a generic noun ("NSE
+        # stock", "BSE company"), the user is describing scope, not a
+        # specific ticker. Drop the match.
+        tail = message[natural_exchange.end():]
+        if _NSE_SCOPE_NOUN_RE.match(tail):
+            return None
+        return candidate.upper()
+
+    return None
+
+
+def _stock_choice_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if ":" in text:
+        _, text = text.split(":", 1)
+    text = re.sub(r"\.(?:NS|BO)$", "", text, flags=re.IGNORECASE)
+    return "".join(ch.lower() for ch in text if ch.isalnum())
+
+
+def _resolve_pending_stock_ambiguity_choice(
+    message: str,
+    builder: StrategyBuilder,
+) -> str | None:
+    """Resolve replies like "1" after an ambiguous stock-prefix prompt."""
+    if builder.symbol_validation_code != AMBIGUOUS_STOCK_VALIDATION_CODE:
+        return None
+    options = builder.symbol_validation_facts.get("stock_options")
+    if not isinstance(options, list) or not options:
+        return None
+
+    text = " ".join(str(message or "").split()).strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r"\d+", text):
+        index = int(text)
+        if 1 <= index <= len(options) and isinstance(options[index - 1], dict):
+            return str(options[index - 1].get("symbol") or "").strip() or None
+        return None
+
+    choice_key = _stock_choice_key(text)
+    if not choice_key:
+        return None
+
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        symbol = str(option.get("symbol") or "").strip()
+        display_name = str(option.get("display_name") or "").strip()
+        candidate_keys = {
+            _stock_choice_key(symbol),
+            _stock_choice_key(symbol.split(".", 1)[0]),
+            _stock_choice_key(display_name),
+        }
+        if choice_key in candidate_keys:
+            return symbol or None
 
     return None
 
@@ -1355,6 +1893,94 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 session_id,
                 (latest_strategy_context or {}).get("strategy_id"),
             )
+
+            # Phase 9e — early preset detection. We scan the user message
+            # for a strategy preset BEFORE the agent router runs so the
+            # agent sees the full picture (and so the downstream
+            # is_user_input_complete() check exempts symbol when discovery
+            # would supply it). Without this, the agent sees no preset +
+            # no symbol and asks the user for a specific stock — which is
+            # exactly what discovery is meant to avoid.
+            if not builder.strategy_preset:
+                try:
+                    from app.kb import kb as _kb_for_preset
+                    _early_preset = _kb_for_preset.detect_preset_in_text(user_content)
+                except Exception:
+                    _early_preset = None
+                if _early_preset is not None:
+                    builder.strategy_preset = _early_preset.name
+                    logger.info(
+                        "🎯 chat_flow|event=preset_detected_pre_router|"
+                        "session_id=%s|preset=%s",
+                        session_id, _early_preset.name,
+                    )
+
+            # Issue 2 — recognise an explicit "choose among these stocks:
+            # A, B, C" message and persist the resolved symbols on the
+            # builder so the next discovery run scans only those stocks.
+            # Sticky across turns; the user can broaden by typing a
+            # fresh list (or by saying "scan all" — TODO, not in this
+            # change).
+            _new_universe = _extract_user_supplied_stock_list(user_content)
+            if _new_universe:
+                builder.discovery_universe_override = _new_universe
+                logger.info(
+                    "🎯 chat_flow|event=discovery_universe_override_captured|"
+                    "session_id=%s|symbols=%s",
+                    session_id, _new_universe,
+                )
+
+            # Phase 9h — parse user-typed discovery thresholds (e.g.
+            # "volume spike 1.2x", "within 5% of 52-week high") and
+            # stash them on the builder. The orchestrator substitutes
+            # them into the preset's condition placeholders before the
+            # scanner runs, so the user actually gets the threshold
+            # they asked for instead of the preset's hardcoded default.
+            _new_overrides = _extract_discovery_parameter_overrides(user_content)
+            if _new_overrides:
+                merged_overrides = dict(builder.discovery_parameter_overrides or {})
+                merged_overrides.update(_new_overrides)
+                builder.discovery_parameter_overrides = merged_overrides
+                logger.info(
+                    "🎚 chat_flow|event=discovery_param_overrides_captured|"
+                    "session_id=%s|overrides=%s",
+                    session_id, _new_overrides,
+                )
+
+            # Phase 9k/9l — parse the user's prose into a list of
+            # discovery primitives. Hybrid pipeline:
+            #   1. Regex extractor runs first (fast, deterministic).
+            #   2. If regex finds 0-1 primitives BUT the message looks
+            #      like discovery prose, the LLM extractor runs as a
+            #      fallback — covers any phrasing the regex missed.
+            #   3. The merged list is stashed on builder.discovery_conditions
+            #      and the orchestrator runs the scanner with EXACTLY those
+            #      constraints (no implicit clauses).
+            #
+            # Note (post-PR#71 follow-up): the previous version of this
+            # block contained an `_preset_carries_authoritative_conditions`
+            # guard that suppressed extraction whenever the pinned preset
+            # had a `discovery.conditions:` block (e.g. volume_breakout_52w).
+            # That guard reversed Phase 9k/9l's design — it caused the
+            # preset's full conditions (with implicit 52-week clauses) to
+            # be applied even when the user only typed "volume spike 1.2x",
+            # which is the exact behaviour Phase 9k was created to fix.
+            # The original concern ("OR-disjunction wiped") was a misread:
+            # when the user supplies primitives, the orchestrator CORRECTLY
+            # replaces the preset's conditions entirely with the rendered
+            # primitive list. When the user supplies nothing, the preset's
+            # OR-disjunction still applies because builder.discovery_conditions
+            # stays None and the orchestrator falls through to the preset.
+            _new_conditions = await _extract_discovery_conditions_hybrid(
+                user_content, _new_overrides, session_id=session_id,
+            )
+            if _new_conditions:
+                builder.discovery_conditions = _new_conditions
+                logger.info(
+                    "🧩 chat_flow|event=discovery_conditions_captured|"
+                    "session_id=%s|conditions=%s",
+                    session_id, [c["name"] for c in _new_conditions],
+                )
 
             agent_decision = await AgentRouter().decide(
                 session_id=session_id,
@@ -1608,6 +2234,38 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 else:
                     try:
                         stock_match = await resolve_supported_stock(raw_symbol)
+                        if stock_match and stock_match.get("ambiguous"):
+                            facts = (
+                                stock_match.get("validation_facts")
+                                if isinstance(stock_match.get("validation_facts"), dict)
+                                else {}
+                            )
+                            assistant_text = compose_assistant_response(
+                                "validation.ambiguous_stock",
+                                **facts,
+                            )
+                            draft["processing_status"] = "awaiting_user_input"
+                            draft["symbol_validation_code"] = AMBIGUOUS_STOCK_VALIDATION_CODE
+                            draft["symbol_validation_facts"] = facts
+                            draft["symbol_validation_message"] = assistant_text
+                            if user_msg:
+                                user_msg.strategy_draft = draft
+                                user_msg.status = MessageStatus.completed
+                            assistant_msg = ChatMessage(
+                                id=uuid.uuid4(),
+                                session_id=session_uuid,
+                                role=ChatRole.assistant,
+                                content=assistant_text,
+                                model=FLOW_MODEL_NAME,
+                                strategy_draft=draft,
+                                strategy_json=None,
+                                status=MessageStatus.completed,
+                                is_final=True,
+                                parent_message_id=user_msg_uuid,
+                            )
+                            db.add(assistant_msg)
+                            await db.commit()
+                            return
                         resolved_symbol = str(
                             (stock_match or {}).get("symbol") or raw_symbol
                         ).strip().upper()
@@ -1801,14 +2459,75 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
             input_was_already_confirmed = builder.user_input_confirmed
             missing_fields_before_update = builder.missing_user_input_fields()
             user_confirmed = bool(route.get("is_confirmation")) or detect_user_confirmation(user_content)
-
-            builder.clear_validation_state()
+            pending_stock_choice = _resolve_pending_stock_ambiguity_choice(user_content, builder)
 
             parsed_builder = StrategyBuilder()
             extract_strategy_details(user_content, parsed_builder)
 
+            # ── Early semantic extraction ─────────────────────────────────
+            # Run BEFORE planning so that builder.semantic_intent is populated
+            # when _resolve_preset is called.  The SemanticExtractor identifies
+            # the *primary strategy framework* (ORB, EMA_PULLBACK, …) from the
+            # prose structure, which takes priority over KB keyword-scoring in
+            # the planner (see Pipeline._SEMANTIC_FAMILY_TO_PRESET).
+            # The normalizer then merges the extraction with parsed_builder
+            # state to produce a CanonicalSemanticIntent — the single source
+            # of truth that all downstream systems will consume.
+            try:
+                from app.planner.semantic_normalizer import SemanticIntentNormalizer
+                _early_sem = SemanticExtractor().extract(user_content)
+                if _early_sem and _early_sem.extraction_quality_score > 0:
+                    _canonical = SemanticIntentNormalizer().normalize(
+                        _early_sem,
+                        strategy_preset=parsed_builder.strategy_preset,
+                        timeframe=parsed_builder.timeframe,
+                        sentiment=parsed_builder.sentiment,
+                        stop_loss_spec=parsed_builder.stop_loss_spec,
+                        trailing_stop_spec=parsed_builder.trailing_stop_spec,
+                        risk_execution_config=parsed_builder.risk_execution_config,
+                        source_prompt=user_content[:200],
+                    )
+                    parsed_builder.semantic_intent = _canonical.dict()
+                    # Propagate structural SL to parsed_builder so the pipeline
+                    # can use it even when the LLM tool call missed it.
+                    _crm = _canonical.risk_model
+                    if _crm:
+                        if not parsed_builder.stop_loss_spec and _crm.stop_loss:
+                            _csl = _crm.stop_loss
+                            parsed_builder.stop_loss_spec = {
+                                "type": _csl.type,
+                                "anchor": _csl.anchor,
+                                "source": "semantic",
+                                "atr_multiple": _csl.atr_multiple,
+                            }
+                        if not parsed_builder.trailing_stop_spec and _crm.trailing_stop and _crm.trailing_stop.enabled:
+                            _cts = _crm.trailing_stop
+                            parsed_builder.trailing_stop_spec = {
+                                "type": _cts.type,
+                                "activate_after_pct": _cts.activate_after_pct,
+                                "ema_period": _cts.ema_period,
+                                "source": "semantic",
+                            }
+            except Exception as _sem_err:
+                logger.debug(
+                    "chat_flow|early_semantic_extraction_skipped|err=%s", _sem_err
+                )
+
             relevant_message = bool(route.get("is_relevant"))
             recognized_fields = set(route.get("recognized_fields") or [])
+            if pending_stock_choice:
+                builder.symbol = pending_stock_choice
+                builder.set_symbol_validation(None)
+                builder.clear_validation_state()
+                relevant_message = True
+                recognized_fields.add("symbol")
+                route_intent = "collect_input"
+                route["intent"] = "collect_input"
+                logger.info(
+                    "✅ chat_flow|event=stock_ambiguity_choice_resolved|session_id=%s|symbol=%s",
+                    session_id,
+                    pending_stock_choice,
+                )
             ignored_optional_input = _contains_ignored_optional_input(user_content)
 
             modification_fields = _extract_input_modification_fields(user_content)
@@ -1906,10 +2625,26 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     stock_query = user_content
                 if not stock_query and _has_explicit_stock_cue(user_content):
                     stock_query = extract_company_name_query(user_content)
+                if pending_stock_choice:
+                    stock_query = None
                 if stock_query:
                     relevant_message = True
                     stock_match = await resolve_supported_stock(stock_query)
-                    if stock_match and stock_match.get("symbol"):
+                    if stock_match and stock_match.get("ambiguous"):
+                        builder.symbol = None
+                        builder.set_symbol_validation(
+                            str(stock_match.get("validation_code") or AMBIGUOUS_STOCK_VALIDATION_CODE),
+                            stock_match.get("validation_facts")
+                            if isinstance(stock_match.get("validation_facts"), dict)
+                            else {},
+                        )
+                        logger.info(
+                            "❓ chat_flow|event=stock_prefix_ambiguous|session_id=%s|query=%r|matches=%d",
+                            session_id,
+                            stock_query,
+                            len(stock_match.get("matches") or []),
+                        )
+                    elif stock_match and stock_match.get("symbol"):
                         resolved_symbol = str(stock_match["symbol"]).strip()
                         exchange_hint = extract_exchange_hint(user_content)
                         if exchange_hint and not resolved_symbol.upper().endswith((".NS", ".BO")):
@@ -1984,7 +2719,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     builder.sentiment = sentiment
                     relevant_message = True
 
-                experience = route.get("experience") or parsed_builder.experience
+                experience = parsed_builder.experience or route.get("experience")
                 if experience:
                     builder.experience = experience
                     relevant_message = True
@@ -2010,6 +2745,72 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     goal = fallback_goal
                 if goal:
                     builder.goal = re.sub(r"\s+", " ", str(goal)).strip()
+                    relevant_message = True
+
+                # Propagate strategy_preset — three sources in priority order:
+                #   1. Agent explicitly named a preset in tool params (highest)
+                #   2. KB keyword detection on the user message (parsed_builder)
+                #   3. Already set from a prior turn (preserved, never overwrite)
+                agent_preset = (route.get("strategy_preset") or "").strip().lower()
+                if agent_preset:
+                    builder.strategy_preset = agent_preset
+                    relevant_message = True
+                elif parsed_builder.strategy_preset:
+                    # A freshly detected preset from the current message always
+                    # supersedes a stale preset stored from a prior turn
+                    # (e.g. an old wrong match like "relative_strength" that
+                    # was persisted in the draft).
+                    if builder.strategy_preset != parsed_builder.strategy_preset:
+                        logger.info(
+                            "chat|collect_input|preset_override|old=%r|new=%r",
+                            builder.strategy_preset,
+                            parsed_builder.strategy_preset,
+                        )
+                    builder.strategy_preset = parsed_builder.strategy_preset
+                    relevant_message = True
+
+                # Propagate RMS fields extracted by _extract_rms_from_text.
+                # First-write-wins per field: a user-supplied value in a prior
+                # turn (source="user") is never overwritten by a new extraction.
+                parsed_rms = dict(parsed_builder.risk_execution_config or {})
+                parsed_sources = dict(parsed_rms.pop("rms_sources", {}))
+                if parsed_rms:
+                    existing_rms = dict(builder.risk_execution_config or {})
+                    existing_sources = dict(existing_rms.get("rms_sources", {}))
+                    changed = False
+                    for field, val in parsed_rms.items():
+                        if existing_sources.get(field) == "user":
+                            continue
+                        existing_rms[field] = val
+                        existing_sources[field] = parsed_sources.get(field, "user")
+                        changed = True
+                    if changed:
+                        existing_rms["rms_sources"] = existing_sources
+                        builder.risk_execution_config = existing_rms
+                        # Mirror onto builder direct attributes
+                        if "stop_loss_pct" in parsed_rms and builder.stop_loss is None:
+                            builder.stop_loss = parsed_rms["stop_loss_pct"]
+                        if "take_profit_pct" in parsed_rms and builder.take_profit is None:
+                            builder.take_profit = parsed_rms["take_profit_pct"]
+                        if "daily_loss_cap" in parsed_rms and builder.daily_loss_cap is None:
+                            builder.daily_loss_cap = parsed_rms["daily_loss_cap"]
+                        relevant_message = True
+
+                # Propagate structural SL + trailing stop specs from parsed_builder.
+                # User-specified specs from the current message override stored ones.
+                if parsed_builder.stop_loss_spec:
+                    builder.stop_loss_spec = parsed_builder.stop_loss_spec
+                    relevant_message = True
+                if parsed_builder.trailing_stop_spec:
+                    builder.trailing_stop_spec = parsed_builder.trailing_stop_spec
+                    relevant_message = True
+
+                # Propagate semantic intent extracted this turn onto the builder.
+                # A freshly extracted intent (quality > 0) always supersedes any
+                # stale intent stored from a prior turn so that the planner always
+                # sees the most recent structural reading of the user's message.
+                if parsed_builder.semantic_intent:
+                    builder.semantic_intent = parsed_builder.semantic_intent
                     relevant_message = True
 
                 if modification_value_fields:
@@ -2547,37 +3348,8 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 draft["kb_signals_used"] = retrieval_meta.get("signals_used", [])
                 draft["kb_signals_available"] = retrieval_meta.get("signals_available", 0)
             else:
-                # ── Feature 1: comprehensive prompt summary before building ──
-                # As soon as all six core inputs are captured, run the
-                # SemanticExtractor over the user's accumulated prompt text
-                # so the confirmation message can mirror every detail back
-                # to the user. We refuse to flip user_input_confirmed while
-                # critical exit-side details are missing — instead the next
-                # turn asks the user to supply them.
-                if (
-                    builder.is_user_input_complete()
-                    and not builder.user_input_confirmed
-                ):
-                    _ensure_prompt_summary_built(
-                        builder,
-                        user_content=user_content,
-                        all_messages=all_messages,
-                    )
-
-                if (
-                    builder.is_user_input_complete()
-                    and not builder.user_input_confirmed
-                    and user_confirmed
-                ):
-                    if builder.missing_critical_inputs:
-                        logger.info(
-                            "🚧 chat_flow|event=confirmation_blocked_missing_critical"
-                            "|session_id=%s|missing=%s",
-                            session_id,
-                            [m.get("field") for m in builder.missing_critical_inputs],
-                        )
-                    else:
-                        builder.user_input_confirmed = True
+                if builder.is_user_input_complete() and not builder.user_input_confirmed and user_confirmed:
+                    builder.user_input_confirmed = True
 
                 _structured_clarification_topics = {
                     "tutorial",
@@ -2643,6 +3415,19 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         snapshot_changed=snapshot_changed,
                     )
 
+                # Phase 9b — discovery dispatch.
+                # Both helpers are no-ops unless the active preset declares
+                # a discovery block. handle_pending_tie_break runs first so
+                # a user reply like "1" or "highest relative volume" is
+                # interpreted as a tie-break choice instead of new strategy
+                # input. When tie-break resolves to a single symbol, the
+                # helper returns symbol_resolved=True; we DON'T short-circuit
+                # in that case so the existing flow can pick up the new
+                # symbol and continue to signal planning the same turn.
+                discovery_step = await handle_pending_tie_break(builder, user_content)
+                if not discovery_step.handled:
+                    discovery_step = await maybe_dispatch_discovery(builder)
+
                 if input_modification_invalid_selection:
                     assistant_text = build_input_modification_invalid_field_reply()
                     assistant_state = "collect_user_input"
@@ -2653,6 +3438,27 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     logger.info(
                         "📋 chat_flow|event=input_modification_field_prompt_repeated|session_id=%s",
                         session_id,
+                    )
+                # Phase 9e — discovery owns the turn whenever it has something
+                # to say (awaiting tie-break OR scan produced none/multiple).
+                # MUST be evaluated BEFORE grounded_clarification_reply and
+                # direct_llm_reply, otherwise the agent router's "ask for a
+                # specific stock" clarification short-circuits the discovery
+                # prompt that would actually answer the user's request.
+                # symbol_resolved=True falls through so the rest of the flow
+                # picks up the newly-set symbol.
+                elif discovery_step.handled and not discovery_step.symbol_resolved:
+                    assistant_text = discovery_step.assistant_text
+                    assistant_state = discovery_step.assistant_state or "collect_user_input"
+                    draft = builder.to_draft_json(
+                        mode_override=discovery_step.draft_mode,
+                        processing_status=_draft_processing_status(builder, assistant_state),
+                    )
+                    logger.info(
+                        "🔎 chat_flow|event=discovery_step|session_id=%s|state=%s|preset=%s",
+                        session_id,
+                        assistant_state,
+                        builder.strategy_preset,
                     )
                 elif grounded_clarification_reply:
                     builder.set_input_validation(None)
@@ -2722,28 +3528,11 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         was_modification=input_modification_turn,
                         turn_index=len(all_messages),
                     )
-                    # When the six core fields are captured but exit-side
-                    # details were never mentioned, ask the user instead of
-                    # silently defaulting — and instead of returning the
-                    # comprehensive summary that would imply the strategy
-                    # is ready to build.
-                    if (
-                        builder.is_user_input_complete()
-                        and builder.missing_critical_inputs
-                    ):
-                        assistant_text = build_missing_critical_inputs_reply(builder)
-                        logger.info(
-                            "❓ chat_flow|event=missing_critical_inputs_prompt"
-                            "|session_id=%s|missing=%s",
-                            session_id,
-                            [m.get("field") for m in builder.missing_critical_inputs],
-                        )
-                    else:
-                        assistant_text = build_collect_user_input_reply(
-                            builder,
-                            user_content,
-                            preface=capture_ack,
-                        )
+                    assistant_text = build_collect_user_input_reply(
+                        builder,
+                        user_content,
+                        preface=capture_ack,
+                    )
                     assistant_state = "collect_user_input"
                     draft = builder.to_draft_json(
                         mode_override="collect_user_input",
@@ -2756,6 +3545,127 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         bool(capture_ack),
                     )
                 elif not builder.signal_plan:
+                    # ── Ask-before-default: require user confirmation on RMS ──
+                    # Per the Stretus prompt §3: never silently fill stop_loss
+                    # or take_profit. If both are absent and the user hasn't
+                    # explicitly said "use defaults", pause and ask. We check
+                    # rms_sources so the question is only asked once — once the
+                    # user accepts or provides values, sources are marked and we
+                    # fall through to planning on the next turn.
+                    rms_sources = (builder.risk_execution_config or {}).get("rms_sources", {})
+
+                    # Check if the user explicitly gave a structural SL (any preset,
+                    # any strategy — no hardcoding of specific names).
+                    from app.kb import kb as _kb_rms
+                    _preset_obj = (
+                        _kb_rms.lookup_preset(builder.strategy_preset)
+                        if builder.strategy_preset else None
+                    )
+                    _preset_sl = getattr(_preset_obj, "stop_loss", None) or {}
+                    has_structural_sl = (
+                        builder.stop_loss_spec is not None
+                        or "structural_sl" in rms_sources
+                        or (isinstance(_preset_sl, dict) and _preset_sl.get("type") == "structural")
+                    )
+                    has_rr = "risk_reward" in rms_sources
+
+                    # Structural SL + RR is a valid complete risk spec — no % needed
+                    sl_missing = (
+                        builder.stop_loss is None
+                        and "stop_loss_pct" not in rms_sources
+                        and not has_structural_sl
+                    )
+                    # When the user set RR, TP will be computed from SL × RR at planning
+                    tp_missing = (
+                        builder.take_profit is None
+                        and "take_profit_pct" not in rms_sources
+                        and not has_rr
+                        and not has_structural_sl
+                    )
+                    user_said_use_defaults = re.search(
+                        r"\b(use\s+defaults?|default\s+values?|go\s+with\s+defaults?"
+                        r"|ok\s+defaults?|use\s+these\s+defaults?|proceed\s+with\s+defaults?"
+                        r"|defaults?\s+(?:are\s+)?(?:fine|ok|good)|apply\s+defaults?)\b",
+                        user_content, re.IGNORECASE,
+                    )
+                    if (sl_missing or tp_missing) and not user_said_use_defaults:
+                        from app.kb.compat import get_risk_defaults
+                        risk_cfg = MARKET_CONFIG.get(builder.market or "", {})
+                        default_sl = float(
+                            (builder.risk_execution_config or {}).get("stop_loss_pct")
+                            or risk_cfg.get("default_stop_loss", 1.5)
+                        )
+                        default_tp_rr = 2.0
+                        default_tp = round(default_sl * default_tp_rr, 2)
+                        default_dlc = 3.0
+                        missing_lines = []
+                        if sl_missing:
+                            missing_lines.append(
+                                f"• **Stop loss** — suggested default **{default_sl}%** "
+                                f"(standard intraday ATR-based buffer)"
+                            )
+                        if tp_missing:
+                            missing_lines.append(
+                                f"• **Take profit** — suggested default **{default_tp}%** "
+                                f"(1:{default_tp_rr} risk:reward on the above SL)"
+                            )
+                        dlc_missing = builder.daily_loss_cap is None and "daily_loss_cap" not in rms_sources
+                        if dlc_missing:
+                            missing_lines.append(
+                                f"• **Daily loss cap** — suggested default **{default_dlc}%** of capital"
+                            )
+                        missing_block = "\n".join(missing_lines)
+                        assistant_text = (
+                            "Before I plan the signals, I need your call on risk. "
+                            "You haven't specified:\n\n"
+                            f"{missing_block}\n\n"
+                            "**What would you like to do?**\n"
+                            "1. Use these defaults — just say *\"use defaults\"*\n"
+                            "2. Give me your own numbers — e.g. *\"SL 1%, TP 2%\"*\n"
+                            "3. Mix — tell me which ones to keep and which to change"
+                        )
+                        assistant_state = "collect_user_input"
+                        draft = builder.to_draft_json(
+                            mode_override="collect_user_input",
+                            processing_status="awaiting_user_input",
+                        )
+                        draft["rms_pending_confirmation"] = True
+                        if user_msg:
+                            user_msg.strategy_draft = draft
+                            user_msg.status = MessageStatus.completed
+                        assistant_msg = ChatMessage(
+                            id=uuid.uuid4(),
+                            session_id=session_uuid,
+                            role=ChatRole.assistant,
+                            content=assistant_text,
+                            model=FLOW_MODEL_NAME,
+                            strategy_draft=draft,
+                            strategy_json=None,
+                            status=MessageStatus.completed,
+                            is_final=True,
+                            parent_message_id=user_msg_uuid,
+                        )
+                        db.add(assistant_msg)
+                        await db.commit()
+                        logger.info(
+                            "⚖️ chat_flow|event=rms_clarification_sent|session_id=%s"
+                            "|sl_missing=%s|tp_missing=%s",
+                            session_id, sl_missing, tp_missing,
+                        )
+                        return
+
+                    # Mark any still-missing RMS as accepted defaults so apply_defaults()
+                    # knows the user is aware of them.
+                    if sl_missing or tp_missing:
+                        existing_rms = dict(builder.risk_execution_config or {})
+                        existing_sources = dict(existing_rms.get("rms_sources", {}))
+                        if sl_missing:
+                            existing_sources["stop_loss_pct"] = "user_confirmed_default"
+                        if tp_missing:
+                            existing_sources["take_profit_pct"] = "user_confirmed_default"
+                        existing_rms["rms_sources"] = existing_sources
+                        builder.risk_execution_config = existing_rms
+
                     builder.apply_defaults()
                     logger.info(
                         "📊 chat_flow|event=signal_planning_start|session_id=%s"
@@ -2833,26 +3743,13 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         )
                         raise
 
-                    # ===== Apply semantic extraction and orchestration =====
+                    # ===== NEW: Apply semantic extraction and orchestration =====
                     semantic_instructions = None
                     semantic_gates_applied = []
-                    zero_loss_augmentation: dict | None = None
-                    filter_cfg: SignalFilterConfig | None = None
-                    filter_audit: dict | None = None
-                    tm_cfg: TradeManagementConfig | None = None
-                    tm_audit: dict | None = None
-                    mc_cfg: MarketContextConfig | None = None
-                    mc_audit: dict | None = None
                     try:
-                        # Feed the extractor the full prompt context (goal +
-                        # accumulated user messages + current turn) so it
-                        # catches every condition the user mentioned across
-                        # the conversation, not just the last message.
-                        full_prompt_text = _collect_full_prompt_text(
-                            builder, all_messages, user_content
-                        )
+                        # Extract semantic instructions from user prompt
                         semantic_extractor = SemanticExtractor()
-                        semantic_instructions = semantic_extractor.extract(full_prompt_text)
+                        semantic_instructions = semantic_extractor.extract(user_content)
 
                         logger.info(
                             "📊 chat_flow|event=semantic_extraction_done|session_id=%s"
@@ -2868,106 +3765,10 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         plan = orchestrator.apply_semantic_gates(plan, semantic_instructions)
                         semantic_gates_applied = plan.get("_semantic_gates_applied", [])
 
-                        # ── Feature 2: zero-loss capture enforcement ──
-                        # If the planner / gates didn't translate every
-                        # condition the user mentioned into entry/exit
-                        # signal logic, augment the condition strings and
-                        # side-channel specs so the user's prompt is
-                        # mirrored faithfully in the signals.
-                        zero_loss_augmentation = enforce_zero_loss_capture(
-                            plan,
-                            semantic_instructions,
-                            prompt_text=full_prompt_text,
-                        )
-
-                        # ── Feature 3: behavioural signal filters ──
-                        # Layer the toggleable filter pack (volume confirmation,
-                        # volatility cap, market regime, trend direction, multi-
-                        # candle, momentum) on top of whatever the planner +
-                        # zero-loss step produced. The user has already seen
-                        # the filter toggles in the confirmation summary and
-                        # confirmed them implicitly.
-                        filter_cfg = SignalFilterConfig.from_dict(
-                            builder.signal_filters or {}
-                        )
-                        filter_audit = apply_filters_to_plan(plan, filter_cfg)
-
-                        # ── Feature 4: trade-management rule pack ──
-                        # Engine-known knobs (max_trades, daily_loss_cap,
-                        # per_trade_risk, trailing stop) are mirrored onto
-                        # `plan["_risk_overrides"]` / `_trailing_stop_spec`.
-                        # The full pack is attached at `plan["_trade_management"]`
-                        # so downstream consumers see every rule, even those
-                        # the current engine doesn't act on yet.
-                        tm_cfg = TradeManagementConfig.from_dict(
-                            builder.trade_management or {}
-                        )
-                        tm_audit = apply_trade_management_to_plan(plan, tm_cfg)
-
-                        # ── Feature 5: opposite-direction mirror ──
-                        # Build the mirror plan from the FULL entry/exit
-                        # condition the planner produced (rather than from
-                        # the user's threshold-conditions alone). The mirror
-                        # lives next to the primary plan so callers can
-                        # surface both in the chat summary and the user can
-                        # opt into "trade both directions".
-                        primary_direction = "long" if (
-                            (getattr(builder, "sentiment", "") or "").lower()
-                            in {"bullish", "bull", "long"}
-                        ) else "short"
-                        mirror = mirror_plan(plan, primary_direction=primary_direction)
-                        plan["_mirror_plan"] = {
-                            "primary_direction": primary_direction,
-                            "mirror_direction":  mirror.get("_direction"),
-                            "entry_condition":   mirror.get("entry_condition"),
-                            "exit_condition":    mirror.get("exit_condition"),
-                        }
-                        builder.mirror_plan = plan["_mirror_plan"]
-
-                        # ── Feature 6: market-context filters (Phase 4) ──
-                        # Layer the broader-market direction, HTF
-                        # confirmation, gap-handling, news-event, candle-
-                        # pattern, sector-strength filters on top. Engine-
-                        # known knobs land in plan["_htf_rules"],
-                        # plan["_reference_symbol"], etc.; the rest become
-                        # side-channel specs the runner / order manager can
-                        # honour.
-                        mc_cfg = MarketContextConfig.from_dict(
-                            builder.market_context or {}
-                        )
-                        mc_audit = apply_market_context_to_plan(plan, mc_cfg)
-
-                        # ── Feature 7: auto-journal the signal (Phase 4) ──
-                        # Trade journaling per rule #25 — every signal
-                        # generated gets a journal entry with the indicators
-                        # that triggered, the setup grade, and the full
-                        # plan context.
-                        factors = confirmation_factors_from_plan(plan)
-                        grade   = grade_setup(plan)
-                        plan["_setup_grade"]          = grade
-                        plan["_confirmation_factors"] = factors
-                        append_journal_entry(
-                            builder,
-                            build_signal_entry(
-                                builder=builder,
-                                plan=plan,
-                                setup_grade=grade,
-                                confirmation_factors=factors,
-                                notes="Auto-logged by chat_service signal-planning step.",
-                            ),
-                        )
-
                         logger.info(
-                            "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s"
-                            "|gates=%s|entry_added=%s|exit_added=%s|side=%s"
-                            "|filters_entry=%s|filters_side=%s",
+                            "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s|gates=%s",
                             session_id,
                             ", ".join(semantic_gates_applied),
-                            (zero_loss_augmentation or {}).get("entry_added") or [],
-                            (zero_loss_augmentation or {}).get("exit_added") or [],
-                            len((zero_loss_augmentation or {}).get("side_channels") or []),
-                            filter_audit.get("entry_added") or [],
-                            len(filter_audit.get("side_channels") or []),
                         )
                     except Exception as e:
                         logger.warning(
@@ -2992,6 +3793,60 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         len(semantic_gates_applied),
                     )
                     builder.apply_signal_plan(plan)
+
+                    # ── Post-planning semantic sync-back ──────────────────
+                    # The execution orchestrator may have bridged semantic
+                    # results (HTF, structural SL, ref_symbol, trailing) into
+                    # plan underscore keys, which apply_signal_plan already
+                    # consumed.  Now sync the remaining fields that live outside
+                    # the plan dict:
+                    #
+                    # 1. Risk:Reward — if the semantic extractor found an RR
+                    #    ratio that _extract_rms_from_text missed (e.g. the RR
+                    #    was specified post-hoc or in an unusual phrasing), and
+                    #    the builder doesn't already have a user-sourced RR,
+                    #    write it in so future turns preserve it.
+                    if semantic_instructions:
+                        sem_rr = plan.get("_semantic_risk_reward")
+                        if sem_rr and sem_rr.get("ratio"):
+                            existing_rms = builder.risk_execution_config or {}
+                            rms_sources = existing_rms.get("rms_sources", {})
+                            if rms_sources.get("risk_reward") != "user":
+                                updated_rms = dict(existing_rms)
+                                updated_rms["risk_reward"] = sem_rr["ratio"]
+                                updated_sources = dict(rms_sources)
+                                updated_sources["risk_reward"] = "semantic"
+                                updated_rms["rms_sources"] = updated_sources
+                                builder.risk_execution_config = updated_rms
+
+                        # 2. Re-normalize the canonical intent now that we have
+                        #    the confirmed preset, timeframe, and post-plan RMS
+                        #    so the stored object is accurate for future turns.
+                        try:
+                            from app.planner.semantic_normalizer import SemanticIntentNormalizer
+                            _post_canonical = SemanticIntentNormalizer().normalize(
+                                semantic_instructions,
+                                strategy_preset=builder.strategy_preset,
+                                timeframe=builder.timeframe,
+                                sentiment=builder.sentiment,
+                                stop_loss_spec=builder.stop_loss_spec,
+                                trailing_stop_spec=builder.trailing_stop_spec,
+                                risk_execution_config=builder.risk_execution_config,
+                                # Use the ORIGINAL strategy prompt (stored in builder.goal),
+                                # NOT the current user turn ("yes, proceed").  Using the
+                                # confirmation message as source_prompt causes
+                                # detect_primary_framework_in_text("yes, proceed") → None,
+                                # wiping out base_framework and all semantic extraction.
+                                source_prompt=(builder.goal or user_content)[:200],
+                            )
+                            builder.semantic_intent = _post_canonical.dict()
+                        except Exception as _norm_err:
+                            logger.debug(
+                                "chat_flow|post_semantic_normalize_failed|err=%s",
+                                _norm_err,
+                            )
+                            # Fall back to storing raw SemanticInstructions dict
+                            builder.semantic_intent = semantic_instructions.dict()
                     assistant_text = build_plan_signals_reply(builder, plan)
                     assistant_state = "plan_signals"
                     draft = builder.to_draft_json(
@@ -3018,25 +3873,6 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             "candle_confirmation": semantic_instructions.candle_confirmation.dict() if semantic_instructions.candle_confirmation else None,
                         }
                         draft["semantic_gates_applied"] = semantic_gates_applied
-                        if zero_loss_augmentation:
-                            draft["zero_loss_augmentation"] = zero_loss_augmentation
-                    if filter_cfg is not None:
-                        draft["signal_filters"]      = filter_cfg.to_dict()
-                        draft["signal_filter_audit"] = filter_audit
-                    if tm_cfg is not None:
-                        draft["trade_management"]       = tm_cfg.to_dict()
-                        draft["trade_management_audit"] = tm_audit
-                    if mc_cfg is not None:
-                        draft["market_context"]         = mc_cfg.to_dict()
-                        draft["market_context_audit"]   = mc_audit
-                    if builder.mirror_plan:
-                        draft["mirror_plan"]            = dict(builder.mirror_plan)
-                    if builder.window_warnings:
-                        draft["window_warnings"]        = list(builder.window_warnings)
-                    if builder.stock_recommendations:
-                        draft["stock_recommendations"]  = dict(builder.stock_recommendations)
-                    if builder.trade_journal:
-                        draft["trade_journal"]          = list(builder.trade_journal)
                     # ===== END: Semantic extraction results =====
                 else:
                     assistant_text = build_plan_signals_reminder(builder)
