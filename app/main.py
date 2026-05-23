@@ -71,6 +71,7 @@ async def lifespan(app: FastAPI):
         info["provider"].upper(),
         info["active_model"],
     )
+    logger.info("the info is %s", info)
     if info["provider"] == "ollama":
         logger.info("🔌 Ollama endpoint configured | url=%s", info["ollama_url"])
 
@@ -79,9 +80,26 @@ async def lifespan(app: FastAPI):
         len(kb.signals), len(kb.stocks), len(kb.timeframes.supported),
     )
 
+    from app.services.backtest.market_data_grpc import use_grpc_transport
+
+    if use_grpc_transport(settings):
+        logger.info(
+            "📡 Backtest market data | transport=grpc target=%s timeout=%ss secure=%s",
+            settings.market_data_grpc_target,
+            settings.market_data_grpc_timeout_seconds,
+            settings.market_data_grpc_secure,
+        )
+    else:
+        logger.info(
+            "📡 Backtest market data | transport=http url=%s timeout=%ss",
+            settings.historical_data_url or "(not set)",
+            settings.historical_data_timeout_seconds,
+        )
+
     await _seed_risk_execution_if_needed()
 
     yield
+    
     logger.info("👋 Stretus API shutting down")
 
 
@@ -166,7 +184,7 @@ async def llm_health():
 
 @app.get("/health/llm/models", tags=["🔧 Health"])
 async def list_models():
-    from app.services.ai.llm import GROQ_MODELS, OLLAMA_MODELS, LLMService
+    from app.services.ai.llm import OLLAMA_MODELS, LLMService
     import httpx
     pulled = []
     try:
@@ -177,7 +195,6 @@ async def list_models():
     except Exception:
         pass
     return {
-        "groq_models": [{"model": m, "description": d} for m, d in GROQ_MODELS.items()],
         "ollama_models": [
             {"model": m, "description": d, "pulled": any(m in p for p in pulled),
              "pull_command": f"ollama pull {m}"}

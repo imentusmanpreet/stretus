@@ -505,6 +505,26 @@ class StrategyBuilder:
         # structural SL/trailing specs extracted from free-form prose.
         # Persisted as a plain dict in the draft JSON so it survives across turns.
         self.semantic_intent: Optional[dict[str, Any]] = None
+        # Phase 10 — direction constraint
+        self.direction: Optional[str] = None             # "long_only" | "short_only" | "both"
+        # Phase 10 — session entry window (user-supplied, e.g. "09:30–11:30")
+        self.entry_window_start: Optional[str] = None    # HH:MM in IST
+        self.entry_window_end:   Optional[str] = None    # HH:MM in IST
+        # Phase 10 — risk circuit breakers
+        self.max_consecutive_losses: Optional[int] = None
+        self.cooldown_bars_after_loss: Optional[int] = None
+        self.cooldown_bars_after_profit: Optional[int] = None
+        # Phase 10 — entry gate controls
+        self.max_spread_bps: Optional[float] = None
+        self.gap_filter: Optional[str] = None            # "none" | "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+        self.gap_threshold_pct: Optional[float] = None
+        self.entry_confirmation_bars: Optional[int] = None
+        self.rsi_entry_band_min: Optional[float] = None
+        self.rsi_entry_band_max: Optional[float] = None
+        self.volume_ratio_threshold: Optional[float] = None
+        # Phase 10 — position sizing
+        self.position_sizing_mode: Optional[str] = None  # "fixed_fractional" | "risk_based" | "fixed_units"
+        self.max_capital_allocation_pct: Optional[float] = None
 
     def _render_validation_message(self, code: Optional[str], facts: dict[str, Any], fallback: Optional[str]) -> Optional[str]:
         if code:
@@ -723,6 +743,103 @@ class StrategyBuilder:
     def ready_for_preview(self) -> bool:
         return self.is_complete()
 
+    def validate_parameter_combinations(self) -> list[dict]:
+        """
+        Smart cross-parameter validation. Returns a list of warning/suggestion
+        dicts, each with keys: level ("warning" | "suggestion"), field, message.
+        Call this before assembling to surface issues to the user or log.
+        """
+        issues: list[dict] = []
+
+        # ── SL/TP ratio sanity ─────────────────────────────────────────────────
+        sl = self.stop_loss
+        tp = self.take_profit
+        if sl is not None and tp is not None and sl > 0:
+            rr = tp / sl
+            if rr < 1.0:
+                issues.append({
+                    "level": "warning",
+                    "field": "take_profit",
+                    "message": f"Risk:Reward is {rr:.2f}:1 — TP is smaller than SL. "
+                               f"You need at least a 50% win rate to break even. Consider widening TP.",
+                })
+            elif rr < 1.5 and self.experience == "beginner":
+                issues.append({
+                    "level": "suggestion",
+                    "field": "take_profit",
+                    "message": "RR of {:.1f}:1 is tight for a beginner — suggest at least 1.5:1.".format(rr),
+                })
+
+        # ── Intraday + wide SL ────────────────────────────────────────────────
+        if self.objective == "intraday" and sl is not None and sl > 2.0:
+            issues.append({
+                "level": "warning",
+                "field": "stop_loss",
+                "message": f"A {sl:.1f}% stop on an intraday strategy is very wide. "
+                           "Consider tightening to < 1.5% or using a structural SL.",
+            })
+
+        # ── Positional + very tight SL ─────────────────────────────────────────
+        if self.objective == "positional" and sl is not None and sl < 0.5:
+            issues.append({
+                "level": "warning",
+                "field": "stop_loss",
+                "message": f"A {sl:.1f}% stop on a positional strategy will get stopped out by normal noise. "
+                           "Typical positional SL is 1.5–3%.",
+            })
+
+        # ── max_spread_bps with high max_confirmation_bars ─────────────────────
+        ecb = self.entry_confirmation_bars
+        if ecb is not None and ecb > 3 and self.objective == "intraday":
+            issues.append({
+                "level": "suggestion",
+                "field": "entry_confirmation_bars",
+                "message": f"entry_confirmation_bars={ecb} on an intraday strategy may miss most moves — "
+                           "use 1–2 for intraday.",
+            })
+
+        # ── RSI band too narrow ────────────────────────────────────────────────
+        rmin = self.rsi_entry_band_min
+        rmax = self.rsi_entry_band_max
+        if rmin is not None and rmax is not None:
+            if rmax - rmin < 10:
+                issues.append({
+                    "level": "warning",
+                    "field": "rsi_entry_band",
+                    "message": f"RSI band [{rmin}–{rmax}] is very narrow — trades will be extremely rare. "
+                               "Suggest widening to at least 20 points.",
+                })
+
+        # ── Volume ratio threshold above 3× is very restrictive ───────────────
+        vrt = self.volume_ratio_threshold
+        if vrt is not None and vrt > 3.0:
+            issues.append({
+                "level": "suggestion",
+                "field": "volume_ratio_threshold",
+                "message": f"volume_ratio_threshold={vrt}× is very restrictive — "
+                           "most intraday entries require only 1.5–2× average volume.",
+            })
+
+        # ── Gap filter + intraday (info) ───────────────────────────────────────
+        if self.gap_filter not in (None, "none") and self.objective == "positional":
+            issues.append({
+                "level": "suggestion",
+                "field": "gap_filter",
+                "message": "gap_filter is most useful on intraday strategies. "
+                           "For positional, gaps often represent genuine price discovery.",
+            })
+
+        # ── Bearish sentiment but direction=long_only ──────────────────────────
+        if self.sentiment == "bearish" and self.direction == "long_only":
+            issues.append({
+                "level": "warning",
+                "field": "direction",
+                "message": "Sentiment is bearish but direction=long_only — you won't be taking "
+                           "short trades even though your view is bearish. Intended?",
+            })
+
+        return issues
+
     def is_complete(self) -> bool:
         return all([
             self.is_user_input_complete(),
@@ -744,16 +861,45 @@ class StrategyBuilder:
             fields.append("take_profit_pct")
         return fields
 
+    def apply_tier_execution_defaults(self) -> None:
+        """Fill unset Phase-2 execution fields from risk_tiers.yaml (by experience)."""
+        from app.kb import kb
+
+        tier = kb.get_risk_tier(self.experience)
+        if self.max_consecutive_losses is None:
+            self.max_consecutive_losses = int(tier.max_consecutive_losses)
+        if self.cooldown_bars_after_loss is None:
+            self.cooldown_bars_after_loss = int(tier.cooldown_bars_after_loss)
+        if self.cooldown_bars_after_profit is None:
+            self.cooldown_bars_after_profit = int(tier.cooldown_bars_after_profit)
+        if self.max_spread_bps is None:
+            self.max_spread_bps = float(tier.max_spread_bps)
+        if self.entry_confirmation_bars is None:
+            self.entry_confirmation_bars = int(tier.entry_confirmation_bars)
+        if self.max_capital_allocation_pct is None:
+            self.max_capital_allocation_pct = float(tier.max_capital_allocation_pct)
+        if self.position_sizing_mode is None:
+            self.position_sizing_mode = str(tier.position_sizing_mode)
+        if self.gap_filter is None:
+            self.gap_filter = str(tier.gap_filter)
+
     def apply_defaults(self):
         cfg = MARKET_CONFIG.get(self.market or "", {})
         risk_cfg = self.risk_execution_config or {}
+        from app.kb import kb
+
+        tier = kb.get_risk_tier(self.experience)
         if self.stop_loss is None:
             self.stop_loss = float(
-                risk_cfg.get("stop_loss_pct", cfg.get("default_stop_loss", 2.0))
+                risk_cfg.get("stop_loss_pct")
+                or tier.base_sl_pct
+                or cfg.get("default_stop_loss", 2.0)
             )
         if self.take_profit is None:
             self.take_profit = float(
-                risk_cfg.get("take_profit_pct", cfg.get("default_take_profit", 5.0))
+                risk_cfg.get("take_profit_pct")
+                or tier.base_tp_pct
+                or cfg.get("default_take_profit", 5.0)
             )
         if self.timeframe is None:
             self.timeframe = cfg.get("default_timeframe", "1d")
@@ -761,10 +907,13 @@ class StrategyBuilder:
             if risk_cfg.get("daily_loss_cap") is not None:
                 self.daily_loss_cap = float(risk_cfg["daily_loss_cap"])
             else:
-                tier = get_experience_risk(self.experience or "")
-                recommended = float(tier.get("daily_loss_cap_pct", 2.0))
+                tier_risk = get_experience_risk(self.experience or "")
+                recommended = float(tier_risk.get("daily_loss_cap_pct", 2.0))
                 min_cap, max_cap = get_daily_loss_cap_bounds()
                 self.daily_loss_cap = max(min_cap, min(max_cap, recommended))
+
+        self.apply_tier_execution_defaults()
+
         if self.max_trade is None:
             objective = (self.objective or "").lower().strip()
             if objective == "intraday":
@@ -1041,6 +1190,42 @@ class StrategyBuilder:
         semantic_intent = preview.get("semantic_intent")
         if isinstance(semantic_intent, dict) and semantic_intent:
             self.semantic_intent = semantic_intent
+
+        # Phase 10 — restore new strategy parameters
+        _p10_str_fields = (
+            "direction", "entry_window_start", "entry_window_end",
+            "gap_filter", "position_sizing_mode",
+        )
+        for _f in _p10_str_fields:
+            v = preview.get(_f)
+            if v is not None:
+                setattr(self, _f, str(v).strip() or None)
+
+        _p10_int_fields = (
+            "max_consecutive_losses", "cooldown_bars_after_loss",
+            "cooldown_bars_after_profit", "entry_confirmation_bars",
+        )
+        for _f in _p10_int_fields:
+            v = preview.get(_f)
+            if v is not None:
+                try:
+                    setattr(self, _f, int(v))
+                except (TypeError, ValueError):
+                    pass
+
+        _p10_float_fields = (
+            "max_spread_bps", "gap_threshold_pct",
+            "rsi_entry_band_min", "rsi_entry_band_max",
+            "volume_ratio_threshold", "max_capital_allocation_pct",
+        )
+        for _f in _p10_float_fields:
+            v = preview.get(_f)
+            if v is not None:
+                try:
+                    setattr(self, _f, float(v))
+                except (TypeError, ValueError):
+                    pass
+
         if preview.get("user_input_confirmed"):
             self.user_input_confirmed = True
         if preview.get("signal_plan"):
@@ -1192,6 +1377,22 @@ class StrategyBuilder:
             "discovery_universe_override":   self.discovery_universe_override,
             # Semantic intent: plain dict so it round-trips cleanly through JSON.
             "semantic_intent":               self.semantic_intent,
+            # Phase 10 — new strategy parameters
+            "direction":                     self.direction,
+            "entry_window_start":            self.entry_window_start,
+            "entry_window_end":              self.entry_window_end,
+            "max_consecutive_losses":        self.max_consecutive_losses,
+            "cooldown_bars_after_loss":      self.cooldown_bars_after_loss,
+            "cooldown_bars_after_profit":    self.cooldown_bars_after_profit,
+            "max_spread_bps":                self.max_spread_bps,
+            "gap_filter":                    self.gap_filter,
+            "gap_threshold_pct":             self.gap_threshold_pct,
+            "entry_confirmation_bars":       self.entry_confirmation_bars,
+            "rsi_entry_band_min":            self.rsi_entry_band_min,
+            "rsi_entry_band_max":            self.rsi_entry_band_max,
+            "volume_ratio_threshold":        self.volume_ratio_threshold,
+            "position_sizing_mode":          self.position_sizing_mode,
+            "max_capital_allocation_pct":    self.max_capital_allocation_pct,
         }
 
         return draft
@@ -1278,6 +1479,53 @@ class StrategyBuilder:
         if exit_signals:
             strategy_block["exit_evaluation_mode"] = "registry"
             strategy_block["exit_signals"] = exit_signals
+
+        # Phase 10 — direction constraint
+        if self.direction and self.direction != "both":
+            strategy_block["direction"] = self.direction
+
+        # Phase 10 — entry window
+        if self.entry_window_start or self.entry_window_end:
+            strategy_block["entry_window"] = {
+                k: v for k, v in {
+                    "start": self.entry_window_start,
+                    "end":   self.entry_window_end,
+                    "timezone": "Asia/Kolkata",
+                }.items() if v
+            }
+
+        # Phase 10 — risk circuit breakers (only write when non-zero / non-default)
+        if self.max_consecutive_losses:
+            strategy_block["max_consecutive_losses"] = self.max_consecutive_losses
+        if self.cooldown_bars_after_loss:
+            strategy_block["cooldown_bars_after_loss"] = self.cooldown_bars_after_loss
+        if self.cooldown_bars_after_profit:
+            strategy_block["cooldown_bars_after_profit"] = self.cooldown_bars_after_profit
+
+        # Phase 10 — entry gate controls
+        if self.max_spread_bps:
+            strategy_block["max_spread_bps"] = self.max_spread_bps
+        if self.gap_filter and self.gap_filter != "none":
+            strategy_block["gap_filter"] = self.gap_filter
+        if self.gap_threshold_pct is not None:
+            strategy_block["gap_threshold_pct"] = self.gap_threshold_pct
+        if self.entry_confirmation_bars and self.entry_confirmation_bars > 1:
+            strategy_block["entry_confirmation_bars"] = self.entry_confirmation_bars
+        if self.rsi_entry_band_min is not None or self.rsi_entry_band_max is not None:
+            strategy_block["rsi_entry_band"] = {
+                k: v for k, v in {
+                    "min": self.rsi_entry_band_min,
+                    "max": self.rsi_entry_band_max,
+                }.items() if v is not None
+            }
+        if self.volume_ratio_threshold is not None:
+            strategy_block["volume_ratio_threshold"] = self.volume_ratio_threshold
+
+        # Phase 10 — position sizing
+        if self.position_sizing_mode and self.position_sizing_mode != "fixed_fractional":
+            strategy_block["position_sizing_mode"] = self.position_sizing_mode
+        if self.max_capital_allocation_pct is not None and self.max_capital_allocation_pct < 100.0:
+            strategy_block["max_capital_allocation_pct"] = self.max_capital_allocation_pct
 
         return {"strategy": strategy_block}
 

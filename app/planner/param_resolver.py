@@ -133,11 +133,31 @@ def parse_risk_reward(raw: Any) -> float | None:
         return None
 
 
+# Regime-based SL multiplier adjustments.
+# In ranging markets, tighter SL is viable (less noise, clearer structure).
+# In volatile/trending markets, wider SL needed to avoid getting stopped out.
+_REGIME_SL_MULT: dict[str, float] = {
+    "trending_up":   1.1,
+    "trending_down": 1.1,
+    "ranging":       0.85,
+    "volatile":      1.4,
+}
+# Regime-based TP multiplier adjustments.
+# In trending markets, let winners run (wider TP); in ranging, take profit sooner.
+_REGIME_TP_MULT: dict[str, float] = {
+    "trending_up":   1.2,
+    "trending_down": 1.2,
+    "ranging":       0.9,
+    "volatile":      1.0,
+}
+
+
 def resolve_sl_tp(
     risk_tier: RiskTier,
     *,
     ohlcv: pd.DataFrame | None = None,
     user_risk_reward: Any = None,
+    regime: dict | None = None,
 ) -> tuple[float, float, float]:
     """Return (sl_pct, tp_pct, vol_mult). vol_mult==1.0 if OHLCV unavailable.
 
@@ -145,21 +165,42 @@ def resolve_sl_tp(
     SL × parsed_ratio so the plan honors the user's request instead of using
     the ATR-scaled base_tp. SL itself is still ATR-scaled so it adapts to
     each stock's realized volatility.
+
+    When `regime` is provided (from classify_regime()), both SL and TP are
+    additionally scaled by a regime-specific multiplier — wider in volatile/trending,
+    tighter in ranging markets.
     """
     base_sl = risk_tier.base_sl_pct
     base_tp = risk_tier.base_tp_pct
     user_rr = parse_risk_reward(user_risk_reward)
 
+    # Regime-aware multipliers (applied on top of volatility scaling)
+    regime_type = (regime or {}).get("type", "ranging")
+    regime_sl_mult = _REGIME_SL_MULT.get(regime_type, 1.0)
+    regime_tp_mult = _REGIME_TP_MULT.get(regime_type, 1.0)
+
     atr_pct = _atr_pct(ohlcv) if ohlcv is not None else None
     if atr_pct is None or atr_pct <= 0:
-        sl_pct = base_sl
-        tp_pct = round(base_sl * user_rr, 2) if user_rr is not None else base_tp
+        sl_pct = round(base_sl * regime_sl_mult, 2)
+        if user_rr is not None:
+            tp_pct = round(sl_pct * user_rr, 2)
+        else:
+            tp_pct = round(base_tp * regime_tp_mult, 2)
         return sl_pct, tp_pct, 1.0
 
     raw_mult = atr_pct / _BASELINE_ATR_PCT
     vol_mult = max(_VOL_MULT_MIN, min(_VOL_MULT_MAX, raw_mult))
-    sl_pct = round(base_sl * vol_mult, 2)
-    tp_pct = round(sl_pct * user_rr, 2) if user_rr is not None else round(base_tp * vol_mult, 2)
+    sl_pct   = round(base_sl * vol_mult * regime_sl_mult, 2)
+    if user_rr is not None:
+        tp_pct = round(sl_pct * user_rr, 2)
+    else:
+        tp_pct = round(base_tp * vol_mult * regime_tp_mult, 2)
+
+    logger.info(
+        "param_resolver|sl_tp|regime=%s|regime_sl_mult=%.2f|regime_tp_mult=%.2f"
+        "|vol_mult=%.2f|sl=%.2f%%|tp=%.2f%%",
+        regime_type, regime_sl_mult, regime_tp_mult, vol_mult, sl_pct, tp_pct,
+    )
     return sl_pct, tp_pct, round(vol_mult, 3)
 
 
@@ -169,9 +210,16 @@ def resolve_sl_tp(
 def build_risk_dict(risk_tier: RiskTier) -> dict[str, Any]:
     """Build the `risk` block consumed by /strategy/evaluate/execute."""
     return {
-        "max_risk_per_trade_pct": risk_tier.per_trade_risk_pct,
-        "max_open_positions":     risk_tier.max_open_positions,
-        "cash_reserve_pct":       0.1,
-        "cooldown_bars":          0,
-        "min_trade_value":        1000,
+        "max_risk_per_trade_pct":    risk_tier.per_trade_risk_pct,
+        "max_open_positions":        risk_tier.max_open_positions,
+        "cash_reserve_pct":          0.1,
+        "cooldown_bars_after_loss":  risk_tier.cooldown_bars_after_loss,
+        "min_trade_value":           risk_tier.min_trade_value,
+        # Phase 10 — new tier defaults surfaced to execution layer
+        "max_consecutive_losses":    risk_tier.max_consecutive_losses,
+        "cooldown_bars_after_profit": risk_tier.cooldown_bars_after_profit,
+        "max_spread_bps":            risk_tier.max_spread_bps,
+        "entry_confirmation_bars":   risk_tier.entry_confirmation_bars,
+        "max_capital_allocation_pct": risk_tier.max_capital_allocation_pct,
+        "position_sizing_mode":      risk_tier.position_sizing_mode,
     }

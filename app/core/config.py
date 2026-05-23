@@ -12,21 +12,21 @@ from typing import Literal, List, Optional, Tuple, Union
 from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_GROQ_KEY_ENV_PREFIX = "GROQ_API_KEY_"
-_GROQ_KEY_TOKEN_SPLIT_RE = re.compile(r"[\r\n,;]+")
-_GROQ_KEY_INDEXED_RE = re.compile(
+_OPENROUTER_KEY_ENV_PREFIX = "OPENROUTER_API_KEY_"
+_OPENROUTER_KEY_TOKEN_SPLIT_RE = re.compile(r"[\r\n,;]+")
+_OPENROUTER_KEY_INDEXED_RE = re.compile(
     r"^\s*(?:\[(?P<bracket_index>\d+)\]|(?P<plain_index>\d+))\s*[:=]\s*(?P<value>.+?)\s*$"
 )
 
 
-def _clean_groq_key_value(raw: Optional[str]) -> str:
+def _clean_openrouter_key_value(raw: Optional[str]) -> str:
     return str(raw or "").strip().strip('"').strip("'")
 
 
-def _split_groq_key_values(raw: Optional[str]) -> List[str]:
+def _split_openrouter_key_values(raw: Optional[str]) -> List[str]:
     parts = [
-        _clean_groq_key_value(part)
-        for part in _GROQ_KEY_TOKEN_SPLIT_RE.split(str(raw or ""))
+        _clean_openrouter_key_value(part)
+        for part in _OPENROUTER_KEY_TOKEN_SPLIT_RE.split(str(raw or ""))
     ]
     parts = [part for part in parts if part]
 
@@ -34,12 +34,12 @@ def _split_groq_key_values(raw: Optional[str]) -> List[str]:
     plain_parts: List[str] = []
 
     for part in parts:
-        match = _GROQ_KEY_INDEXED_RE.match(part)
+        match = _OPENROUTER_KEY_INDEXED_RE.match(part)
         if not match:
             plain_parts.append(part)
             continue
 
-        key_value = _clean_groq_key_value(match.group("value"))
+        key_value = _clean_openrouter_key_value(match.group("value"))
         if not key_value:
             continue
 
@@ -61,7 +61,7 @@ def _dedupe_preserve(values: List[str]) -> List[str]:
     return ordered
 
 
-def _groq_key_suffix_sort_key(suffix: str) -> Tuple[int, Union[int, str]]:
+def _openrouter_key_suffix_sort_key(suffix: str) -> Tuple[int, Union[int, str]]:
     cleaned = str(suffix or "").strip()
     if cleaned.isdigit():
         return (0, int(cleaned))
@@ -87,24 +87,22 @@ class Settings(BaseSettings):
 
     # ── AI Provider selection ─────────────────────────────────────────────────
     # LLM_PROVIDER controls which backend is used:
-    #   "groq"   → Groq cloud API  (fast, free tier, needs GROQ_API_KEY)
-    #   "ollama" → Local Ollama    (private, needs Ollama running locally)
-    #   "auto"   → Try Groq first, fall back to Ollama if Groq fails
-    llm_provider: Literal["groq", "ollama", "auto"] = "groq"
+    #   "openrouter" → OpenRouter cloud API (unified access to multiple LLMs)
+    #   "ollama"     → Local Ollama (private, needs Ollama running locally)
+    #   "auto"       → Try OpenRouter first, fall back to Ollama
+    llm_provider: Literal["openrouter", "ollama", "auto"] = "openrouter"
 
-    # ── Groq Cloud Settings ───────────────────────────────────────────────────
-    # Supports:
-    #   GROQ_API_KEY=gsk_primary
-    #   GROQ_API_KEY=gsk_primary,gsk_backup
-    #   GROQ_API_KEY=1:gsk_primary,2:gsk_backup,3:gsk_third
-    groq_api_key: str = ""
-    groq_api_keys: str = ""
-    # Available Groq models (free tier):
-    #   llama-3.3-70b-versatile  ← recommended (best quality)
-    #   llama-3.1-8b-instant     ← fastest, lower quality
-    #   mixtral-8x7b-32768       ← good for long contexts
-    #   gemma2-9b-it             ← Google's model
-    groq_model: str = "llama-3.3-70b-versatile"
+    # ── OpenRouter Cloud Settings ─────────────────────────────────────────────
+    # Keys are managed via JSON state file: app/services/ai/openrouter_key_state.json
+    # The system automatically rotates to the next key when one is exhausted (429 error)
+    openrouter_api_key: str = ""
+    openrouter_api_keys: str = ""
+    # Available OpenRouter models:
+    #   meta-llama/llama-3.3-70b-instruct  ← recommended (best quality)
+    #   anthropic/claude-3.5-sonnet        ← excellent reasoning
+    #   google/gemini-pro-1.5              ← good for long contexts
+    #   openai/gpt-4-turbo                 ← OpenAI's best
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
 
     # ── Ollama Local Settings ─────────────────────────────────────────────────
     ollama_base_url: str = "http://localhost:11434"
@@ -116,9 +114,9 @@ class Settings(BaseSettings):
     #   mistral:7b     ← solid general model
     ollama_model: str = "qwen2.5:7b"
 
-    # ── Backward compatibility (old USE_GROQ flag) ────────────────────────────
-    # If USE_GROQ=true is set in .env, it overrides llm_provider
-    use_groq: bool = False
+    # ── Backward compatibility (old USE_OPENROUTER flag) ──────────────────────
+    # If USE_OPENROUTER=true is set in .env, it overrides llm_provider
+    use_openrouter: bool = False
 
     # ── Strategy files ────────────────────────────────────────────────────────
     strategy_folder: str = "./strategies"
@@ -127,11 +125,16 @@ class Settings(BaseSettings):
     quant_engine_url: str = "http://localhost:8001"
 
     # ── Historical data (Backtest service only) ───────────────────────────────
-    # Ngrok tunnel to your local OHLCV server.
-    # Used ONLY by the backtest service for historical candle fetch.
+    # HTTP fallback: public API / ngrok (User-Gateway → BFF → market data).
     historical_data_url: str = ""
-    historical_data_timeout_seconds: float = 60.0
-    quant_engine_timeout_seconds: float = 180.0
+    historical_data_timeout_seconds: float = 120.0
+    # In-cluster gRPC to marketdata-ingestion (port 50057). Preferred on EKS.
+    # auto = use gRPC when MARKET_DATA_GRPC_TARGET is set, else HTTP.
+    market_data_fetch_transport: str = "auto"
+    market_data_grpc_target: str = ""
+    market_data_grpc_timeout_seconds: float = 120.0
+    market_data_grpc_secure: bool = False
+    quant_engine_timeout_seconds: float = 600.0  # 10 minutes for complex backtests
     # Inclusive range from 2024-01-01 through current date (dynamically calculated).
     # Note: backtest_default_lookback_days is approximate and recalculated at runtime.
     backtest_default_lookback_days: int = 868
@@ -140,7 +143,7 @@ class Settings(BaseSettings):
     signal_eval_lookback_days: int = 30
     # Chunk size for backtest OHLCV fetching. The full backtest range is split
     # into windows of this many days and fetched sequentially to avoid HTTP 429.
-    backtest_fetch_chunk_days: int = 90
+    backtest_fetch_chunk_days: int = 180
 
     # ── Live market data (Execution / Order Evaluation service only) ──────────
     # Points to Upstox v2 base URL.  All execution market data comes from here:
@@ -158,9 +161,9 @@ class Settings(BaseSettings):
     market_data_circuit_threshold_pct: float = 0.98
 
     def effective_provider(self) -> str:
-        """Resolve the actual provider, handling the legacy USE_GROQ flag."""
-        if self.use_groq:
-            return "groq"
+        """Resolve the actual provider, handling the legacy USE_OPENROUTER flag."""
+        if self.use_openrouter:
+            return "openrouter"
         return self.llm_provider
 
     def _settings_env_values(self) -> dict[str, str]:
@@ -188,22 +191,22 @@ class Settings(BaseSettings):
 
         return merged
 
-    def groq_api_key_pool(self) -> List[str]:
+    def openrouter_api_key_pool(self) -> List[str]:
         keys: List[str] = []
-        keys.extend(_split_groq_key_values(self.groq_api_key))
-        keys.extend(_split_groq_key_values(self.groq_api_keys))
+        keys.extend(_split_openrouter_key_values(self.openrouter_api_key))
+        keys.extend(_split_openrouter_key_values(self.openrouter_api_keys))
 
         numbered_keys: List[Tuple[Tuple[int, Union[int, str]], str]] = []
         for name, value in self._settings_env_values().items():
-            if not name.startswith(_GROQ_KEY_ENV_PREFIX):
+            if not name.startswith(_OPENROUTER_KEY_ENV_PREFIX):
                 continue
-            suffix = name[len(_GROQ_KEY_ENV_PREFIX):]
+            suffix = name[len(_OPENROUTER_KEY_ENV_PREFIX):]
             if not suffix:
                 continue
-            numbered_keys.append((_groq_key_suffix_sort_key(suffix), value))
+            numbered_keys.append((_openrouter_key_suffix_sort_key(suffix), value))
 
         for _, value in sorted(numbered_keys, key=lambda item: item[0]):
-            keys.extend(_split_groq_key_values(value))
+            keys.extend(_split_openrouter_key_values(value))
 
         return _dedupe_preserve(keys)
 

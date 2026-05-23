@@ -229,6 +229,21 @@ class SemanticInstructions(BaseModel):
     # Extraction quality metrics
     extraction_quality_score: float = 0.0   # 0.0 to 1.0, indicates completeness
 
+    # Phase 10 — new execution parameters extracted from prose
+    direction: str | None = None                    # "long_only" | "short_only" | "both"
+    gap_filter: str | None = None                   # "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+    gap_threshold_pct: float | None = None
+    max_consecutive_losses: int | None = None
+    cooldown_bars_after_loss: int | None = None
+    cooldown_bars_after_profit: int | None = None
+    max_spread_bps: float | None = None
+    entry_confirmation_bars: int | None = None
+    rsi_entry_band_min: float | None = None
+    rsi_entry_band_max: float | None = None
+    volume_ratio_threshold: float | None = None
+    position_sizing_mode: str | None = None         # "risk_based" | "fixed_fractional" | "fixed_units"
+    max_capital_allocation_pct: float | None = None
+
 
 # ── Execution Configuration (Assembled from SemanticInstructions + Signals) ────
 

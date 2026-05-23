@@ -191,6 +191,90 @@ class SemanticExtractor:
         (r"(?:bearish|red)\s+candle.*?(?:close|break)", "bearish_confirmation"),
     ]
 
+    # Direction patterns (Phase 10)
+    DIRECTION_PATTERNS = [
+        (r"\blong[- ]only\b",                                             "long_only"),
+        (r"\bshort[- ]only\b",                                            "short_only"),
+        (r"\bbuy[- ]only\b",                                              "long_only"),
+        (r"\bsell[- ]only\b",                                             "short_only"),
+        (r"\bonly\s+(?:take|go)\s+long",                                  "long_only"),
+        (r"\bonly\s+(?:take|go)\s+short",                                 "short_only"),
+        (r"\b(?:both\s+)?longs?\s+and\s+shorts?\b",                       "both"),
+        (r"\bboth\s+(?:sides|directions)\b",                              "both"),
+        (r"\bdirectional\s+trade(?:s)?\s+(?:on\s+)?(?:both|either)\b",   "both"),
+    ]
+
+    # Gap filter patterns (Phase 10)
+    GAP_FILTER_PATTERNS = [
+        (r"\bignore\s+(?:large\s+)?gap(?:s)?\s+up\b",                    "ignore_gap_up"),
+        (r"\bavoid\s+(?:large\s+)?gap(?:s)?\s+up\b",                     "ignore_gap_up"),
+        (r"\bskip\s+(?:large\s+)?gap(?:s)?\s+up\b",                      "ignore_gap_up"),
+        (r"\bno\s+(?:large\s+)?gap(?:s)?\s+up\s+entries?\b",             "ignore_gap_up"),
+        (r"\bignore\s+(?:large\s+)?gap(?:s)?\s+down\b",                  "ignore_gap_down"),
+        (r"\bavoid\s+(?:large\s+)?gap(?:s)?\s+down\b",                   "ignore_gap_down"),
+        (r"\bskip\s+(?:large\s+)?gap(?:s)?\s+down\b",                    "ignore_gap_down"),
+        (r"\bignore\s+(?:gap(?:s)?|gapping)\s+(?:days?|sessions?)\b",    "ignore_both"),
+        (r"\bno\s+trade\s+on\s+gap(?:s)?\b",                             "ignore_both"),
+        (r"\bfilter\s+out\s+gap(?:s)?\b",                                 "ignore_both"),
+        (r"\bskip\s+gap(?:s)?\b",                                         "ignore_both"),
+    ]
+
+    # Consecutive-loss patterns (Phase 10)
+    CONSECUTIVE_LOSS_PATTERNS = [
+        r"(?:stop|pause|halt)\s+after\s+(\d+)\s+(?:consecutive\s+)?(?:losses?|losing\s+trades?)",
+        r"max(?:imum)?\s+(\d+)\s+consecutive\s+(?:losses?|losing\s+trades?)",
+        r"(\d+)\s+(?:straight|consecutive)\s+(?:losses?|losing\s+trades?)\s+(?:and\s+)?stop",
+        r"no\s+more\s+than\s+(\d+)\s+(?:consecutive\s+)?(?:losses?|losing\s+trades?)",
+    ]
+
+    # Cooldown patterns (Phase 10)
+    COOLDOWN_PATTERNS = [
+        r"(?:wait|cooldown|rest)\s+(?:for\s+)?(\d+)\s+(?:bars?|candles?)\s+after\s+(?:a\s+)?(?:loss|losing\s+trade|stop)",
+        r"(\d+)[- ]bar\s+cooldown\s+(?:after|post)[- ](?:loss|stop)",
+        r"after\s+(?:a\s+)?(?:loss|stop)\s+wait\s+(\d+)\s+(?:bars?|candles?)",
+    ]
+
+    # Spread filter patterns (Phase 10)
+    SPREAD_PATTERNS = [
+        r"(?:max(?:imum)?\s+)?spread\s+(?:of|below|under|<|≤)\s*(\d+\.?\d*)\s*(?:bps?|basis\s+points?)",
+        r"spread\s+(?:filter|gate|limit)\s+(\d+\.?\d*)\s*(?:bps?|basis\s+points?)",
+        r"(\d+\.?\d*)\s*(?:bps?|basis\s+points?)\s+(?:max(?:imum)?\s+)?spread",
+    ]
+
+    # Entry confirmation patterns (Phase 10)
+    CONFIRMATION_PATTERNS = [
+        r"(\d+)[- ](?:bar|candle)\s+(?:close|confirmation|confirm)",
+        r"(?:wait\s+for\s+|need\s+)?(\d+)\s+(?:consecutive\s+)?(?:bars?|candles?)\s+(?:to\s+)?confirm",
+        r"confirmation\s+on\s+(\d+)\s+(?:bars?|candles?)",
+        r"(\d+)\s+bars?\s+(?:of\s+)?(?:confirmation|signal)",
+    ]
+
+    # RSI band patterns (Phase 10)
+    RSI_BAND_PATTERNS = [
+        r"rsi\s+between\s+(\d+\.?\d*)\s+(?:and|-)\s+(\d+\.?\d*)",
+        r"rsi\s+(?:in\s+)?(?:the\s+)?range\s+(?:of\s+)?(\d+\.?\d*)\s*[-–]\s*(\d+\.?\d*)",
+        r"rsi\s+(?:above|>|≥)\s*(\d+\.?\d*)\s+(?:and|but)\s+(?:below|<|≤)\s*(\d+\.?\d*)",
+        r"rsi\s+(?:between|from)\s+(\d+\.?\d*)\s+to\s+(\d+\.?\d*)",
+    ]
+
+    # Volume ratio patterns (Phase 10)
+    VOLUME_RATIO_PATTERNS = [
+        r"volume\s+(?:at\s+least\s+|≥|>|above\s+)?(\d+\.?\d*)(?:x|×)\s+(?:the\s+)?(?:average|avg|mean)",
+        r"(\d+\.?\d*)(?:x|×)\s+(?:average|avg)\s+volume",
+        r"volume\s+(?:spike|surge)\s+(?:of\s+)?(\d+\.?\d*)(?:x|×)",
+        r"volume\s+must\s+be\s+(\d+\.?\d*)(?:x|×)\s+(?:or\s+more\s+)?(?:above|than|the)?\s*(?:average|avg)?",
+    ]
+
+    # Position sizing mode patterns (Phase 10)
+    POSITION_SIZING_PATTERNS = [
+        (r"risk[- ]based\s+(?:position\s+)?sizing",         "risk_based"),
+        (r"size\s+(?:based\s+on|by)\s+risk",                "risk_based"),
+        (r"fixed[- ](?:fractional|fraction)\s+sizing",      "fixed_fractional"),
+        (r"(?:fixed|flat)\s+lot\s+size",                    "fixed_units"),
+        (r"fixed\s+units?\s+(?:per\s+trade)?",              "fixed_units"),
+        (r"risk\s+(\d+\.?\d*)\s*%\s+(?:of\s+capital|per\s+trade)", "risk_based"),
+    ]
+
     # Momentum patterns
     MOMENTUM_PATTERNS = [
         (r"adx\s+(?:should|must|remain)?\s*(?:above|>|>|be)?\s*(\d+\.?\d*)", "adx_threshold"),
@@ -241,6 +325,20 @@ class SemanticExtractor:
 
         # Store indicator windows extracted from prompt (do NOT add defaults)
         instructions.indicators = self._extract_indicators(normalized)
+
+        # Phase 10 — new execution parameter extraction
+        instructions.direction               = self._extract_direction(normalized)
+        instructions.gap_filter              = self._extract_gap_filter(normalized)
+        instructions.max_consecutive_losses  = self._extract_consecutive_losses(normalized)
+        cooldown                             = self._extract_cooldown(normalized)
+        instructions.cooldown_bars_after_loss = cooldown
+        instructions.max_spread_bps          = self._extract_spread_bps(normalized)
+        instructions.entry_confirmation_bars = self._extract_confirmation_bars(normalized)
+        rsi_band                             = self._extract_rsi_band(normalized)
+        if rsi_band:
+            instructions.rsi_entry_band_min, instructions.rsi_entry_band_max = rsi_band
+        instructions.volume_ratio_threshold  = self._extract_volume_ratio(normalized)
+        instructions.position_sizing_mode    = self._extract_position_sizing_mode(normalized)
 
         # Calculate extraction quality
         instructions.extraction_quality_score = self._calculate_quality_score(instructions)
@@ -679,21 +777,32 @@ class SemanticExtractor:
         """
         indicators = {}
 
-        # EMA windows - multiple patterns to catch variations
-        ema_patterns = [
-            r"ema\s*\(?(\d+)\)?",  # EMA(20) or EMA 20
-            r"(\d+)\s*ema\b",      # 20 EMA
-            r"(?:exponential|exp)\s+moving\s+average\s+(?:of\s+)?(\d+)",  # Exponential moving average of 20
-        ]
-        ema_matches = []
-        for pattern in ema_patterns:
-            ema_matches.extend(re.findall(pattern, text, re.IGNORECASE))
-
-        if ema_matches:
-            ema_windows = sorted(set(int(m) for m in ema_matches if m.isdigit()))
-            if ema_windows:
-                indicators["EMA"] = ema_windows
-                logger.debug(f"semantic_extractor|extracted_ema|windows={ema_windows}")
+        # EMA windows — prefer explicit cross pattern "9 EMA > 21 EMA"
+        ema_cross = re.search(
+            r"(\d+)\s*ema\s*(?:>|above|over|≥|>=)\s*(\d+)\s*ema",
+            text,
+            re.IGNORECASE,
+        )
+        if ema_cross:
+            fast, slow = int(ema_cross.group(1)), int(ema_cross.group(2))
+            if fast > slow:
+                fast, slow = slow, fast
+            indicators["EMA"] = [fast, slow]
+            logger.debug("semantic_extractor|extracted_ema_cross|windows=%s", indicators["EMA"])
+        else:
+            ema_patterns = [
+                r"ema\s*\(?(\d+)\)?",  # EMA(20) or EMA 20
+                r"(\d+)\s*ema\b",      # 20 EMA
+                r"(?:exponential|exp)\s+moving\s+average\s+(?:of\s+)?(\d+)",
+            ]
+            ema_matches: list[str] = []
+            for pattern in ema_patterns:
+                ema_matches.extend(re.findall(pattern, text, re.IGNORECASE))
+            if ema_matches:
+                ema_windows = sorted(set(int(m) for m in ema_matches if str(m).isdigit()))
+                if ema_windows:
+                    indicators["EMA"] = ema_windows
+                    logger.debug("semantic_extractor|extracted_ema|windows=%s", ema_windows)
 
         # SMA windows
         sma_matches = re.findall(r"sma\s*\(?(\d+)\)?", text, re.IGNORECASE)
@@ -783,3 +892,91 @@ class SemanticExtractor:
         components += 0.1
 
         return score / components if components > 0 else 0.0
+
+    # ── Phase 10 extractors ───────────────────────────────────────────────────
+
+    def _extract_direction(self, text: str) -> str | None:
+        for pattern, direction in self.DIRECTION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return direction
+        return None
+
+    def _extract_gap_filter(self, text: str) -> str | None:
+        for pattern, filter_type in self.GAP_FILTER_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return filter_type
+        return None
+
+    def _extract_consecutive_losses(self, text: str) -> int | None:
+        for pattern in self.CONSECUTIVE_LOSS_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    return int(m.group(1))
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_cooldown(self, text: str) -> int | None:
+        for pattern in self.COOLDOWN_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    return int(m.group(1))
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_spread_bps(self, text: str) -> float | None:
+        for pattern in self.SPREAD_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    return float(m.group(1))
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_confirmation_bars(self, text: str) -> int | None:
+        for pattern in self.CONFIRMATION_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    n = int(m.group(1))
+                    if 1 <= n <= 10:   # sanity bounds
+                        return n
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_rsi_band(self, text: str) -> tuple[float, float] | None:
+        for pattern in self.RSI_BAND_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    lo, hi = float(m.group(1)), float(m.group(2))
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    if 0 <= lo < hi <= 100:
+                        return lo, hi
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_volume_ratio(self, text: str) -> float | None:
+        for pattern in self.VOLUME_RATIO_PATTERNS:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                try:
+                    ratio = float(m.group(1))
+                    if 0.1 <= ratio <= 20.0:   # sanity bounds
+                        return ratio
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def _extract_position_sizing_mode(self, text: str) -> str | None:
+        for pattern, mode in self.POSITION_SIZING_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return mode
+        return None

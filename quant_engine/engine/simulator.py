@@ -41,46 +41,6 @@ from engine.kb_signals import KB_REGISTRY_AVAILABLE, evaluate_kb_signal_rules
 logger = logging.getLogger(__name__)
 
 
-# ─── Direction detection helper ───────────────────────────────────────────────
-
-def _detect_signal_direction(entry_signal_rules: list[dict[str, Any]] | None) -> str:
-    """
-    Detect trade direction from entry signal rules.
-    
-    Returns "LONG" for bullish signals, "SHORT" for bearish signals, "LONG" as default.
-    Checks signal names for bearish/bullish keywords.
-    """
-    if not entry_signal_rules:
-        return "LONG"
-    
-    # Count bullish vs bearish signals
-    bearish_count = 0
-    bullish_count = 0
-    
-    for rule in entry_signal_rules:
-        name = str(rule.get("name", "")).lower()
-        
-        # Bearish indicators
-        if any(keyword in name for keyword in [
-            "bearish", "short", "down", "below", "under", "sell",
-            "breakdown", "falling", "negative", "overbought"
-        ]):
-            bearish_count += 1
-        
-        # Bullish indicators
-        elif any(keyword in name for keyword in [
-            "bullish", "long", "up", "above", "over", "buy",
-            "breakout", "rising", "positive", "oversold"
-        ]):
-            bullish_count += 1
-    
-    # If more bearish signals, it's a SHORT strategy
-    if bearish_count > bullish_count:
-        return "SHORT"
-    
-    return "LONG"
-
-
 # ─── Trade dataclass ──────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -114,8 +74,17 @@ class CandleDiagnostic:
     entry_signal: bool = False
     entry_blocked_daily_cap: bool = False
     entry_blocked_max_trades: bool = False
-    entry_blocked_htf: bool = False     # Phase 5: an HTF entry-gate failed
-    entry_blocked_time_exit: bool = False  # Phase 8b: past the time_exit cutoff
+    entry_blocked_htf: bool = False           # Phase 5: an HTF entry-gate failed
+    entry_blocked_time_exit: bool = False     # Phase 8b: past the time_exit cutoff
+    # Phase 10 gates
+    entry_blocked_entry_window: bool = False  # outside the entry_window
+    entry_blocked_consecutive_losses: bool = False
+    entry_blocked_cooldown: bool = False
+    entry_blocked_spread: bool = False
+    entry_blocked_gap: bool = False
+    entry_blocked_confirmation: bool = False  # signal not yet held N consecutive bars
+    entry_blocked_rsi_band: bool = False
+    entry_blocked_volume_ratio: bool = False
     exit_evaluated: bool = False
     exit_signal: bool = False
     stop_hit: bool = False
@@ -123,20 +92,28 @@ class CandleDiagnostic:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "index":                    self.index,
-            "timestamp":                self.timestamp,
-            "warm_up_skip":             self.warm_up_skip,
-            "in_trade":                 self.in_trade,
-            "entry_evaluated":          self.entry_evaluated,
-            "entry_signal":             self.entry_signal,
-            "entry_blocked_daily_cap":  self.entry_blocked_daily_cap,
-            "entry_blocked_max_trades": self.entry_blocked_max_trades,
-            "entry_blocked_htf":        self.entry_blocked_htf,
-            "entry_blocked_time_exit":  self.entry_blocked_time_exit,
-            "exit_evaluated":           self.exit_evaluated,
-            "exit_signal":              self.exit_signal,
-            "stop_hit":                 self.stop_hit,
-            "tp_hit":                   self.tp_hit,
+            "index":                           self.index,
+            "timestamp":                       self.timestamp,
+            "warm_up_skip":                    self.warm_up_skip,
+            "in_trade":                        self.in_trade,
+            "entry_evaluated":                 self.entry_evaluated,
+            "entry_signal":                    self.entry_signal,
+            "entry_blocked_daily_cap":         self.entry_blocked_daily_cap,
+            "entry_blocked_max_trades":        self.entry_blocked_max_trades,
+            "entry_blocked_htf":               self.entry_blocked_htf,
+            "entry_blocked_time_exit":         self.entry_blocked_time_exit,
+            "entry_blocked_entry_window":      self.entry_blocked_entry_window,
+            "entry_blocked_consecutive_losses":self.entry_blocked_consecutive_losses,
+            "entry_blocked_cooldown":          self.entry_blocked_cooldown,
+            "entry_blocked_spread":            self.entry_blocked_spread,
+            "entry_blocked_gap":               self.entry_blocked_gap,
+            "entry_blocked_confirmation":      self.entry_blocked_confirmation,
+            "entry_blocked_rsi_band":          self.entry_blocked_rsi_band,
+            "entry_blocked_volume_ratio":      self.entry_blocked_volume_ratio,
+            "exit_evaluated":                  self.exit_evaluated,
+            "exit_signal":                     self.exit_signal,
+            "stop_hit":                        self.stop_hit,
+            "tp_hit":                          self.tp_hit,
         }
 
 
@@ -295,61 +272,6 @@ def _compute_initial_stop_long(
     return entry_price * (1.0 - fallback_pct / 100.0)
 
 
-def _compute_initial_stop_short(
-    spec: dict | None,
-    *,
-    fallback_pct: float,
-    entry_price: float,
-    entry_index: int,
-    arrays: dict[str, np.ndarray],
-    high_arr: np.ndarray,
-    day_ordinals: np.ndarray,
-) -> float:
-    """Return the initial stop price for a SHORT entry.
-    For shorts, stop is ABOVE entry price (exit when price rises too much)."""
-    if spec is None:
-        return entry_price * (1.0 + fallback_pct / 100.0)
-
-    sl_type = spec.get("type")
-
-    if sl_type == "percent":
-        return entry_price * (1.0 + float(spec["pct"]) / 100.0)
-
-    if sl_type == "structural":
-        anchor = spec.get("anchor")
-        padding_pct = float(spec.get("padding_pct", 0.0))
-        anchor_price: float
-        if anchor == "opening_range_high":
-            anchor_price = _session_open_high(
-                high_arr, day_ordinals, entry_index, int(spec.get("opening_bars", 3)),
-            )
-        elif anchor == "opening_range_low":
-            # Reserved for longs; for a short entry a downside anchor is nonsensical
-            return entry_price * (1.0 + fallback_pct / 100.0)
-        elif anchor == "prev_n_bar_high":
-            window = int(spec.get("window", 5))
-            start = max(0, entry_index - window)
-            anchor_price = float(np.max(high_arr[start:entry_index])) if entry_index > start else float(high_arr[entry_index])
-        elif anchor == "prev_n_bar_low":
-            return entry_price * (1.0 + fallback_pct / 100.0)
-        else:
-            return entry_price * (1.0 + fallback_pct / 100.0)
-        # padding pulls the SL slightly *above* the anchor for shorts
-        return float(anchor_price) * (1.0 + padding_pct / 100.0)
-
-    if sl_type == "atr":
-        window = int(spec["window"])
-        atr_col = arrays.get(f"ATR_{window}")
-        if atr_col is None or entry_index >= len(atr_col):
-            return entry_price * (1.0 + fallback_pct / 100.0)
-        atr_value = float(atr_col[entry_index])
-        if atr_value != atr_value or atr_value <= 0:        # NaN check
-            return entry_price * (1.0 + fallback_pct / 100.0)
-        return entry_price + float(spec["multiplier"]) * atr_value
-
-    return entry_price * (1.0 + fallback_pct / 100.0)
-
-
 def _compute_trailing_floor_long(
     spec: dict | None,
     *,
@@ -398,58 +320,6 @@ def _compute_trailing_floor_long(
         return ema_value
 
     return float("-inf")
-
-
-def _compute_trailing_ceiling_short(
-    spec: dict | None,
-    *,
-    entry_price: float,
-    current_index: int,
-    arrays: dict[str, np.ndarray],
-    lowest_low_since_entry: float,
-    current_close: float,
-) -> float:
-    """Return today's trailing-ceiling candidate for a SHORT trade.
-    Returns +inf when trailing isn't applicable yet so it can't override the
-    initial SL (the caller takes min(initial_stop, this_value)).
-    For shorts, we trail DOWN as price falls (profit increases).
-    """
-    if spec is None:
-        return float("inf")
-
-    activate = float(spec.get("activate_after_pct", 0.0))
-    if activate > 0.0:
-        # For shorts, profit = entry - current (price going down is good)
-        gain_pct = ((entry_price - current_close) / entry_price) * 100.0
-        if gain_pct < activate:
-            return float("inf")
-
-    ts_type = spec.get("type")
-
-    if ts_type == "percent":
-        return lowest_low_since_entry * (1.0 + float(spec["distance_pct"]) / 100.0)
-
-    if ts_type in {"atr", "chandelier"}:
-        window = int(spec["window"])
-        atr_col = arrays.get(f"ATR_{window}")
-        if atr_col is None or current_index >= len(atr_col):
-            return float("inf")
-        atr_value = float(atr_col[current_index])
-        if atr_value != atr_value or atr_value <= 0:
-            return float("inf")
-        return lowest_low_since_entry + float(spec["multiplier"]) * atr_value
-
-    if ts_type == "ema":
-        window = int(spec["window"])
-        ema_col = arrays.get(f"EMA_{window}")
-        if ema_col is None or current_index >= len(ema_col):
-            return float("inf")
-        ema_value = float(ema_col[current_index])
-        if ema_value != ema_value:
-            return float("inf")
-        return ema_value
-
-    return float("inf")
 
 
 # ─── Session-day helpers ───────────────────────────────────────────────────────
@@ -522,9 +392,22 @@ def simulate_trades(
     # and blocks new entries past that time. Loader pre-computes
     # `utc_minutes_of_day` so this hot-path stays a plain int compare.
     time_exit_spec: dict[str, Any] | None = None,
-    # Phase 10 — trade direction: "LONG" | "SHORT" | "AUTO"
-    # When "AUTO", the simulator detects direction from entry signal rules.
-    trade_direction: str = "AUTO",
+    # Phase 10 — entry window. Blocks new entries outside the UTC window
+    # (does NOT force-exit open trades, unlike time_exit_spec).
+    entry_window_start_utc: int | None = None,
+    entry_window_end_utc: int | None = None,
+    # Phase 10 — risk circuit breakers
+    max_consecutive_losses: int = 0,      # 0 = disabled
+    cooldown_bars_after_loss: int = 0,    # 0 = disabled
+    cooldown_bars_after_profit: int = 0,  # 0 = disabled
+    # Phase 10 — entry gate controls
+    max_spread_bps: float = 0.0,          # 0 = disabled
+    gap_filter: str = "none",             # "none" | "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+    gap_threshold_pct: float = 0.5,
+    entry_confirmation_bars: int = 1,     # signal must hold N consecutive bars
+    rsi_entry_band_min: float | None = None,
+    rsi_entry_band_max: float | None = None,
+    volume_ratio_threshold: float | None = None,  # volume >= N × 20-bar avg to enter
 ) -> tuple[list[Trade], list[dict]]:
     """
     Simulate trades on the supplied OHLCV DataFrame.
@@ -547,23 +430,11 @@ def simulate_trades(
     stt_entry_pct = 0.0                   if is_intraday else stt_delivery_pct
     stt_exit_pct  = stt_intraday_sell_pct if is_intraday else stt_delivery_pct
 
-    # Detect trade direction from entry signals if set to AUTO
-    if trade_direction.upper() == "AUTO":
-        detected_direction = _detect_signal_direction(entry_signal_rules)
-        logger.info(
-            "Auto-detected trade direction from entry signals | direction=%s",
-            detected_direction,
-        )
-    else:
-        detected_direction = trade_direction.upper()
-    
-    is_short_strategy = detected_direction == "SHORT"
-
     logger.info(
         "Starting trade simulation | objective=%s candles=%s warm_up=%s stop_loss_pct=%.4f "
         "take_profit_pct=%.4f max_holding_candles=%s daily_loss_cap_pct=%.2f "
         "max_trades_per_day=%s slippage_bps=%.2f commission_bps=%.2f "
-        "stt_entry_pct=%.4f stt_exit_pct=%.4f entry_mode=%s exit_mode=%s trade_direction=%s",
+        "stt_entry_pct=%.4f stt_exit_pct=%.4f entry_mode=%s exit_mode=%s",
         objective, len(df), warm_up_candles,
         stop_loss_pct, take_profit_pct, max_holding_candles,
         daily_loss_cap_pct, max_trades_per_day,
@@ -571,7 +442,6 @@ def simulate_trades(
         stt_entry_pct, stt_exit_pct,
         entry_evaluation_mode,
         exit_evaluation_mode,
-        detected_direction,
     )
 
     # ── Fix 4: extract numpy arrays once, drop pandas inside the bar loop ─────
@@ -647,11 +517,48 @@ def simulate_trades(
     _current_session_ord: int = -1
     _portfolio_balance_factor: float = 1.0
 
+    # Phase 10 — cross-session state for risk circuit breakers
+    _consecutive_losses: int = 0        # running count of consecutive losing trades
+    _loss_cooldown_until: int = -1      # bar index before which new entries are blocked (after loss)
+    _profit_cooldown_until: int = -1    # bar index before which new entries are blocked (after profit)
+    # Phase 10 — per-session gap state: if gap_filter blocks a session, mark it so
+    # the block applies for the whole session (reset on new session).
+    _session_gap_blocked: bool = False
+    _session_prev_close: float = 0.0    # close of the last bar of the previous session
+    # Phase 10 — confirmation counter: consecutive bars the entry signal has been True
+    _signal_consecutive_bars: int = 0
+
+    # Phase 10 — pre-compute volume arrays once to avoid pandas in the hot loop.
+    if "volume" in df.columns:
+        _vol_arr: np.ndarray | None = df["volume"].astype(float).to_numpy()
+        if volume_ratio_threshold is not None:
+            _vol_avg_arr: np.ndarray | None = (
+                df["volume"].astype(float).rolling(20, min_periods=5).mean().to_numpy()
+            )
+        else:
+            _vol_avg_arr = None
+    else:
+        _vol_arr = None
+        _vol_avg_arr = None
+
+    # Phase 10 — pre-compute RSI_14 array if the RSI band gate is active.
+    # Check df for the column added by add_all_indicators.
+    _rsi_arr: np.ndarray | None = None
+    if rsi_entry_band_min is not None or rsi_entry_band_max is not None:
+        rsi_col = next(
+            (c for c in df.columns if c.upper().startswith("RSI_")),
+            None,
+        )
+        if rsi_col:
+            _rsi_arr = df[rsi_col].to_numpy(dtype=float)
+
     def _reset_session_state(session_ord: int) -> None:
         nonlocal _session_cumulative_pnl_pct, _session_trades_today, _current_session_ord
+        nonlocal _session_gap_blocked
         _session_cumulative_pnl_pct = 0.0
         _session_trades_today       = 0
         _current_session_ord        = session_ord
+        _session_gap_blocked        = False  # re-evaluate gap at start of each new session
 
     def _daily_cap_breached() -> bool:
         """True if today's cumulative realized losses exceed the daily cap."""
@@ -685,7 +592,23 @@ def simulate_trades(
 
         # Session rollover (resets intraday circuit-breaker counters at start of new day)
         if is_intraday and bar_day_ord != _current_session_ord:
+            # Phase 10 — capture prev-session close for gap filter before resetting
+            if _current_session_ord >= 0:
+                _session_prev_close = float(close_arr[i - 1]) if i > 0 else 0.0
             _reset_session_state(bar_day_ord)
+
+            # Phase 10 — gap filter: compare today's open to previous session's close
+            if gap_filter != "none" and _session_prev_close > 0 and i < n_rows:
+                today_open = float(open_arr[i])
+                gap_pct = (today_open - _session_prev_close) / _session_prev_close * 100.0
+                gap_up   = gap_pct >  gap_threshold_pct
+                gap_down = gap_pct < -gap_threshold_pct
+                if gap_filter == "ignore_gap_up"   and gap_up:
+                    _session_gap_blocked = True
+                elif gap_filter == "ignore_gap_down" and gap_down:
+                    _session_gap_blocked = True
+                elif gap_filter == "ignore_both"    and (gap_up or gap_down):
+                    _session_gap_blocked = True
 
         if not in_trade:
             # Cannot enter a trade on the very last candle (need next bar's open to fill)
@@ -709,7 +632,19 @@ def simulate_trades(
                 entry_signal = evaluate_condition(entry_condition, df, i)
             diag.entry_signal = entry_signal
 
+            # Phase 10 — confirmation counter: track consecutive bars with entry_signal True
             if entry_signal:
+                _signal_consecutive_bars += 1
+            else:
+                _signal_consecutive_bars = 0
+
+            # Signal fired but hasn't held long enough yet — flag and skip gate checks
+            if entry_signal and _signal_consecutive_bars < entry_confirmation_bars:
+                diag.entry_blocked_confirmation = True
+                diagnostics.append(diag)
+                continue
+
+            if entry_signal and _signal_consecutive_bars >= entry_confirmation_bars:
                 cap_blocked    = _daily_cap_breached()
                 trades_blocked = _max_trades_breached()
                 # Phase 5: every HTF gate must pass on its most recently
@@ -723,66 +658,101 @@ def simulate_trades(
                     time_exit_cutoff_minutes is not None
                     and int(bar_utc_minutes[i]) >= time_exit_cutoff_minutes
                 )
-                diag.entry_blocked_daily_cap   = cap_blocked
-                diag.entry_blocked_max_trades  = trades_blocked
-                diag.entry_blocked_htf         = htf_blocked
-                diag.entry_blocked_time_exit   = time_exit_blocked
+                # Phase 10: entry window gate (block outside defined trading window)
+                entry_window_blocked = False
+                if entry_window_start_utc is not None or entry_window_end_utc is not None:
+                    bar_min = int(bar_utc_minutes[i])
+                    if entry_window_start_utc is not None and bar_min < entry_window_start_utc:
+                        entry_window_blocked = True
+                    if entry_window_end_utc is not None and bar_min > entry_window_end_utc:
+                        entry_window_blocked = True
+
+                # Phase 10: consecutive-loss circuit breaker
+                consec_loss_blocked = (
+                    max_consecutive_losses > 0
+                    and _consecutive_losses >= max_consecutive_losses
+                )
+                # Phase 10: cooldown gates
+                cooldown_blocked = (
+                    i < _loss_cooldown_until or i < _profit_cooldown_until
+                )
+                # Phase 10: spread gate — estimate spread as (high - low) / close * 10000
+                spread_blocked = False
+                if max_spread_bps > 0:
+                    bar_close = float(close_arr[i])
+                    if bar_close > 0:
+                        estimated_spread_bps = (float(high_arr[i]) - float(low_arr[i])) / bar_close * 10_000.0
+                        spread_blocked = estimated_spread_bps > max_spread_bps
+
+                # Phase 10: gap filter gate
+                gap_blocked = _session_gap_blocked
+
+                # Phase 10: RSI band gate
+                rsi_band_blocked = False
+                if _rsi_arr is not None:
+                    rsi_val = float(_rsi_arr[i]) if not np.isnan(_rsi_arr[i]) else None
+                    if rsi_val is not None:
+                        if rsi_entry_band_min is not None and rsi_val < rsi_entry_band_min:
+                            rsi_band_blocked = True
+                        if rsi_entry_band_max is not None and rsi_val > rsi_entry_band_max:
+                            rsi_band_blocked = True
+
+                # Phase 10: volume ratio gate
+                vol_ratio_blocked = False
+                if _vol_arr is not None and _vol_avg_arr is not None and volume_ratio_threshold is not None:
+                    avg_vol = float(_vol_avg_arr[i])
+                    if avg_vol > 0:
+                        current_vol = float(_vol_arr[i])
+                        if current_vol < volume_ratio_threshold * avg_vol:
+                            vol_ratio_blocked = True
+
+                diag.entry_blocked_daily_cap          = cap_blocked
+                diag.entry_blocked_max_trades         = trades_blocked
+                diag.entry_blocked_htf                = htf_blocked
+                diag.entry_blocked_time_exit          = time_exit_blocked
+                diag.entry_blocked_entry_window       = entry_window_blocked
+                diag.entry_blocked_consecutive_losses = consec_loss_blocked
+                diag.entry_blocked_cooldown           = cooldown_blocked
+                diag.entry_blocked_spread             = spread_blocked
+                diag.entry_blocked_gap                = gap_blocked
+                diag.entry_blocked_rsi_band           = rsi_band_blocked
+                diag.entry_blocked_volume_ratio       = vol_ratio_blocked
 
                 # Intraday entries must be fillable within the same session.
                 if (not cap_blocked and not trades_blocked and not htf_blocked
-                        and not time_exit_blocked and not is_session_last_bar):
+                        and not time_exit_blocked and not entry_window_blocked
+                        and not consec_loss_blocked and not cooldown_blocked
+                        and not spread_blocked and not gap_blocked
+                        and not rsi_band_blocked and not vol_ratio_blocked
+                        and not is_session_last_bar):
                     # Fill at next bar's open price (realistic execution)
                     next_open = float(open_arr[i + 1])
-                    
-                    # For LONG: entry price increases by costs
-                    # For SHORT: entry price decreases by costs (we're selling)
-                    if is_short_strategy:
-                        entry_price = _apply_exit_costs(
-                            next_open, slippage_bps, commission_bps, stt_entry_pct
-                        )
-                    else:
-                        entry_price = _apply_entry_costs(
-                            next_open, slippage_bps, commission_bps, stt_entry_pct
-                        )
-                    
+                    entry_price = _apply_entry_costs(
+                        next_open, slippage_bps, commission_bps, stt_entry_pct
+                    )
                     entry_index = i + 1
                     entry_date  = str(timestamps_iso[i + 1])
                     in_trade    = True
                     diag.in_trade = True
-                    
                     # Reset MAE/MFE accumulators for this new trade
                     _trade_min_low  = next_open
                     _trade_max_high = next_open
-                    
                     # Phase 3: lock in the initial stop and reset trailing.
                     # Computed once here at entry so we don't re-evaluate
                     # opening_range / ATR-at-entry on every bar.
-                    if is_short_strategy:
-                        _initial_stop_price = _compute_initial_stop_short(
-                            stop_loss_spec,
-                            fallback_pct=stop_loss_pct,
-                            entry_price=entry_price,
-                            entry_index=entry_index,
-                            arrays=arrays,
-                            high_arr=high_arr,
-                            day_ordinals=day_ordinals,
-                        )
-                        _trailing_floor = float("inf")  # For shorts, ceiling starts at +inf
-                    else:
-                        _initial_stop_price = _compute_initial_stop_long(
-                            stop_loss_spec,
-                            fallback_pct=stop_loss_pct,
-                            entry_price=entry_price,
-                            entry_index=entry_index,
-                            arrays=arrays,
-                            low_arr=low_arr,
-                            day_ordinals=day_ordinals,
-                        )
-                        _trailing_floor = float("-inf")
-                    
+                    _initial_stop_price = _compute_initial_stop_long(
+                        stop_loss_spec,
+                        fallback_pct=stop_loss_pct,
+                        entry_price=entry_price,
+                        entry_index=entry_index,
+                        arrays=arrays,
+                        low_arr=low_arr,
+                        day_ordinals=day_ordinals,
+                    )
+                    _trailing_floor = float("-inf")
                     logger.debug(
-                        "Entered trade | symbol=%s side=%s signal_index=%s entry_index=%s entry_price=%.4f initial_stop=%.4f",
-                        symbol, "SHORT" if is_short_strategy else "LONG", i, entry_index, entry_price, _initial_stop_price,
+                        "Entered trade | symbol=%s signal_index=%s entry_index=%s entry_price=%.4f initial_stop=%.4f",
+                        symbol, i, entry_index, entry_price, _initial_stop_price,
                     )
 
             diagnostics.append(diag)
@@ -802,55 +772,34 @@ def simulate_trades(
         if low_price  < _trade_min_low:  _trade_min_low  = low_price
         if high_price > _trade_max_high: _trade_max_high = high_price
 
-        # Phase 3 — effective stop calculation differs for LONG vs SHORT
-        if is_short_strategy:
-            # SHORT: stop is ABOVE entry (exit when price rises too much)
-            # Trailing ceiling moves DOWN as price falls (profit increases)
-            candidate_ceiling = _compute_trailing_ceiling_short(
-                trailing_stop_spec,
-                entry_price=entry_price,
-                current_index=i,
-                arrays=arrays,
-                lowest_low_since_entry=_trade_min_low,
-                current_close=close_price,
-            )
-            if candidate_ceiling < _trailing_floor:  # For shorts, ceiling trails DOWN
-                _trailing_floor = candidate_ceiling
-            
-            # Effective stop is the LOWER of initial stop and trailing ceiling
-            stop_price = min(_initial_stop_price, _trailing_floor)
-            take_profit_price = entry_price * (1 - take_profit_pct / 100.0)
-            
-            # For SHORT: stop hit when price goes ABOVE stop, TP when price goes BELOW target
-            stop_hit        = high_price >= stop_price
-            take_profit_hit = low_price  <= take_profit_price
-        else:
-            # LONG: stop is BELOW entry (exit when price falls too much)
-            # Trailing floor moves UP as price rises (profit increases)
-            candidate_floor = _compute_trailing_floor_long(
-                trailing_stop_spec,
-                entry_price=entry_price,
-                current_index=i,
-                arrays=arrays,
-                highest_high_since_entry=_trade_max_high,
-                current_close=close_price,
-            )
-            if candidate_floor > _trailing_floor:
-                _trailing_floor = candidate_floor
-            
-            # Effective stop is the HIGHER of initial stop and trailing floor
-            stop_price = max(_initial_stop_price, _trailing_floor)
-            take_profit_price = entry_price * (1 + take_profit_pct / 100.0)
-            
-            # For LONG: stop hit when price goes BELOW stop, TP when price goes ABOVE target
-            stop_hit        = low_price  <= stop_price
-            take_profit_hit = high_price >= take_profit_price
-        
-        is_trailing_exit = (
-            stop_hit and 
-            ((is_short_strategy and _trailing_floor < _initial_stop_price) or
-             (not is_short_strategy and _trailing_floor > _initial_stop_price))
+        # Phase 3 — effective stop is the higher of the initial SL (locked at
+        # entry) and the trailing floor (running max since entry, only when
+        # a trailing spec is configured). Ratchet means the floor never moves
+        # backwards even if subsequent candles are lower.
+        candidate_floor = _compute_trailing_floor_long(
+            trailing_stop_spec,
+            entry_price=entry_price,
+            current_index=i,
+            arrays=arrays,
+            highest_high_since_entry=_trade_max_high,
+            current_close=close_price,
         )
+        if candidate_floor > _trailing_floor:
+            _trailing_floor = candidate_floor
+
+        # Effective stop is the higher of the initial SL and the trailing floor.
+        # Trailing-floor candidates use intra-bar highs, so the floor can
+        # legitimately sit between the current bar's low and the bar's high —
+        # in that case the stop fires *this* bar at the floor price (worst-case
+        # fill, mirrors the static-SL code path below).
+        stop_price = max(_initial_stop_price, _trailing_floor)
+        take_profit_price = entry_price * (1 + take_profit_pct / 100.0)
+
+        stop_hit        = low_price  <= stop_price
+        take_profit_hit = high_price >= take_profit_price
+        # A trailing-stop exit and a static-SL exit are functionally the same
+        # mechanic, but the user wants to know which one fired in the report.
+        is_trailing_exit = stop_hit and _trailing_floor > _initial_stop_price
 
         diag.stop_hit = stop_hit
         diag.tp_hit   = take_profit_hit
@@ -862,24 +811,15 @@ def simulate_trades(
         # ── Worst-case rule: if both stop AND TP touched on the same bar ──────
         # We assume the stop was hit first (conservative for the trader).
         if stop_hit and take_profit_hit:
-            if is_short_strategy:
-                exit_price = _apply_entry_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
-            else:
-                exit_price = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            exit_price  = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TRAILING_STOP_AND_TAKE_PROFIT_SAME_BAR" if is_trailing_exit else "STOP_LOSS_AND_TAKE_PROFIT_SAME_BAR"
 
         elif stop_hit:
-            if is_short_strategy:
-                exit_price = _apply_entry_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
-            else:
-                exit_price = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
+            exit_price  = _apply_exit_costs(stop_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TRAILING_STOP" if is_trailing_exit else "STOP_LOSS"
 
         elif take_profit_hit:
-            if is_short_strategy:
-                exit_price = _apply_entry_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
-            else:
-                exit_price = _apply_exit_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
+            exit_price  = _apply_exit_costs(take_profit_price, slippage_bps, commission_bps, stt_exit_pct)
             exit_reason = "TAKE_PROFIT"
 
         else:
@@ -895,20 +835,7 @@ def simulate_trades(
                     exit_signal = evaluate_kb_signal_rules(exit_signal_rules, df, i)
                     diag.exit_signal = exit_signal
             elif exit_condition or compiled_exit is not None:
-                # For SHORT: profit when price goes DOWN, loss when price goes UP
-                if is_short_strategy:
-                    profit_pct = ((entry_price - close_price) / entry_price) * 100.0
-                    loss_pct   = -profit_pct
-                else:
-                    profit_pct = ((close_price - entry_price) / entry_price) * 100.0
-                    loss_pct   = -profit_pct
-                
-                variables = {
-                    "PROFIT":             profit_pct,
-                    "LOSS":               loss_pct,
-                    "TAKE_PROFIT_TARGET": take_profit_pct,
-                    "STOP_LOSS_TARGET":   stop_loss_pct,
-                }
+                variables = _trade_variables(entry_price, close_price, stop_loss_pct, take_profit_pct)
                 diag.exit_evaluated = True
                 if use_fast_exit:
                     exit_signal = compiled_exit.evaluate_arrays(arrays, n_rows, i, variables=variables)
@@ -920,48 +847,28 @@ def simulate_trades(
 
             if exit_signal:
                 if is_session_last_bar or i + 1 >= n_rows:
-                    if is_short_strategy:
-                        exit_price = _apply_entry_costs(
-                            close_price, slippage_bps, commission_bps, stt_exit_pct
-                        )
-                    else:
-                        exit_price = _apply_exit_costs(
-                            close_price, slippage_bps, commission_bps, stt_exit_pct
-                        )
+                    exit_price = _apply_exit_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
                     exit_date = timestamps_iso[i]
                 else:
-                    if is_short_strategy:
-                        exit_price = _apply_entry_costs(
-                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                        )
-                    else:
-                        exit_price = _apply_exit_costs(
-                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                        )
+                    exit_price = _apply_exit_costs(
+                        float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                    )
                     exit_date = timestamps_iso[i + 1]
                 exit_reason = "EXIT_SIGNAL"
 
             # Check max holding candles (time-based stop)
             if exit_price is None and max_holding_candles is not None and holding_candles >= max_holding_candles:
                 if is_session_last_bar or i + 1 >= n_rows:
-                    if is_short_strategy:
-                        exit_price = _apply_entry_costs(
-                            close_price, slippage_bps, commission_bps, stt_exit_pct
-                        )
-                    else:
-                        exit_price = _apply_exit_costs(
-                            close_price, slippage_bps, commission_bps, stt_exit_pct
-                        )
+                    exit_price = _apply_exit_costs(
+                        close_price, slippage_bps, commission_bps, stt_exit_pct
+                    )
                     exit_date = timestamps_iso[i]
                 else:
-                    if is_short_strategy:
-                        exit_price = _apply_entry_costs(
-                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                        )
-                    else:
-                        exit_price = _apply_exit_costs(
-                            float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
-                        )
+                    exit_price = _apply_exit_costs(
+                        float(open_arr[i + 1]), slippage_bps, commission_bps, stt_exit_pct
+                    )
                     exit_date = timestamps_iso[i + 1]
                 exit_reason = "MAX_HOLDING"
 
@@ -975,58 +882,35 @@ def simulate_trades(
                 and time_exit_cutoff_minutes is not None
                 and int(bar_utc_minutes[i]) >= time_exit_cutoff_minutes
             ):
-                if is_short_strategy:
-                    exit_price = _apply_entry_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
-                else:
-                    exit_price = _apply_exit_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
+                exit_price = _apply_exit_costs(
+                    close_price, slippage_bps, commission_bps, stt_exit_pct
+                )
                 exit_date = timestamps_iso[i]
                 exit_reason = "TIME_EXIT"
 
             if exit_price is None and is_session_last_bar:
-                if is_short_strategy:
-                    exit_price = _apply_entry_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
-                else:
-                    exit_price = _apply_exit_costs(
-                        close_price, slippage_bps, commission_bps, stt_exit_pct
-                    )
+                exit_price = _apply_exit_costs(
+                    close_price, slippage_bps, commission_bps, stt_exit_pct
+                )
                 exit_date = timestamps_iso[i]
                 exit_reason = "SESSION_END"
 
         # ── Book the trade ───────────────────────────────────────────────────
         if exit_price is not None and exit_reason is not None:
-            # P&L calculation differs for LONG vs SHORT
-            if is_short_strategy:
-                # SHORT: profit when exit < entry (price went down)
-                pnl_inr = entry_price - exit_price      # absolute per-unit P&L in ₹
-                pnl_abs = pnl_inr / entry_price         # fractional return (for compounding)
-                pnl_pct = pnl_abs * 100.0
-                
-                # MAE: worst unrealised loss = (max_high - entry) / entry * 100  (≤ 0 for short)
-                # MFE: best unrealised gain  = (entry - min_low) / entry * 100   (≥ 0 for short)
-                mae_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
-                mfe_pct = ((entry_price - _trade_min_low) / entry_price * 100.0) if entry_price else 0.0
-            else:
-                # LONG: profit when exit > entry (price went up)
-                pnl_inr = exit_price - entry_price      # absolute per-unit P&L in ₹
-                pnl_abs = pnl_inr / entry_price         # fractional return (for compounding)
-                pnl_pct = pnl_abs * 100.0
-                
-                # MAE: worst unrealised loss = (min_low - entry) / entry * 100  (≤ 0 for long)
-                # MFE: best unrealised gain  = (max_high - entry) / entry * 100 (≥ 0 for long)
-                mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
-                mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
+            pnl_inr = exit_price - entry_price          # absolute per-unit P&L in ₹
+            pnl_abs = pnl_inr / entry_price             # fractional return (for compounding)
+            pnl_pct = pnl_abs * 100.0
+
+            # MAE: worst unrealised loss = (min_low - entry) / entry * 100  (≤ 0 for long)
+            # MFE: best unrealised gain  = (max_high - entry) / entry * 100 (≥ 0 for long)
+            mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
+            mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
 
             trades.append(Trade(
                 entry_date=entry_date,
                 exit_date=exit_date,
                 symbol=symbol,
-                side="SHORT" if is_short_strategy else "LONG",
+                side="LONG",
                 entry_price=round(entry_price, 4),
                 exit_price=round(exit_price, 4),
                 pnl_pct=round(pnl_pct, 4),
@@ -1039,8 +923,8 @@ def simulate_trades(
             ))
 
             logger.debug(
-                "Exited trade | symbol=%s side=%s exit_reason=%s exit_price=%.4f pnl_pct=%.4f holding_candles=%s",
-                symbol, "SHORT" if is_short_strategy else "LONG", exit_reason, exit_price, pnl_pct, holding_candles,
+                "Exited trade | symbol=%s exit_reason=%s exit_price=%.4f pnl_pct=%.4f holding_candles=%s",
+                symbol, exit_reason, exit_price, pnl_pct, holding_candles,
             )
 
             if is_intraday:
@@ -1048,6 +932,20 @@ def simulate_trades(
                 _session_trades_today       += 1
 
             _portfolio_balance_factor *= (1.0 + pnl_abs)
+
+            # Phase 10 — update consecutive loss counter + cooldown timers
+            trade_was_loss = pnl_pct < 0
+            if trade_was_loss:
+                _consecutive_losses += 1
+                if cooldown_bars_after_loss > 0:
+                    _loss_cooldown_until = i + cooldown_bars_after_loss
+            else:
+                _consecutive_losses = 0
+                if cooldown_bars_after_profit > 0:
+                    _profit_cooldown_until = i + cooldown_bars_after_profit
+
+            # Reset confirmation counter on trade exit so next entry needs fresh confirmation
+            _signal_consecutive_bars = 0
 
             in_trade    = False
             entry_price = 0.0
@@ -1058,30 +956,19 @@ def simulate_trades(
 
     # ── Force-close open trade at end of data ─────────────────────────────────
     if in_trade and entry_index >= 0:
-        if is_short_strategy:
-            last_close = _apply_entry_costs(
-                float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
-            )
-            pnl_inr = entry_price - last_close
-            pnl_abs = pnl_inr / entry_price
-            pnl_pct = pnl_abs * 100.0
-            mae_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
-            mfe_pct = ((entry_price - _trade_min_low) / entry_price * 100.0) if entry_price else 0.0
-        else:
-            last_close = _apply_exit_costs(
-                float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
-            )
-            pnl_inr = last_close - entry_price
-            pnl_abs = pnl_inr / entry_price
-            pnl_pct = pnl_abs * 100.0
-            mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
-            mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
-        
+        last_close = _apply_exit_costs(
+            float(close_arr[-1]), slippage_bps, commission_bps, stt_exit_pct
+        )
+        pnl_inr = last_close - entry_price
+        pnl_abs = pnl_inr / entry_price
+        pnl_pct = pnl_abs * 100.0
+        mae_pct = ((_trade_min_low  - entry_price) / entry_price * 100.0) if entry_price else 0.0
+        mfe_pct = ((_trade_max_high - entry_price) / entry_price * 100.0) if entry_price else 0.0
         trades.append(Trade(
             entry_date=entry_date,
             exit_date=str(timestamps_iso[-1]),
             symbol=symbol,
-            side="SHORT" if is_short_strategy else "LONG",
+            side="LONG",
             entry_price=round(entry_price, 4),
             exit_price=round(last_close, 4),
             pnl_pct=round(pnl_pct, 4),
@@ -1092,10 +979,7 @@ def simulate_trades(
             mae_pct=round(mae_pct, 4),
             mfe_pct=round(mfe_pct, 4),
         ))
-        logger.debug(
-            "Force-closed open trade at end of data | symbol=%s side=%s pnl_pct=%.4f",
-            symbol, "SHORT" if is_short_strategy else "LONG", pnl_pct
-        )
+        logger.debug("Force-closed open trade at end of data | symbol=%s pnl_pct=%.4f", symbol, pnl_pct)
 
     diag_summary = _summarise_diagnostics(diagnostics)
     logger.info(

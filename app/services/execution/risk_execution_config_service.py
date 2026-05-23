@@ -412,6 +412,129 @@ async def upsert_risk_execution_config(
     return snapshot
 
 
+def _derive_max_trades_from_builder(builder: Any) -> int:
+    """Parse max trades per day from builder objective / max_trade label."""
+    objective = str(getattr(builder, "objective", None) or "positional").lower()
+    if objective != "intraday":
+        return 0
+    max_trade_str = str(getattr(builder, "max_trade", None) or "")
+    match = re.search(r"(\d+)\s*trade", max_trade_str, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    plain_match = re.search(r"^\s*(\d+)\s*$", max_trade_str)
+    if plain_match:
+        return int(plain_match.group(1))
+    return 0
+
+
+def build_risk_execution_values_from_builder(
+    builder: Any,
+    base_snapshot: RiskExecutionConfigSnapshot | None = None,
+) -> dict[str, Any]:
+    """Merge builder RMS + risk_execution_config over DB defaults (builder wins)."""
+    base = base_snapshot or _build_snapshot(
+        config_scope=GLOBAL_SCOPE,
+        scope_id=GLOBAL_SCOPE_ID,
+        values=dict(DEFAULT_SEED_VALUES),
+    )
+    risk_cfg = dict(getattr(builder, "risk_execution_config", None) or {})
+
+    stop_loss_pct = (
+        float(builder.stop_loss)
+        if getattr(builder, "stop_loss", None) is not None
+        else float(risk_cfg.get("stop_loss_pct", base.stop_loss_pct))
+    )
+    take_profit_pct = (
+        float(builder.take_profit)
+        if getattr(builder, "take_profit", None) is not None
+        else float(risk_cfg.get("take_profit_pct", base.take_profit_pct))
+    )
+    daily_loss_cap = (
+        float(builder.daily_loss_cap)
+        if getattr(builder, "daily_loss_cap", None) is not None
+        else float(risk_cfg.get("daily_loss_cap", base.daily_loss_cap))
+    )
+    max_trades = int(risk_cfg.get("max_trades", base.max_trades))
+    derived = _derive_max_trades_from_builder(builder)
+    if derived > 0:
+        max_trades = derived
+    elif getattr(builder, "max_consecutive_losses", None) is not None:
+        # Intraday circuit breaker often implies low trade count
+        max_trades = max(max_trades, int(builder.max_consecutive_losses))
+
+    ew_start = getattr(builder, "entry_window_start", None)
+    ew_end = getattr(builder, "entry_window_end", None)
+    if ew_start and ew_end:
+        trading_window = f"{ew_start} - {ew_end}"
+    else:
+        trading_window = str(risk_cfg.get("trading_window", base.trading_window))
+
+    position_sizing = str(risk_cfg.get("position_sizing", base.position_sizing))
+    ps_mode = getattr(builder, "position_sizing_mode", None)
+    if ps_mode:
+        position_sizing = str(ps_mode).replace("_", " ").title()
+
+    # Per-trade risk: user risk_cfg → DB global → experience tier (risk_tiers.yaml)
+    per_trade_risk = float(risk_cfg.get("per_trade_risk", base.per_trade_risk))
+    if "per_trade_risk" not in risk_cfg:
+        try:
+            from app.kb.compat import get_experience_risk
+
+            tier_risk = get_experience_risk(getattr(builder, "experience", None))
+            per_trade_risk = float(tier_risk.get("per_trade_risk_pct", per_trade_risk))
+        except Exception:
+            pass
+
+    return compose_risk_execution_values(
+        max_trades=max_trades,
+        daily_loss_cap=daily_loss_cap,
+        execution_mode=str(risk_cfg.get("execution_mode", base.execution_mode)),
+        per_trade_risk=per_trade_risk,
+        trading_window=trading_window,
+        position_sizing=position_sizing,
+        risk_validation=str(risk_cfg.get("risk_validation", base.risk_validation)),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        minimum_trade_value=float(
+            risk_cfg.get("minimum_trade_value", base.minimum_trade_value)
+        ),
+    )
+
+
+def sync_builder_risk_from_state(builder: Any) -> None:
+    """Keep builder attrs and risk_execution_config in sync (draft root + RMS dict)."""
+    cfg = dict(getattr(builder, "risk_execution_config", None) or {})
+
+    if getattr(builder, "stop_loss", None) is not None:
+        cfg["stop_loss_pct"] = float(builder.stop_loss)
+    elif cfg.get("stop_loss_pct") is not None:
+        builder.stop_loss = float(cfg["stop_loss_pct"])
+
+    if getattr(builder, "take_profit", None) is not None:
+        cfg["take_profit_pct"] = float(builder.take_profit)
+    elif cfg.get("take_profit_pct") is not None:
+        builder.take_profit = float(cfg["take_profit_pct"])
+
+    sources = dict(cfg.get("rms_sources") or {})
+    if getattr(builder, "stop_loss", None) is not None:
+        sources["stop_loss_pct"] = sources.get("stop_loss_pct") or "user"
+    if getattr(builder, "take_profit", None) is not None:
+        sources["take_profit_pct"] = sources.get("take_profit_pct") or "user"
+    if sources:
+        cfg["rms_sources"] = sources
+
+    builder.set_risk_execution_config(cfg)
+
+
+def build_risk_and_execution_from_builder(
+    builder: Any,
+    base_snapshot: RiskExecutionConfigSnapshot | None = None,
+) -> dict[str, Any]:
+    """API/draft-aligned risk block — always derived from current builder state."""
+    values = build_risk_execution_values_from_builder(builder, base_snapshot)
+    return build_risk_execution_response_from_values(values)
+
+
 def compose_risk_execution_values(
     *,
     max_trades: int,

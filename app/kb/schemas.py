@@ -203,11 +203,25 @@ class MarketConfig(BaseModel):
 
 
 class RiskTier(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     per_trade_risk_pct: float
     daily_loss_cap_pct: float
     max_open_positions: int
     base_sl_pct: float = 1.5
     base_tp_pct: float = 3.0
+    # Risk circuit breakers
+    max_consecutive_losses: int = 0       # 0 = disabled
+    cooldown_bars_after_loss: int = 0     # 0 = disabled
+    cooldown_bars_after_profit: int = 0   # 0 = disabled
+    # Entry gate controls
+    max_spread_bps: float = 0.0           # 0 = disabled (no spread gate)
+    entry_confirmation_bars: int = 1      # bars signal must hold before entry
+    gap_filter: str = "none"              # "none" | "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+    # Position sizing
+    max_capital_allocation_pct: float = 100.0  # 100 = no cap per trade
+    position_sizing_mode: str = "fixed_fractional"
+    min_trade_value: float = 1000.0
 
 
 # ── Intent taxonomy ───────────────────────────────────────────────────────────

@@ -69,6 +69,10 @@ from app.planner.legacy_bridge import (
     plan_signals_v2,
 )
 from app.planner.semantic_extractor import SemanticExtractor
+from app.planner.constraint_compiler import (
+    apply_semantic_constraints,
+    needs_manual_review,
+)
 from app.planner.execution_orchestrator import ExecutionOrchestrator
 from app.planner.strategy_assembler import (
     build_retrieval_meta,
@@ -80,7 +84,9 @@ from app.services.execution.risk_execution_config_service import (
     SESSION_SCOPE,
     STRATEGY_SCOPE,
     RiskExecutionConfigSnapshot,
+    build_risk_and_execution_from_builder,
     build_risk_execution_response,
+    sync_builder_risk_from_state,
     compose_risk_execution_values,
     resolve_active_risk_execution_config,
     upsert_risk_execution_config,
@@ -98,6 +104,7 @@ from app.services.strategy.builder import (
     unsupported_user_timeframe_validation_facts,
 )
 from app.services.strategy.yaml_generator import generate_yaml
+from app.core.token_tracker import log_token_summary
 # Phase 9b — discovery integration helpers (thin wrappers around the
 # orchestrator that return a DiscoveryStepResult so the integration here
 # stays a small if-block instead of a state machine).
@@ -415,6 +422,10 @@ async def create_chat_session(db: AsyncSession, title: Optional[str] = None) -> 
             is_final=True,
         )
     )
+    
+    # Log token summary at session start
+    log_token_summary(str(chat.id), "session_start")
+    
     return chat
 
 
@@ -591,42 +602,11 @@ def _build_risk_execution_values_for_builder(
     builder: "StrategyBuilder",
     base_config: RiskExecutionConfigSnapshot,
 ) -> dict[str, object]:
-    risk_cfg = dict(getattr(builder, "risk_execution_config", None) or {})
-    stop_loss_pct = (
-        float(builder.stop_loss)
-        if builder.stop_loss is not None
-        else float(risk_cfg.get("stop_loss_pct", base_config.stop_loss_pct))
+    from app.services.execution.risk_execution_config_service import (
+        build_risk_execution_values_from_builder,
     )
-    take_profit_pct = (
-        float(builder.take_profit)
-        if builder.take_profit is not None
-        else float(risk_cfg.get("take_profit_pct", base_config.take_profit_pct))
-    )
-    daily_loss_cap = (
-        float(builder.daily_loss_cap)
-        if builder.daily_loss_cap is not None
-        else float(risk_cfg.get("daily_loss_cap", base_config.daily_loss_cap))
-    )
-    max_trades = int(risk_cfg.get("max_trades", base_config.max_trades))
-    if builder.max_trade is not None:
-        derived_max_trades = _derive_max_trades_from_builder(builder)
-        if derived_max_trades > 0:
-            max_trades = derived_max_trades
 
-    return compose_risk_execution_values(
-        max_trades=max_trades,
-        daily_loss_cap=daily_loss_cap,
-        execution_mode=str(risk_cfg.get("execution_mode", base_config.execution_mode)),
-        per_trade_risk=float(risk_cfg.get("per_trade_risk", base_config.per_trade_risk)),
-        trading_window=str(risk_cfg.get("trading_window", base_config.trading_window)),
-        position_sizing=str(risk_cfg.get("position_sizing", base_config.position_sizing)),
-        risk_validation=str(risk_cfg.get("risk_validation", base_config.risk_validation)),
-        stop_loss_pct=stop_loss_pct,
-        take_profit_pct=take_profit_pct,
-        minimum_trade_value=float(
-            risk_cfg.get("minimum_trade_value", base_config.minimum_trade_value)
-        ),
-    )
+    return build_risk_execution_values_from_builder(builder, base_config)
 
 
 def _risk_snapshot_from_values(
@@ -676,6 +656,11 @@ async def _hydrate_builder_risk_execution_config(
     existing = getattr(builder, "risk_execution_config", None)
     if isinstance(existing, dict):
         context.update({key: value for key, value in existing.items() if value is not None})
+    # User SL/TP on builder always win over hydrated DB defaults.
+    if getattr(builder, "stop_loss", None) is not None:
+        context["stop_loss_pct"] = float(builder.stop_loss)
+    if getattr(builder, "take_profit", None) is not None:
+        context["take_profit_pct"] = float(builder.take_profit)
     builder.set_risk_execution_config(context)
     return snapshot
 
@@ -1277,6 +1262,10 @@ def _extract_discovery_parameter_overrides(message: str) -> dict[str, float]:
 
 # RSI: catches "RSI above 60", "RSI > 60", "RSI is greater than 60",
 # "RSI exceeds 60", "RSI in overbought zone above 70", etc.
+_RSI_BAND_DISCOVERY_RE = re.compile(
+    r"rsi\s+(?:between|from)\s+\d+\.?\d*\s+(?:and|to|-)\s+\d+\.?\d*",
+    re.IGNORECASE,
+)
 _RSI_ABOVE_RE = re.compile(
     r"\brsi[\s\(\d\)]{0,8}\b[^.]{0,40}?"
     r"(?:above|>|>=|over|greater\s+than|exceed(?:ing|s)?|higher\s+than|crosses?\s+(?:above|over))"
@@ -1498,26 +1487,31 @@ def _extract_discovery_conditions(
             conditions.append({"name": "shallow_pullback_long", "params": {}})
 
     # ── RSI ───────────────────────────────────────────────────────────
-    m_rsi_hi = _RSI_ABOVE_RE.search(message)
-    if m_rsi_hi:
-        try:
-            threshold = float(m_rsi_hi.group(1))
-        except ValueError:
-            threshold = None
-        if threshold is not None and 0.0 < threshold < 100.0:
-            conditions.append(
-                {"name": "rsi_above", "params": {"threshold": threshold}}
-            )
-    m_rsi_lo = _RSI_BELOW_RE.search(message)
-    if m_rsi_lo:
-        try:
-            threshold = float(m_rsi_lo.group(1))
-        except ValueError:
-            threshold = None
-        if threshold is not None and 0.0 < threshold < 100.0:
-            conditions.append(
-                {"name": "rsi_below", "params": {"threshold": threshold}}
-            )
+    # Skip threshold extraction when user specified an RSI band (55–75).
+    # Require threshold >= 20 so volume multipliers (e.g. 1.5×) are never
+    # bound to rsi_above.
+    _has_rsi_band = bool(_RSI_BAND_DISCOVERY_RE.search(message))
+    if not _has_rsi_band:
+        m_rsi_hi = _RSI_ABOVE_RE.search(message)
+        if m_rsi_hi:
+            try:
+                threshold = float(m_rsi_hi.group(1))
+            except ValueError:
+                threshold = None
+            if threshold is not None and 20.0 <= threshold < 100.0:
+                conditions.append(
+                    {"name": "rsi_above", "params": {"threshold": threshold}}
+                )
+        m_rsi_lo = _RSI_BELOW_RE.search(message)
+        if m_rsi_lo:
+            try:
+                threshold = float(m_rsi_lo.group(1))
+            except ValueError:
+                threshold = None
+            if threshold is not None and 0.0 < threshold <= 80.0:
+                conditions.append(
+                    {"name": "rsi_below", "params": {"threshold": threshold}}
+                )
 
     # ── VWAP ──────────────────────────────────────────────────────────
     if _VWAP_ABOVE_RE.search(message):
@@ -2508,6 +2502,36 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                                 "ema_period": _cts.ema_period,
                                 "source": "semantic",
                             }
+                    # ── Phase 2 — propagate execution parameters from semantic
+                    # extractor into parsed_builder's typed fields so they
+                    # flow into builder during the propagation block below.
+                    _sem = _early_sem
+                    if _sem.direction and not parsed_builder.direction:
+                        parsed_builder.direction = _sem.direction
+                    if _sem.rsi_entry_band_min is not None and parsed_builder.rsi_entry_band_min is None:
+                        parsed_builder.rsi_entry_band_min = _sem.rsi_entry_band_min
+                    if _sem.rsi_entry_band_max is not None and parsed_builder.rsi_entry_band_max is None:
+                        parsed_builder.rsi_entry_band_max = _sem.rsi_entry_band_max
+                    if _sem.volume_ratio_threshold is not None and parsed_builder.volume_ratio_threshold is None:
+                        parsed_builder.volume_ratio_threshold = _sem.volume_ratio_threshold
+                    if _sem.position_sizing_mode and not parsed_builder.position_sizing_mode:
+                        parsed_builder.position_sizing_mode = _sem.position_sizing_mode
+                    if _sem.max_consecutive_losses is not None and parsed_builder.max_consecutive_losses is None:
+                        parsed_builder.max_consecutive_losses = _sem.max_consecutive_losses
+                    if _sem.cooldown_bars_after_loss is not None and parsed_builder.cooldown_bars_after_loss is None:
+                        parsed_builder.cooldown_bars_after_loss = _sem.cooldown_bars_after_loss
+                    if _sem.cooldown_bars_after_profit is not None and parsed_builder.cooldown_bars_after_profit is None:
+                        parsed_builder.cooldown_bars_after_profit = _sem.cooldown_bars_after_profit
+                    if _sem.max_spread_bps is not None and parsed_builder.max_spread_bps is None:
+                        parsed_builder.max_spread_bps = _sem.max_spread_bps
+                    if _sem.gap_filter and not parsed_builder.gap_filter:
+                        parsed_builder.gap_filter = _sem.gap_filter
+                    if _sem.gap_threshold_pct is not None and parsed_builder.gap_threshold_pct is None:
+                        parsed_builder.gap_threshold_pct = _sem.gap_threshold_pct
+                    if _sem.entry_confirmation_bars is not None and parsed_builder.entry_confirmation_bars is None:
+                        parsed_builder.entry_confirmation_bars = _sem.entry_confirmation_bars
+                    if _sem.max_capital_allocation_pct is not None and parsed_builder.max_capital_allocation_pct is None:
+                        parsed_builder.max_capital_allocation_pct = _sem.max_capital_allocation_pct
             except Exception as _sem_err:
                 logger.debug(
                     "chat_flow|early_semantic_extraction_skipped|err=%s", _sem_err
@@ -2719,7 +2743,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     builder.sentiment = sentiment
                     relevant_message = True
 
-                experience = parsed_builder.experience or route.get("experience")
+                experience = route.get("experience") or parsed_builder.experience
                 if experience:
                     builder.experience = experience
                     relevant_message = True
@@ -2794,6 +2818,52 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             builder.take_profit = parsed_rms["take_profit_pct"]
                         if "daily_loss_cap" in parsed_rms and builder.daily_loss_cap is None:
                             builder.daily_loss_cap = parsed_rms["daily_loss_cap"]
+                        relevant_message = True
+
+                # ── Phase 2 — apply execution parameter overrides ───────────────
+                # Priority:  agent_tool_parameters (LLM-extracted, highest)
+                #            > parsed_builder (regex / semantic extraction)
+                #            > existing builder value (preserved from prior turns)
+                _p2_agent = dict(route.get("agent_tool_parameters") or {})
+
+                def _p2_str(key: str) -> str | None:
+                    v = _p2_agent.get(key)
+                    return str(v).strip() if v is not None else None
+
+                def _p2_int(key: str) -> int | None:
+                    v = _p2_agent.get(key)
+                    try:
+                        return int(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                def _p2_float(key: str) -> float | None:
+                    v = _p2_agent.get(key)
+                    try:
+                        return float(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                _p2_updates: list[tuple[str, object]] = [
+                    ("direction",               _p2_str("direction") or parsed_builder.direction),
+                    ("entry_window_start",       _p2_str("entry_window_start") or parsed_builder.entry_window_start),
+                    ("entry_window_end",         _p2_str("entry_window_end") or parsed_builder.entry_window_end),
+                    ("max_consecutive_losses",   _p2_int("max_consecutive_losses") if _p2_agent.get("max_consecutive_losses") is not None else parsed_builder.max_consecutive_losses),
+                    ("cooldown_bars_after_loss", _p2_int("cooldown_bars_after_loss") if _p2_agent.get("cooldown_bars_after_loss") is not None else parsed_builder.cooldown_bars_after_loss),
+                    ("cooldown_bars_after_profit", _p2_int("cooldown_bars_after_profit") if _p2_agent.get("cooldown_bars_after_profit") is not None else parsed_builder.cooldown_bars_after_profit),
+                    ("max_spread_bps",           _p2_float("max_spread_bps") if _p2_agent.get("max_spread_bps") is not None else parsed_builder.max_spread_bps),
+                    ("gap_filter",               _p2_str("gap_filter") or parsed_builder.gap_filter),
+                    ("gap_threshold_pct",        _p2_float("gap_threshold_pct") if _p2_agent.get("gap_threshold_pct") is not None else parsed_builder.gap_threshold_pct),
+                    ("entry_confirmation_bars",  _p2_int("entry_confirmation_bars") if _p2_agent.get("entry_confirmation_bars") is not None else parsed_builder.entry_confirmation_bars),
+                    ("rsi_entry_band_min",       _p2_float("rsi_entry_band_min") if _p2_agent.get("rsi_entry_band_min") is not None else parsed_builder.rsi_entry_band_min),
+                    ("rsi_entry_band_max",       _p2_float("rsi_entry_band_max") if _p2_agent.get("rsi_entry_band_max") is not None else parsed_builder.rsi_entry_band_max),
+                    ("volume_ratio_threshold",   _p2_float("volume_ratio_threshold") if _p2_agent.get("volume_ratio_threshold") is not None else parsed_builder.volume_ratio_threshold),
+                    ("position_sizing_mode",     _p2_str("position_sizing_mode") or parsed_builder.position_sizing_mode),
+                    ("max_capital_allocation_pct", _p2_float("max_capital_allocation_pct") if _p2_agent.get("max_capital_allocation_pct") is not None else parsed_builder.max_capital_allocation_pct),
+                ]
+                for _field, _val in _p2_updates:
+                    if _val is not None and getattr(builder, _field, None) is None:
+                        setattr(builder, _field, _val)
                         relevant_message = True
 
                 # Propagate structural SL + trailing stop specs from parsed_builder.
@@ -3185,6 +3255,9 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     ref_backtest_id = str(backtest_result.get("backtest_ref_id") or "")
                     if ref_backtest_id:
                         draft["backtest_ref_id"] = ref_backtest_id
+                    
+                    # Log token usage summary at backtest completion
+                    log_token_summary(session_id, "backtest_complete")
                 except Exception as backtest_exc:
                     logger.error(
                         "❌ chat_flow|event=backtest_failed|session_id=%s|error=%s",
@@ -3230,18 +3303,13 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     getattr(builder, "timeframe", None),
                     (builder.signal_plan or {}).get("signals_used", []),
                 )
+                sync_builder_risk_from_state(builder)
                 builder.apply_defaults()
-                assembled_config_snapshot = await _upsert_builder_risk_execution_config(
+                strategy_payload = build_strategy_object(builder)
+                await _upsert_builder_risk_execution_config(
                     db,
                     builder,
                     session_id=session_uuid,
-                )
-                builder.set_risk_execution_config(
-                    assembled_config_snapshot.to_builder_context()
-                )
-                strategy_payload = build_strategy_object(builder)
-                strategy_payload["strategy_object"]["risk_and_execution"] = (
-                    build_risk_execution_response(assembled_config_snapshot)
                 )
                 strategy_config = build_strategy_config(builder, strategy_payload)
                 stored_config = strategy_config or {
@@ -3313,8 +3381,14 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     session_id=session_uuid,
                     strategy_id=str(strategy.id),
                 )
+                sync_builder_risk_from_state(builder)
                 strategy_payload["strategy_object"]["risk_and_execution"] = (
-                    build_risk_execution_response(latest_config_snapshot)
+                    build_risk_and_execution_from_builder(builder)
+                )
+                strategy_payload["strategy_object"]["reward_factor"] = (
+                    round(float(builder.take_profit) / float(builder.stop_loss), 2)
+                    if builder.stop_loss and builder.take_profit
+                    else strategy_payload["strategy_object"].get("reward_factor")
                 )
                 logger.info(
                     "💾 chat_flow|event=strategy_persisted|session_id=%s"
@@ -3765,6 +3839,17 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         plan = orchestrator.apply_semantic_gates(plan, semantic_instructions)
                         semantic_gates_applied = plan.get("_semantic_gates_applied", [])
 
+                        # Stage 4 — compile semantic/builder constraints into signals
+                        plan = apply_semantic_constraints(
+                            plan,
+                            builder,
+                            semantic_instructions=semantic_instructions,
+                            source_prompt=user_content,
+                        )
+                        semantic_gates_applied.extend(
+                            plan.get("_constraint_compiler_applied") or []
+                        )
+
                         logger.info(
                             "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s|gates=%s",
                             session_id,
@@ -3849,9 +3934,19 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             builder.semantic_intent = semantic_instructions.dict()
                     assistant_text = build_plan_signals_reply(builder, plan)
                     assistant_state = "plan_signals"
+                    plan_status = "awaiting_confirmation"
+                    if semantic_instructions and needs_manual_review(
+                        semantic_instructions.extraction_quality_score
+                    ):
+                        plan_status = "manual_review_required"
+                        logger.warning(
+                            "⚠️ chat_flow|event=low_semantic_quality|session_id=%s|score=%.3f",
+                            session_id,
+                            semantic_instructions.extraction_quality_score,
+                        )
                     draft = builder.to_draft_json(
                         mode_override="plan_signals",
-                        processing_status="awaiting_confirmation",
+                        processing_status=plan_status,
                     )
                     draft["kb_signals_used"] = plan.get("signals_used", [])
                     draft["kb_signals_available"] = plan.get("signals_available", 0)

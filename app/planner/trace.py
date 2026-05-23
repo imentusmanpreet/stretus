@@ -46,6 +46,7 @@ class DecisionTrace:
     sl_tp: dict[str, float] = field(default_factory=dict)
     validation: str = "pending"
     errors: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)  # arbitrary extra context (e.g. regime)
 
     # ── Mutators ─────────────────────────────────────────────────────────────
 
@@ -74,6 +75,9 @@ class DecisionTrace:
         }
         if vol_mult is not None:
             self.sl_tp["vol_mult"] = round(vol_mult, 4)
+
+    def record_custom(self, key: str, value: Any) -> None:
+        self.extra[key] = value
 
     def mark_validated(self) -> None:
         self.validation = "passed"

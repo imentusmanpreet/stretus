@@ -19,6 +19,7 @@ from app.schemas.backtest import (
     BacktestTriggerRequest,
     BacktestTriggerResponse,
 )
+from app.core.timing import BacktestTimer
 from app.services.backtest import (
     apply_sanitized_result_to_row,
     extract_strategy_market_data_request,
@@ -69,45 +70,100 @@ async def _mark_backtest_failed(backtest_id: str, exc: Exception) -> None:
 
 
 async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str, run_request: BacktestTriggerRequest) -> None:
+    timer = BacktestTimer(backtest_id)
+    
     try:
         logger.info(
             "backtest_orch|stage=prep|backtest_id=%s|strategy_id=%s",
             backtest_id,
             strategy_id,
         )
-        market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
-        ohlcv_data = await fetch_ohlcv_records(market_data_request)
-        # Phase 7 — when the strategy declares reference_symbol or htf rules,
-        # fetch those series in parallel and forward to the engine. Both are
-        # None when the strategy uses neither, so legacy strategies see no
-        # behavior change.
-        reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(market_data_request)
-        await queue_quant_backtest(
-            backtest_id=backtest_id,
-            strategy_id=strategy_id,
-            yaml_path=yaml_path,
-            ohlcv_data=ohlcv_data,
-            run_config=run_request,
-            market_data_request={
-                "symbol": market_data_request.symbol,
-                "interval": market_data_request.interval,
-                "from_utc": market_data_request.from_utc,
-                "to_utc": market_data_request.to_utc,
-            },
-            reference_ohlcv=reference_ohlcv,
-            htf_ohlcv=htf_ohlcv,
-        )
+        
+        # Step 1: Extract market data request from strategy YAML
+        with timer.step("extract_market_data_request", {"strategy_id": strategy_id}):
+            market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
+        
+        # Step 2: Fetch main OHLCV data (chunked)
+        with timer.step("fetch_main_ohlcv", {
+            "symbol": market_data_request.symbol,
+            "interval": market_data_request.interval,
+            "from_utc": market_data_request.from_utc,
+            "to_utc": market_data_request.to_utc,
+        }):
+            ohlcv_data = await fetch_ohlcv_records(market_data_request)
+        
+        # Step 3: Fetch auxiliary OHLCV (reference + HTF) in parallel
+        with timer.step("fetch_auxiliary_ohlcv", {
+            "symbol": market_data_request.symbol,
+        }):
+            reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(market_data_request)
+        
+        # Step 4: Queue quant engine execution
+        with timer.step("queue_quant_engine", {
+            "candles": len(ohlcv_data),
+            "reference_candles": len(reference_ohlcv) if reference_ohlcv else 0,
+            "htf_timeframes": list(htf_ohlcv.keys()) if htf_ohlcv else [],
+        }):
+            await queue_quant_backtest(
+                backtest_id=backtest_id,
+                strategy_id=strategy_id,
+                yaml_path=yaml_path,
+                ohlcv_data=ohlcv_data,
+                run_config=run_request,
+                market_data_request={
+                    "symbol": market_data_request.symbol,
+                    "interval": market_data_request.interval,
+                    "from_utc": market_data_request.from_utc,
+                    "to_utc": market_data_request.to_utc,
+                },
+                reference_ohlcv=reference_ohlcv,
+                htf_ohlcv=htf_ohlcv,
+            )
+        
+        # Generate and log timing summary
+        summary = timer.summary()
+        
+        # Log additional visible summary
+        logger.info("=" * 100)
+        logger.info("🎯 API LAYER TIMING SUMMARY - Backtest ID: %s", backtest_id)
+        logger.info("=" * 100)
+        logger.info("Total Duration: %s", summary["overall_duration_formatted"])
+        logger.info("Steps Completed: %d", summary["step_count"])
+        logger.info("-" * 100)
+        for step in summary["steps"]:
+            percentage = (step["duration_seconds"] / summary["overall_duration_seconds"] * 100) if summary["overall_duration_seconds"] > 0 else 0
+            logger.info("  %-35s : %12s (%6.2f%%)", step["step"], step["duration_formatted"], percentage)
+        logger.info("=" * 100)
+        
         logger.info(
             "backtest_orch|stage=quant_queued|backtest_id=%s|symbol=%s|interval=%s|candles=%s"
-            "|aux_reference=%s|aux_htf=%s",
+            "|aux_reference=%s|aux_htf=%s|total_duration=%s",
             backtest_id,
             market_data_request.symbol,
             market_data_request.interval,
             len(ohlcv_data),
             (len(reference_ohlcv) if reference_ohlcv is not None else 0),
             ({tf: len(rows) for tf, rows in htf_ohlcv.items()} if htf_ohlcv else {}),
+            summary["overall_duration_formatted"],
         )
     except Exception as exc:
+        # Generate summary even on failure
+        try:
+            summary = timer.summary()
+            logger.info("=" * 100)
+            logger.info("❌ API LAYER TIMING SUMMARY (FAILED) - Backtest ID: %s", backtest_id)
+            logger.info("=" * 100)
+            logger.info("Total Duration: %s", summary["overall_duration_formatted"])
+            logger.info("Steps Completed: %d", summary["step_count"])
+            logger.info("-" * 100)
+            for step in summary["steps"]:
+                percentage = (step["duration_seconds"] / summary["overall_duration_seconds"] * 100) if summary["overall_duration_seconds"] > 0 else 0
+                status_icon = "✅" if step["status"] == "COMPLETE" else "❌"
+                logger.info("  %s %-33s : %12s (%6.2f%%)", status_icon, step["step"], step["duration_formatted"], percentage)
+            logger.info("=" * 100)
+        except Exception:
+            pass  # Don't let summary generation hide the real error
+        
         logger.exception(
             "backtest_orch|stage=failed|backtest_id=%s|error_type=%s",
             backtest_id,

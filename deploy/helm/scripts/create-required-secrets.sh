@@ -4,7 +4,10 @@
 # Secrets created:
 #   stretus-ai-credentials  – APP_SECRET_KEY, GROQ_API_KEY, DATABASE_URL,
 #                             DATABASE_URL_SYNC, UPSTOX_API_KEY, UPSTOX_ACCESS_TOKEN,
-#                             OLLAMA_BASE_URL, HISTORICAL_DATA_URL
+#                             OLLAMA_BASE_URL, HISTORICAL_DATA_URL (HTTP fallback only)
+#
+# Backtest OHLCV gRPC (MARKET_DATA_GRPC_*) is set by the Helm chart deployment
+# template, not this secret — see deploy/helm/values.yaml → marketData.
 #
 # The postgres-credentials secret is shared with other services; create/update
 # it using deploy/helm/charts/user/scripts/create-required-secrets.sh and pass
@@ -12,6 +15,7 @@
 #
 # Usage:
 #   export GROQ_API_KEY='gsk_...'
+#   export OPENROUTER_API_KEY='sk-or-v1-...'
 #   export APP_SECRET_KEY='<random 64-char string>'
 #   export DATABASE_URL='postgresql+asyncpg://stretus:<password>@postgres-postgresql:5432/stretus'
 #   export DATABASE_URL_SYNC='postgresql+psycopg2://stretus:<password>@postgres-postgresql:5432/stretus'
@@ -36,6 +40,7 @@ DATABASE_URL_SYNC="${DATABASE_URL_SYNC:-postgresql+psycopg2://${POSTGRES_USER}:$
 
 APP_SECRET_KEY="${APP_SECRET_KEY:?ERROR: APP_SECRET_KEY must be set (generate with: openssl rand -hex 32)}"
 GROQ_API_KEY="${GROQ_API_KEY:-}"
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
 UPSTOX_API_KEY="${UPSTOX_API_KEY:-}"
 UPSTOX_ACCESS_TOKEN="${UPSTOX_ACCESS_TOKEN:-}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-}"
@@ -47,6 +52,7 @@ kubectl create secret generic stretus-ai-credentials \
   --namespace "${NS}" \
   --from-literal=APP_SECRET_KEY="${APP_SECRET_KEY}" \
   --from-literal=GROQ_API_KEY="${GROQ_API_KEY}" \
+  --from-literal=OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
   --from-literal=DATABASE_URL="${DATABASE_URL}" \
   --from-literal=DATABASE_URL_SYNC="${DATABASE_URL_SYNC}" \
   --from-literal=UPSTOX_API_KEY="${UPSTOX_API_KEY}" \

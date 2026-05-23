@@ -8,7 +8,7 @@ api:
   image:
     repository: stretus/python-ai-api
     pullPolicy: IfNotPresent
-    tag: "2afa830-20260519-051102"
+    tag: "99601a1-20260522-113933"
   resources:
     requests:
       cpu: 200m
@@ -41,7 +41,7 @@ quant:
   image:
     repository: stretus/python-ai-quant
     pullPolicy: IfNotPresent
-    tag: "2afa830-20260519-051102"
+    tag: "99601a1-20260522-113933"
   resources:
     requests:
       cpu: 500m
@@ -121,9 +121,29 @@ persistence:
     accessMode: ReadWriteOnce
     size: 1Gi
 
+# ── In-cluster market data (backtest OHLCV) ─────────────────────────────────
+# gRPC target is built in templates/_helpers.tpl as:
+#   <serviceName>.<namespace>.svc.cluster.local:<port>
+# Default namespace = Helm release namespace (stretus-ai-dev2 on EKS dev2).
+# Same FQDN pattern as BFF / order-execution in stretus-backend.
+marketData:
+  fetchTransport: grpc
+  grpc:
+    enabled: true
+    serviceName: marketdata-ingestion
+    namespace: ""   # empty → .Release.Namespace (stretus-ai-dev2)
+    port: 50057
+    timeoutSeconds: 120
+    secure: false
+  httpFallback:
+    historicalDataUrl: "https://dev-api.stretus.com"
+    timeoutSeconds: 120
+
 # ── Non-sensitive env vars for the API container ───────────────────────────
 # All secrets (GROQ_API_KEY, APP_SECRET_KEY, DATABASE_URL, UPSTOX_*)
 # are injected via envFrom referencing the k8s Secrets listed below.
+# NOTE: MARKET_DATA_GRPC_* is injected by deployment-api.yaml (see marketData above),
+# not listed here — so ArgoCD applications that override `env:` still get gRPC.
 env:
   - name: APP_ENV
     value: "production"
@@ -132,9 +152,9 @@ env:
   - name: PYTHONUNBUFFERED
     value: "1"
   - name: LLM_PROVIDER
-    value: "auto"
+    value: "openrouter"
   - name: USE_GROQ
-    value: "true"
+    value: "false"
   - name: GROQ_MODEL
     value: "llama-3.3-70b-versatile"
   - name: OLLAMA_MODEL
@@ -147,16 +167,15 @@ env:
     value: "https://api.upstox.com/v2"
   - name: MARKET_DATA_CACHE_TTL_SECONDS
     value: "60"
-  - name: HISTORICAL_DATA_URL
-    value: "https://dev-api.stretus.com"
   - name: QUANT_ENGINE_TIMEOUT_SECONDS
     value: "600"
   - name: ROOT_PATH
     value: "/python-ai"
-
+  - name: OPENROUTER_MODEL
+    value: "meta-llama/llama-3.3-70b-instruct"
 # Secrets referenced by name; created out-of-band via scripts/create-required-secrets.sh.
 # postgres-credentials  → POSTGRES_HOST/PORT/DB/USER/PASSWORD (used by entrypoint.sh)
-# stretus-ai-credentials → APP_SECRET_KEY, GROQ_API_KEY, UPSTOX_*, DATABASE_URL, DATABASE_URL_SYNC
+# stretus-ai-credentials → APP_SECRET_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, UPSTOX_*, DATABASE_URL, DATABASE_URL_SYNC
 envFrom:
   - secretRef:
       name: postgres-credentials

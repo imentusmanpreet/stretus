@@ -79,6 +79,66 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     ),
                 },
                 "preserve_unmentioned_fields": {"type": "boolean", "default": True},
+                # Phase 10 — new strategy input fields
+                "direction": {
+                    "type": "string",
+                    "enum": ["long_only", "short_only", "both"],
+                    "description": "Trade direction constraint. Use when user says 'long only', 'short only', etc.",
+                },
+                "entry_window_start": {
+                    "type": "string",
+                    "description": "Start of trading window in IST (HH:MM). Use when user specifies a time window like '09:30–11:30'.",
+                },
+                "entry_window_end": {
+                    "type": "string",
+                    "description": "End of trading window in IST (HH:MM). Use when user specifies a time window.",
+                },
+                "max_consecutive_losses": {
+                    "type": "integer",
+                    "description": "Stop trading for the session after N consecutive losses. 0 = disabled.",
+                },
+                "cooldown_bars_after_loss": {
+                    "type": "integer",
+                    "description": "Wait N bars after a losing trade before re-entering.",
+                },
+                "cooldown_bars_after_profit": {
+                    "type": "integer",
+                    "description": "Wait N bars after a winning trade before re-entering.",
+                },
+                "max_spread_bps": {
+                    "type": "number",
+                    "description": "Reject entry if estimated bid-ask spread > N basis points. 0 = disabled.",
+                },
+                "gap_filter": {
+                    "type": "string",
+                    "enum": ["none", "ignore_gap_up", "ignore_gap_down", "ignore_both"],
+                    "description": "Skip trading on sessions that open with a large gap.",
+                },
+                "entry_confirmation_bars": {
+                    "type": "integer",
+                    "description": "Number of consecutive bars the entry signal must hold before entering. 1 = standard.",
+                },
+                "rsi_entry_band_min": {
+                    "type": "number",
+                    "description": "Only enter when RSI is at or above this value (e.g. 40).",
+                },
+                "rsi_entry_band_max": {
+                    "type": "number",
+                    "description": "Only enter when RSI is at or below this value (e.g. 65).",
+                },
+                "volume_ratio_threshold": {
+                    "type": "number",
+                    "description": "Only enter when current volume >= N × 20-bar average (e.g. 1.5 for 1.5× average volume).",
+                },
+                "position_sizing_mode": {
+                    "type": "string",
+                    "enum": ["fixed_fractional", "risk_based", "fixed_units"],
+                    "description": "How position size is calculated. 'risk_based' sizes by % capital risk per trade.",
+                },
+                "max_capital_allocation_pct": {
+                    "type": "number",
+                    "description": "Maximum % of capital deployed in a single trade (e.g. 20 for 20%). 100 = no cap.",
+                },
             },
             "required": ["session_id"],
             "additionalProperties": False,
@@ -234,6 +294,23 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "trading_window": {
                     "type": "string",
                     "description": "Trading window in IST, e.g. '09:15-11:00' or '09:15-15:15'.",
+                },
+                "position_sizing_mode": {
+                    "type": "string",
+                    "enum": ["fixed_fractional", "risk_based", "fixed_units"],
+                    "description": "How position size is computed.",
+                },
+                "max_capital_allocation_pct": {
+                    "type": "number",
+                    "description": "Maximum % of capital in a single trade.",
+                },
+                "max_consecutive_losses": {
+                    "type": "integer",
+                    "description": "Circuit breaker: stop trading after N consecutive losses.",
+                },
+                "cooldown_bars_after_loss": {
+                    "type": "integer",
+                    "description": "Bars to wait after a losing trade.",
                 },
             },
             "required": ["session_id"],

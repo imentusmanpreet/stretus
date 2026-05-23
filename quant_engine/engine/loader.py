@@ -145,6 +145,20 @@ def _parse_time_exit_spec(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def _parse_time_to_utc_minutes(raw_time: Any, tz: str = "Asia/Kolkata") -> int | None:
+    """Convert an HH:MM local-time string to UTC minutes-of-day. None if absent or malformed."""
+    if not raw_time:
+        return None
+    m = _TIME_EXIT_PATTERN.match(str(raw_time).strip())
+    if not m:
+        return None
+    hh, mm = int(m.group(1)), int(m.group(2))
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        return None
+    offset = _TIME_EXIT_TZ_UTC_OFFSET_MINUTES.get(str(tz).strip(), 330)  # default IST
+    return ((hh * 60 + mm) - offset) % (24 * 60)
+
+
 _STOP_LOSS_TYPES = {"percent", "structural", "atr"}
 _STOP_LOSS_ANCHORS = {
     "opening_range_low",   # anchor at LOW of first N bars in the session (long SL)
@@ -423,6 +437,30 @@ class StrategyConfig:
     #   {"exit_time": "15:15", "timezone": "Asia/Kolkata",
     #    "utc_minutes_of_day": 585}   (utc_minutes precomputed by the loader)
     time_exit_spec: dict[str, Any] | None = None
+    # Phase 10 — direction constraint
+    direction: str = "both"   # "long_only" | "short_only" | "both"
+    # Phase 10 — session entry window (precomputed UTC minutes of day).
+    # entry_window_start_utc blocks entries BEFORE this time (e.g. 09:30 = 4*60+30=270 UTC).
+    # entry_window_end_utc blocks NEW entries AFTER this time (does not force-exit).
+    # Both are independent of time_exit_spec (which force-exits open trades).
+    entry_window_start_utc: int | None = None
+    entry_window_end_utc: int | None = None
+    # Phase 10 — risk circuit breakers
+    max_consecutive_losses: int = 0       # 0 = disabled; stop trading after N consecutive losses
+    cooldown_bars_after_loss: int = 0     # 0 = disabled; wait N bars after a loss before re-entering
+    cooldown_bars_after_profit: int = 0   # 0 = disabled; wait N bars after a profit before re-entering
+    # Phase 10 — entry gate controls
+    max_spread_bps: float = 0.0           # 0 = disabled; reject entry if estimated spread > N bps
+    gap_filter: str = "none"              # "none" | "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+    gap_threshold_pct: float = 0.5        # % open vs prev close that counts as a gap
+    entry_confirmation_bars: int = 1      # signal must hold for N consecutive closed bars before entry
+    rsi_entry_band_min: float | None = None   # RSI must be >= this to enter (None = no gate)
+    rsi_entry_band_max: float | None = None   # RSI must be <= this to enter (None = no gate)
+    volume_ratio_threshold: float | None = None  # volume must be >= N × avg volume (None = no gate)
+    # Phase 10 — position sizing
+    position_sizing_mode: str = "fixed_fractional"   # "fixed_fractional" | "risk_based" | "fixed_units"
+    max_capital_allocation_pct: float = 100.0        # max % of balance in one trade (100 = no cap)
+    per_trade_risk_pct: float = 2.0                  # % of balance to risk per trade (for risk_based mode)
 
 
 def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
@@ -602,6 +640,90 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         strategy.get("time_exit") or (strategy.get("exits") or {}).get("time_exit")
     )
 
+    # Phase 10 — direction
+    raw_direction = str(strategy.get("direction") or profile.get("direction") or "both").lower().strip()
+    direction = raw_direction if raw_direction in ("long_only", "short_only", "both") else "both"
+
+    # Phase 10 — entry window (from YAML "entry_window" block or flat fields)
+    entry_window_raw = strategy.get("entry_window") or {}
+    entry_window_start_utc: int | None = None
+    entry_window_end_utc:   int | None = None
+    if isinstance(entry_window_raw, dict):
+        entry_window_start_utc = _parse_time_to_utc_minutes(
+            entry_window_raw.get("start") or entry_window_raw.get("start_time"),
+            entry_window_raw.get("timezone", "Asia/Kolkata"),
+        )
+        entry_window_end_utc = _parse_time_to_utc_minutes(
+            entry_window_raw.get("end") or entry_window_raw.get("end_time"),
+            entry_window_raw.get("timezone", "Asia/Kolkata"),
+        )
+
+    # Phase 10 — risk circuit breakers
+    max_consecutive_losses  = _to_int(
+        _first_not_none(strategy.get("max_consecutive_losses"), profile.get("max_consecutive_losses")),
+        "max_consecutive_losses", 0,
+    )
+    cooldown_bars_after_loss = _to_int(
+        _first_not_none(strategy.get("cooldown_bars_after_loss"), profile.get("cooldown_bars_after_loss")),
+        "cooldown_bars_after_loss", 0,
+    )
+    cooldown_bars_after_profit = _to_int(
+        _first_not_none(strategy.get("cooldown_bars_after_profit"), profile.get("cooldown_bars_after_profit")),
+        "cooldown_bars_after_profit", 0,
+    )
+
+    # Phase 10 — entry gate controls
+    max_spread_bps = _to_float(
+        _first_not_none(strategy.get("max_spread_bps"), profile.get("max_spread_bps")),
+        "max_spread_bps", 0.0,
+    )
+    raw_gap_filter = str(
+        _first_not_none(strategy.get("gap_filter"), profile.get("gap_filter")) or "none"
+    ).lower().strip()
+    gap_filter = raw_gap_filter if raw_gap_filter in (
+        "none", "ignore_gap_up", "ignore_gap_down", "ignore_both"
+    ) else "none"
+    gap_threshold_pct = _to_float(
+        _first_not_none(strategy.get("gap_threshold_pct"), profile.get("gap_threshold_pct")),
+        "gap_threshold_pct", 0.5,
+    )
+    entry_confirmation_bars = _to_int(
+        _first_not_none(strategy.get("entry_confirmation_bars"), profile.get("entry_confirmation_bars")),
+        "entry_confirmation_bars", 1,
+    )
+    rsi_band_raw = strategy.get("rsi_entry_band") or {}
+    rsi_entry_band_min: float | None = None
+    rsi_entry_band_max: float | None = None
+    if isinstance(rsi_band_raw, dict):
+        _rmin = rsi_band_raw.get("min")
+        _rmax = rsi_band_raw.get("max")
+        rsi_entry_band_min = float(_rmin) if _rmin is not None else None
+        rsi_entry_band_max = float(_rmax) if _rmax is not None else None
+    else:
+        # also accept flat fields
+        _rmin = _first_not_none(strategy.get("rsi_entry_band_min"), profile.get("rsi_entry_band_min"))
+        _rmax = _first_not_none(strategy.get("rsi_entry_band_max"), profile.get("rsi_entry_band_max"))
+        rsi_entry_band_min = float(_rmin) if _rmin is not None else None
+        rsi_entry_band_max = float(_rmax) if _rmax is not None else None
+    _vrt = _first_not_none(strategy.get("volume_ratio_threshold"), profile.get("volume_ratio_threshold"))
+    volume_ratio_threshold: float | None = float(_vrt) if _vrt is not None else None
+
+    # Phase 10 — position sizing
+    raw_psm = str(
+        _first_not_none(strategy.get("position_sizing_mode"), profile.get("position_sizing_mode")) or "fixed_fractional"
+    ).lower().strip()
+    position_sizing_mode = raw_psm if raw_psm in (
+        "fixed_fractional", "risk_based", "fixed_units"
+    ) else "fixed_fractional"
+    max_capital_allocation_pct = _to_float(
+        _first_not_none(strategy.get("max_capital_allocation_pct"), profile.get("max_capital_allocation_pct")),
+        "max_capital_allocation_pct", 100.0,
+    )
+    per_trade_risk_pct = _to_float(
+        _first_not_none(strategy.get("per_trade_risk_pct"), profile.get("per_trade_risk_pct")),
+        "per_trade_risk_pct", 2.0,
+    )
+
     config = StrategyConfig(
         name=str(strategy.get("name") or "Unknown Strategy"),
         symbol=str(strategy.get("symbol") or "").strip(),
@@ -626,6 +748,22 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         htf_rules=htf_rules,
         patterns=patterns_overrides,
         time_exit_spec=time_exit_spec,
+        direction=direction,
+        entry_window_start_utc=entry_window_start_utc,
+        entry_window_end_utc=entry_window_end_utc,
+        max_consecutive_losses=max_consecutive_losses,
+        cooldown_bars_after_loss=cooldown_bars_after_loss,
+        cooldown_bars_after_profit=cooldown_bars_after_profit,
+        max_spread_bps=max_spread_bps,
+        gap_filter=gap_filter,
+        gap_threshold_pct=gap_threshold_pct,
+        entry_confirmation_bars=max(1, entry_confirmation_bars),
+        rsi_entry_band_min=rsi_entry_band_min,
+        rsi_entry_band_max=rsi_entry_band_max,
+        volume_ratio_threshold=volume_ratio_threshold,
+        position_sizing_mode=position_sizing_mode,
+        max_capital_allocation_pct=max_capital_allocation_pct,
+        per_trade_risk_pct=per_trade_risk_pct,
     )
 
     logger.info(

@@ -17,7 +17,7 @@ from typing import Any
 
 from app.kb import kb
 from app.services.execution.risk_execution_config_service import (
-    build_risk_execution_response_from_values,
+    build_risk_and_execution_from_builder,
 )
 
 
@@ -29,7 +29,7 @@ def build_strategy_object(builder: Any) -> dict:
     is already populated. The signal_plan must be in the legacy shape
     (entry/exit/signals_used/etc.) — produced by either the new planner
     bridge or the legacy retriever."""
-    builder.apply_defaults()
+    builder.apply_defaults()  # DB risk_execution_config + risk_tiers.yaml for unset fields
     plan = builder.signal_plan or {}
 
     entry_condition = builder.entry_condition or plan.get("entry_condition")
@@ -60,24 +60,8 @@ def build_strategy_object(builder: Any) -> dict:
 
     indicators = _extract_indicators(entry_condition, exit_condition)
 
-    risk_summary = builder.risk_and_execution_summary(mode="assemble_strategy") or {}
-    if builder.risk_execution_config:
-        risk_and_execution = build_risk_execution_response_from_values(
-            builder.risk_execution_config,
-        )
-    else:
-        risk_and_execution = {
-            "stop_loss_pct":   builder.stop_loss,
-            "take_profit_pct": builder.take_profit,
-            "risk_reward":     risk_summary.get("risk_reward"),
-            "per_trade_risk":  risk_summary.get("per_trade_risk"),
-            "daily_loss_cap":  risk_summary.get("daily_loss_cap"),
-            "max_trades":      risk_summary.get("max_trades"),
-            "trading_window":  risk_summary.get("trading_window"),
-            "position_sizing": risk_summary.get("position_sizing"),
-            "execution_mode":  risk_summary.get("execution_mode"),
-            "risk_validation": risk_summary.get("risk_validation"),
-        }
+    risk_and_execution = build_risk_and_execution_from_builder(builder)
+    execution_controls = _build_execution_controls(builder)
 
     strategy_object = {
         "ai_strategy_id":  str(uuid.uuid4()),
@@ -94,12 +78,14 @@ def build_strategy_object(builder: Any) -> dict:
             "indicators":           indicators,
             "kb_signals_available": signals_available,
             "kb_signals_used":      signals_used,
+            "strategy_preset":      getattr(builder, "strategy_preset", None),
         },
         "entry_condition":     entry_condition,
         "exit_condition":      exit_condition,
         "entry":               copy.deepcopy(plan.get("entry", [])),
         "exit":                copy.deepcopy(plan.get("exit", [])),
         "risk_and_execution":  risk_and_execution,
+        "execution_controls":  execution_controls,
         "reward_factor":       reward_factor,
     }
 
@@ -152,6 +138,66 @@ def enrich_plan_with_ohlcv(
 
 
 # ── Internal ──────────────────────────────────────────────────────────────────
+
+
+def _build_execution_controls(builder: Any) -> dict[str, Any]:
+    """Mirror draft-level execution parameters on the persisted strategy_object."""
+    controls: dict[str, Any] = {}
+
+    for field in (
+        "direction",
+        "entry_window_start",
+        "entry_window_end",
+        "gap_filter",
+        "position_sizing_mode",
+    ):
+        val = getattr(builder, field, None)
+        if val is not None and str(val).strip():
+            controls[field] = val
+
+    for field in (
+        "max_consecutive_losses",
+        "cooldown_bars_after_loss",
+        "cooldown_bars_after_profit",
+        "entry_confirmation_bars",
+    ):
+        val = getattr(builder, field, None)
+        if val is not None:
+            controls[field] = int(val)
+
+    for field in (
+        "max_spread_bps",
+        "gap_threshold_pct",
+        "rsi_entry_band_min",
+        "rsi_entry_band_max",
+        "volume_ratio_threshold",
+        "max_capital_allocation_pct",
+    ):
+        val = getattr(builder, field, None)
+        if val is not None:
+            controls[field] = float(val)
+
+    if getattr(builder, "stop_loss_spec", None):
+        controls["stop_loss_spec"] = dict(builder.stop_loss_spec)
+    if getattr(builder, "trailing_stop_spec", None):
+        controls["trailing_stop_spec"] = dict(builder.trailing_stop_spec)
+    if getattr(builder, "time_exit", None):
+        controls["time_exit"] = dict(builder.time_exit)
+    if getattr(builder, "reference_symbol", None):
+        controls["reference_symbol"] = builder.reference_symbol
+    if getattr(builder, "htf_rules", None):
+        controls["htf_rules"] = list(builder.htf_rules)
+
+    rsi_min = controls.get("rsi_entry_band_min")
+    rsi_max = controls.get("rsi_entry_band_max")
+    if rsi_min is not None or rsi_max is not None:
+        controls["rsi_entry_band"] = {
+            k: v
+            for k, v in {"min": rsi_min, "max": rsi_max}.items()
+            if v is not None
+        }
+
+    return controls
 
 
 def _extract_indicators(entry_condition: str | None, exit_condition: str | None) -> dict[str, list[int]]:

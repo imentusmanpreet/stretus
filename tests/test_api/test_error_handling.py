@@ -234,16 +234,10 @@ async def test_history_message_payload_hydrates_runtime_risk_execution_from_db(m
         snapshot_cache={},
     )
 
-    assert payload["strategy_json"]["context"]["strategy_object"]["risk_and_execution"] == {
-        "max_trades": 2.0,
-        "risk_reward": 2.5,
-        "stop_loss_pct": 2.0,
-        "daily_loss_cap": 3.0,
-        "execution_mode": "Backtest",
-        "per_trade_risk": 2.0,
-        "trading_window": "9:15 - 15:30",
-        "position_sizing": "Risk based",
-        "risk_validation": "system risk guardials",
-        "take_profit_pct": 5.0,
-        "minimum_trade_value": 500.0,
-    }
+    risk = payload["strategy_json"]["context"]["strategy_object"]["risk_and_execution"]
+    # Assembled values win; runtime config only backfills missing keys.
+    assert risk["per_trade_risk"] == "1.0% of capital per trade"
+    assert risk["trading_window"] == "old-window"
+    assert risk["stop_loss_pct"] == 2.0
+    assert risk["take_profit_pct"] == 5.0
+    assert risk["max_trades"] == 2.0

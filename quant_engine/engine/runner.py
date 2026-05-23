@@ -13,6 +13,7 @@ Flow:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -107,14 +108,30 @@ def run_backtest(
     # uses each as an entry-gate (no-look-ahead).
     htf_ohlcv: dict[str, list[dict[str, Any]] | list[list[Any]]] | None = None,
 ) -> dict:
+    pipeline_start = time.perf_counter()
     logger.info("🧮 Starting backtest pipeline")
 
+    # Step 1: Load strategy configuration
+    step_start = time.perf_counter()
     cfg = _load_strategy_config_from_input(yaml_content)
+    logger.info(
+        "⏱️  TIMING|step=load_strategy_config|duration=%.4fs",
+        time.perf_counter() - step_start,
+    )
+    
+    # Step 2: Load and normalize OHLCV data
+    step_start = time.perf_counter()
     df  = load_ohlcv_data(ohlcv_data)
     df, market_data_request = _enforce_market_data_window(df, market_data_request)
+    logger.info(
+        "⏱️  TIMING|step=load_normalize_ohlcv|duration=%.4fs|rows=%d",
+        time.perf_counter() - step_start,
+        len(df),
+    )
 
     # ── Phase 4: reference symbol merge ───────────────────────────────────────
     if cfg.reference_symbol:
+        step_start = time.perf_counter()
         if not reference_ohlcv:
             raise ValueError(
                 f"Strategy declares reference_symbol={cfg.reference_symbol!r} "
@@ -124,7 +141,8 @@ def run_backtest(
         ref_df = load_ohlcv_data(reference_ohlcv)
         df = merge_reference_data(df, ref_df)
         logger.info(
-            "🔗 Reference symbol merged | reference_symbol=%s ref_rows=%s",
+            "⏱️  TIMING|step=merge_reference_data|duration=%.4fs|reference_symbol=%s|ref_rows=%s",
+            time.perf_counter() - step_start,
             cfg.reference_symbol, len(ref_df),
         )
     elif reference_ohlcv:
@@ -142,6 +160,7 @@ def run_backtest(
     # entry-gates: an LTF entry signal must be confirmed by every HTF rule.
     htf_contexts: list[HtfContext] = []
     if cfg.htf_rules:
+        step_start = time.perf_counter()
         if not htf_ohlcv:
             declared = [r.timeframe for r in cfg.htf_rules]
             raise ValueError(
@@ -159,7 +178,8 @@ def run_backtest(
                 raise ValueError(f"htf_ohlcv[{tf!r}] failed to load: {exc}") from exc
         htf_contexts = build_htf_contexts(cfg.htf_rules, htf_dfs, df.index)
         logger.info(
-            "🔭 HTF gates active | rules=%s",
+            "⏱️  TIMING|step=build_htf_contexts|duration=%.4fs|rules=%s",
+            time.perf_counter() - step_start,
             [(r.timeframe, r.condition) for r in cfg.htf_rules],
         )
     elif htf_ohlcv:
@@ -168,6 +188,7 @@ def run_backtest(
         )
 
     # ── Data sufficiency check ─────────────────────────────────────────────────
+    step_start = time.perf_counter()
     required_warmup = max_indicator_warmup(cfg.indicators)
     if cfg.entry_evaluation_mode == "registry":
         required_warmup = max(
@@ -180,6 +201,11 @@ def run_backtest(
             estimate_kb_warmup(cfg.exit_signal_rules or []),
         )
     _check_data_sufficiency(df, required_warmup, cfg.symbol)
+    logger.info(
+        "⏱️  TIMING|step=data_sufficiency_check|duration=%.4fs|required_warmup=%d",
+        time.perf_counter() - step_start,
+        required_warmup,
+    )
 
     logger.info(
         "📊 Backtest inputs ready | symbol=%s timeframe=%s objective=%s candles=%s warm_up=%s",
@@ -190,12 +216,17 @@ def run_backtest(
     # Parsing the condition string and walking its AST ~210k× per backtest is
     # the dominant CPU cost. compile_condition() does it once and also tells us
     # every indicator the formulas reference, so we can vectorise them below.
+    step_start = time.perf_counter()
     compiled_entry: CompiledCondition | None = None
     compiled_exit:  CompiledCondition | None = None
     if cfg.entry_evaluation_mode == "formula":
         compiled_entry = compile_condition(cfg.entry_condition or "")
     if cfg.exit_evaluation_mode == "formula":
         compiled_exit = compile_condition(cfg.exit_condition or "")
+    logger.info(
+        "⏱️  TIMING|step=compile_conditions|duration=%.4fs",
+        time.perf_counter() - step_start,
+    )
 
     # ── Compute indicators (Fix 1: precompute once, never again) ──────────────
     # We merge the YAML-declared indicators with anything the compiled conditions
@@ -204,6 +235,7 @@ def run_backtest(
     # Phase 3: trailing/structural-SL specs may reference ATR(N)/EMA(N) columns
     # that the formula doesn't otherwise mention. Inject them so add_all_indicators
     # precomputes them in the same vectorised pass.
+    step_start = time.perf_counter()
     sl_indicator_requirements = _stop_spec_indicator_requirements(
         cfg.stop_loss_spec, cfg.trailing_stop_spec,
     )
@@ -216,6 +248,11 @@ def run_backtest(
     )
     df = add_all_indicators(df, enriched_indicator_config)
     _ensure_scalar_indicators(df, compiled_entry, compiled_exit)
+    logger.info(
+        "⏱️  TIMING|step=compute_indicators|duration=%.4fs|indicators=%s",
+        time.perf_counter() - step_start,
+        list(enriched_indicator_config.keys()),
+    )
 
     # Phase 6 — structural patterns. We auto-discover any IS_* identifier the
     # entry/exit conditions reference and compute the corresponding columns
@@ -227,11 +264,13 @@ def run_backtest(
         if compiled is not None:
             pattern_idents.update(compiled.pattern_refs)
     if pattern_idents:
+        step_start = time.perf_counter()
         auto_config = patterns_required_by_identifiers(pattern_idents)
         merged_pattern_config = merge_pattern_configs(auto_config, cfg.patterns)
         df = add_all_patterns(df, merged_pattern_config)
         logger.info(
-            "🧩 Patterns precomputed | identifiers=%s overrides=%s",
+            "⏱️  TIMING|step=compute_patterns|duration=%.4fs|identifiers=%s|overrides=%s",
+            time.perf_counter() - step_start,
             sorted(pattern_idents), bool(cfg.patterns),
         )
 
@@ -254,6 +293,7 @@ def run_backtest(
     )
 
     # ── Run simulation ────────────────────────────────────────────────────────
+    step_start = time.perf_counter()
     trades, diagnostics = simulate_trades(
         df=df,
         symbol=cfg.symbol,
@@ -280,18 +320,37 @@ def run_backtest(
         trailing_stop_spec=cfg.trailing_stop_spec,
         htf_contexts=htf_contexts,
         time_exit_spec=cfg.time_exit_spec,
-        trade_direction="AUTO",  # Auto-detect from entry signals
+        # Phase 10 — new entry gates and circuit breakers
+        entry_window_start_utc=cfg.entry_window_start_utc,
+        entry_window_end_utc=cfg.entry_window_end_utc,
+        max_consecutive_losses=cfg.max_consecutive_losses,
+        cooldown_bars_after_loss=cfg.cooldown_bars_after_loss,
+        cooldown_bars_after_profit=cfg.cooldown_bars_after_profit,
+        max_spread_bps=cfg.max_spread_bps,
+        gap_filter=cfg.gap_filter,
+        gap_threshold_pct=cfg.gap_threshold_pct,
+        entry_confirmation_bars=cfg.entry_confirmation_bars,
+        rsi_entry_band_min=cfg.rsi_entry_band_min,
+        rsi_entry_band_max=cfg.rsi_entry_band_max,
+        volume_ratio_threshold=cfg.volume_ratio_threshold,
+    )
+    simulation_duration = time.perf_counter() - step_start
+    logger.info(
+        "⏱️  TIMING|step=simulate_trades|duration=%.4fs|trades=%d|candles=%d",
+        simulation_duration,
+        len(trades),
+        len(df),
     )
 
-    # Derive strategy side from the trades produced
+    # Derive strategy side from the trades produced (LONG if majority are long)
     if trades:
         long_count   = sum(1 for t in trades if str(t.side).upper() == "LONG")
-        short_count  = sum(1 for t in trades if str(t.side).upper() == "SHORT")
-        strategy_side = "LONG" if long_count >= short_count else "SHORT"
+        strategy_side = "LONG" if long_count >= len(trades) / 2 else "SHORT"
     else:
         strategy_side = "LONG"
 
     # ── Build result ──────────────────────────────────────────────────────────
+    step_start = time.perf_counter()
     result = build_backtest_result(
         trades=trades,
         df=df,
@@ -320,11 +379,19 @@ def run_backtest(
             "max_trades_per_day":    max_trades_per_day,
         },
     )
+    metrics_duration = time.perf_counter() - step_start
+    logger.info(
+        "⏱️  TIMING|step=build_metrics|duration=%.4fs",
+        metrics_duration,
+    )
 
+    pipeline_duration = time.perf_counter() - pipeline_start
     n_trades = int(result["metrics"].get("total_trades") or 0)
     logger.info(
+        "⏱️  TIMING|step=COMPLETE_PIPELINE|duration=%.4fs|"
         "quant_engine|event=backtest_complete|ref=%s|objective=%s|trades_executed=%s|"
         "ending_balance=%.2f|pass=%s",
+        pipeline_duration,
         result["backtest_ref_id"],
         objective,
         n_trades,

@@ -55,6 +55,36 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{- define "python-ai.marketDataGrpcTarget" -}}
+{{- $svc := .Values.marketData.grpc.serviceName | default "marketdata-ingestion" -}}
+{{- $port := .Values.marketData.grpc.port | default 50057 -}}
+{{- $ns := .Values.marketData.grpc.namespace | default .Release.Namespace -}}
+{{- printf "%s.%s.svc.cluster.local:%v" $svc $ns $port -}}
+{{- end }}
+
+{{/*
+  Injected on the Deployment (not via .Values.env) so ArgoCD env overrides
+  cannot strip gRPC settings. Matches BFF: marketdata-ingestion.<ns>.svc.cluster.local:50057
+*/}}
+{{- define "python-ai.marketDataEnv" -}}
+{{- if .Values.marketData.grpc.enabled }}
+- name: MARKET_DATA_FETCH_TRANSPORT
+  value: {{ .Values.marketData.fetchTransport | default "grpc" | quote }}
+- name: MARKET_DATA_GRPC_TARGET
+  value: {{ include "python-ai.marketDataGrpcTarget" . | quote }}
+- name: MARKET_DATA_GRPC_TIMEOUT_SECONDS
+  value: {{ .Values.marketData.grpc.timeoutSeconds | default 120 | quote }}
+- name: MARKET_DATA_GRPC_SECURE
+  value: {{ .Values.marketData.grpc.secure | default false | quote }}
+{{- end }}
+{{- if .Values.marketData.httpFallback.historicalDataUrl }}
+- name: HISTORICAL_DATA_URL
+  value: {{ .Values.marketData.httpFallback.historicalDataUrl | quote }}
+{{- end }}
+- name: HISTORICAL_DATA_TIMEOUT_SECONDS
+  value: {{ .Values.marketData.httpFallback.timeoutSeconds | default 120 | quote }}
+{{- end }}
+
 {{- define "python-ai.quantImage" -}}
 {{- $global := index .Values "global" | default dict -}}
 {{- $registry := index $global "imageRegistry" | default "" -}}

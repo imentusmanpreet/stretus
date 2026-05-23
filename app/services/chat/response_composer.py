@@ -92,26 +92,29 @@ def normalize_backtest_failure_reason(reason: str | None) -> str:
     return message.rstrip(".") + ". Please review the configuration and try again."
 
 
-def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
+def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa: C901
     if code not in ASSISTANT_RESPONSE_CODES:
         raise ValueError(f"Unsupported assistant response code: {code}")
 
     if code == "collect_input.welcome":
         return (
-            "Welcome to Stretus — your AI-powered platform for building and backtesting trading strategies without coding.\n\n"
-            "Choose a stock to get started, and Stretus will create a data-driven strategy tailored to your preferences and market outlook.\n\n"
-            "You’ll receive:\n"
-            "• Optimized signal selection\n"
-            "• Clear entry and exit rules\n"
-            "• Risk and reward parameters\n"
-            "• Backtest performance insights\n\n"
-            "Required Inputs (with examples):\n"
-            "• Stock Selection: TCS\n"
-            "• Timeframe: 5 Min / 15 Min / 1 Hour / Daily\n"
-            "• Market View: Bullish / Bearish\n"
-            "• Trading Style: Intraday / Positional\n"
-            "• Experience Level: Beginner / Intermediate / Advanced\n"
-            "• Trading Goal: Quick Profits / Swing Gains / Long-Term Growth / Low Risk Income"
+            "## Welcome to Stretus\n\n"
+            "Your AI-powered platform for building and backtesting **algorithmic trading strategies** on Indian equities \u2014 no coding required.\n\n"
+            "Tell me a stock to get started and I\'ll design a data-driven strategy tailored to your style and market outlook.\n\n"
+            "**What you\'ll get:**\n"
+            "- Ranked entry & exit signal selection from a vetted knowledge base\n"
+            "- Risk parameters calibrated to your experience level\n"
+            "- Historical backtest with return, win rate, and grade\n\n"
+            "**I\'ll need these 6 inputs:**\n\n"
+            "| Input | Example |\n"
+            "|-------|---------|\n"
+            "| Stock | TCS, Reliance, HDFC Bank |\n"
+            "| Timeframe | 5m / 15m / 1h / 1d |\n"
+            "| Trade type | Intraday / Positional |\n"
+            "| Market view | Bullish / Bearish |\n"
+            "| Experience | Beginner / Intermediate / Expert |\n"
+            "| Goal | Quick profits / Swing gains / Low-risk income |\n\n"
+            "Which stock would you like to start with?"
         )
 
     if code == "validation.invalid_input":
@@ -119,8 +122,8 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         label = FIELD_LABELS.get(resolved_field, resolved_field.replace("_", " "))
         example = FIELD_EXAMPLES.get(resolved_field, "please share the requested field in a simple format")
         return (
-            f"I could not identify a valid {label} from your response. "
-            f"Please provide it again. Example: {example}."
+            f"Couldn\'t parse a valid **{label}** from that. "
+            f"Try again \u2014 example: `{example}`"
         )
 
     if code == "validation.low_confidence_clarification":
@@ -129,24 +132,24 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         label = FIELD_LABELS.get(resolved_field, resolved_field.replace("_", " "))
         if interpreted_values:
             return (
-                f"I understood the following from your message: {interpreted_values}. "
-                f"Please confirm the {label} to continue."
+                f"Picked up: **{interpreted_values}**\n\n"
+                f"Please confirm the **{label}** to continue."
             )
-        return f"Please confirm the {label} to continue."
+        return f"Please confirm the **{label}** to continue."
 
     if code == "safety.stock_advice_boundary":
         return (
-            "I cannot provide personalized stock advice or buy/sell recommendations. "
-            "However, I can help you build and evaluate a strategy for a stock you select.\n\n"
-            f"Currently supported stocks: {SUPPORTED_STOCK_SELECTION_PROMPT}.\n"
-            "Please pick one of these to continue."
+            "I don\'t provide buy/sell calls or stock tips \u2014 that\'s outside my scope.\n\n"
+            "What I *can* do is help you build and backtest a rules-based strategy for any stock you choose.\n\n"
+            f"**Supported stocks:** {SUPPORTED_STOCK_SELECTION_PROMPT}\n\n"
+            "Pick one to get started."
         )
 
     if code == "validation.unsupported_stock":
         supported_stocks_display = _compact_text(facts.get("supported_stocks_display"))
         return (
-            "This stock is not currently supported for strategy creation and backtesting.\n\n"
-            f"Currently supported stocks are: {supported_stocks_display}. "
+            "That stock isn\'t in my universe yet.\n\n"
+            f"**Currently supported:** {supported_stocks_display}\n\n"
             "Please select one of these to continue."
         )
 
@@ -155,25 +158,27 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         options = facts.get("stock_options")
         if not isinstance(options, list):
             options = []
-        option_text = ", ".join(
-            _format_stock_option(option, idx)
+        option_lines = "\n".join(
+            f"- {_format_stock_option(option, idx)}"
             for idx, option in enumerate(options, start=1)
         )
-        if option_text:
+        if option_lines:
             return (
-                f"I found multiple stocks starting with '{stock_query}'. "
-                f"Please choose one: {option_text}."
+                f"Found multiple matches for **\'{stock_query}\'**:\n\n"
+                f"{option_lines}\n\n"
+                "Which one did you mean?"
             )
         return (
-            f"I found multiple stocks starting with '{stock_query}'. "
-            "Please type the full stock symbol or company name."
+            f"**\'{stock_query}\'** matched several symbols. "
+            "Please type the full symbol or company name."
         )
 
     if code == "validation.unsupported_timeframe":
         supported_timeframes = _compact_text(facts.get("supported_timeframes"))
         return (
-            "The selected timeframe is not currently supported. "
-            f"Please choose one of the supported intervals: {supported_timeframes}."
+            "That timeframe isn\'t supported.\n\n"
+            f"**Supported intervals:** {supported_timeframes}\n\n"
+            "Pick one to continue."
         )
 
     if code in {
@@ -184,53 +189,56 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         "collect_input.ask_experience",
         "collect_input.ask_goal",
     }:
-        preface = _preface_lines(
-            facts.get("preface"),
-            (
-                f"I have recorded the following so far: {_compact_text(facts.get('captured_summary'))}."
-                if _compact_text(facts.get("captured_summary"))
-                else ""
-            ),
-        )
+        summary = _compact_text(facts.get("captured_summary"))
+        preface_parts: list[str] = []
+        if _compact_text(facts.get("preface")):
+            preface_parts.append(_compact_text(facts.get("preface")))
+        if summary:
+            preface_parts.append(f"*Captured so far: {summary}*")
+
         if code == "collect_input.ask_symbol":
-            question = f"Which Indian stock would you like to analyze? {SUPPORTED_STOCK_SELECTION_PROMPT}."
+            question = (
+                f"Which Indian stock would you like to build a strategy for?\n\n"
+                f"**Available:** {SUPPORTED_STOCK_SELECTION_PROMPT}"
+            )
         elif code == "collect_input.ask_timeframe":
             asset = _compact_text(facts.get("asset"))
             supported_timeframes = _compact_text(facts.get("supported_timeframes"))
-            if asset:
-                question = f"Please confirm the timeframe for {asset}. Supported intervals are {supported_timeframes}."
-            else:
-                question = f"Please confirm the timeframe. Supported intervals are {supported_timeframes}."
+            question = (
+                f"What timeframe for **{asset}**? Supported: `{supported_timeframes}`"
+                if asset
+                else f"What timeframe? Supported: `{supported_timeframes}`"
+            )
         elif code == "collect_input.ask_objective":
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"Should this be an intraday or positional strategy for {asset}?"
+                f"**{asset}** \u2014 intraday or positional?"
                 if asset
-                else "Should this strategy be intraday or positional?"
+                else "Intraday or positional?"
             )
         elif code == "collect_input.ask_sentiment":
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"What is your market view on {asset}: bullish or bearish?"
+                f"Market view on **{asset}**: bullish or bearish?"
                 if asset
-                else "What is your market view: bullish or bearish?"
+                else "Market view: bullish or bearish?"
             )
         elif code == "collect_input.ask_experience":
-            question = "How would you describe your trading experience: beginner, intermediate, or expert?"
+            question = "Trading experience level: **beginner**, **intermediate**, or **expert**?"
         else:
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"Please describe your trading goal for {asset} so we can tailor the strategy accordingly.\n"
-                f"Examples: {GOAL_EXAMPLES_TEXT}.\n"
-                "Enter your goal in simple terms to proceed."
+                f"What\'s your trading goal for **{asset}**?\n\n"
+                f"*Examples: {GOAL_EXAMPLES_TEXT}*"
                 if asset
                 else (
-                    "Please describe your trading goal so we can tailor the strategy accordingly.\n"
-                    f"Examples: {GOAL_EXAMPLES_TEXT}.\n"
-                    "Enter your goal in simple terms to proceed."
+                    f"What\'s your trading goal?\n\n"
+                    f"*Examples: {GOAL_EXAMPLES_TEXT}*"
                 )
             )
-        return f"{preface}\n{question}".strip() if preface else question
+
+        preface = "\n\n".join(preface_parts)
+        return f"{preface}\n\n{question}".strip() if preface else question
 
     if code == "workflow.input_summary_confirmation":
         asset = _compact_text(facts.get("asset"), "this asset")
@@ -240,12 +248,16 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         experience = _compact_text(facts.get("experience"))
         goal = _compact_text(facts.get("goal"))
         return (
-            f"I have captured the required inputs for {asset} on {timeframe} in the Indian stock market.\n"
-            f"Objective: {objective}\n"
-            f"Sentiment: {sentiment}\n"
-            f"Experience: {experience}\n"
-            f"Goal: {goal}\n\n"
-            "Please confirm if these details are correct. I will then plan the signals."
+            f"## Strategy Setup \u2014 {asset}\n\n"
+            f"| Field | Value |\n"
+            f"|-------|-------|\n"
+            f"| Stock | **{asset}** |\n"
+            f"| Timeframe | `{timeframe}` |\n"
+            f"| Trade type | {objective} |\n"
+            f"| Market view | {sentiment} |\n"
+            f"| Experience | {experience} |\n"
+            f"| Goal | {goal} |\n\n"
+            "All inputs locked in. **Confirm to plan the signals**, or tell me what to change."
         )
 
     if code == "workflow.signal_plan_ready":
@@ -253,12 +265,13 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         reminder = bool(facts.get("reminder"))
         if reminder:
             return (
-                f'The signal plan for "{asset}" is ready. '
-                "Please confirm if you would like me to assemble the strategy."
+                f"Signal plan for **{asset}** is ready and waiting.\n\n"
+                "Confirm to assemble the strategy."
             )
         return (
-            f'I have reviewed the embedded knowledge base for "{asset}" and prepared the signal plan. '
-            "Please confirm if you would like me to assemble the strategy."
+            f"## Signal Plan Ready \u2014 {asset}\n\n"
+            "Scanned the knowledge base, ranked the signals, locked in the best fit for your setup.\n\n"
+            "**Confirm to assemble the strategy** \u2014 I\'ll wire up entry, exit, and risk parameters."
         )
 
     if code == "workflow.strategy_ready_for_backtest":
@@ -267,12 +280,17 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         exit_names = _compact_text(facts.get("exit_names"))
         if entry_names or exit_names:
             return (
-                f"The strategy for {asset} has been assembled.\n"
-                f"Entry signals: {entry_names or 'n/a'}\n"
-                f"Exit signals: {exit_names or 'n/a'}\n"
-                "The strategy is ready for backtesting. Please confirm if you would like me to proceed."
+                f"## Strategy Assembled \u2014 {asset}\n\n"
+                f"| Role | Signals |\n"
+                f"|------|---------|\n"
+                f"| Entry | `{entry_names or 'n/a'}` |\n"
+                f"| Exit | `{exit_names or 'n/a'}` |\n\n"
+                "Strategy is built and ready. **Confirm to run the backtest.**"
             )
-        return "The strategy is ready for backtesting. Please confirm if you would like me to proceed."
+        return (
+            "## Strategy Ready\n\n"
+            "All parameters locked in. **Confirm to run the backtest.**"
+        )
 
     if code == "workflow.backtest_complete":
         asset = _compact_text(facts.get("asset"), "this asset")
@@ -283,97 +301,116 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:
         grade = _compact_text(facts.get("overall_grade"))
         reason = _compact_text(facts.get("failure_reason"))
 
+        verdict = "\u2705 **Passed**" if passed else "\u274c **Did not pass**"
         lines = [
-            f"The backtest for {asset} is complete.",
-            f"Result: {'Passed' if passed else 'Did not pass'}",
+            f"## Backtest Complete \u2014 {asset}",
+            "",
+            f"**Verdict:** {verdict}",
+            "",
+            "| Metric | Value |",
+            "|--------|-------|",
         ]
         if total_return_pct:
-            lines.append(f"Strategy return: {total_return_pct}")
+            lines.append(f"| Return | {total_return_pct} |")
         if win_rate_pct:
-            lines.append(f"Win rate: {win_rate_pct}")
+            lines.append(f"| Win Rate | {win_rate_pct} |")
         if total_trades:
-            lines.append(f"Total trades: {total_trades}")
+            lines.append(f"| Total Trades | {total_trades} |")
         if grade:
-            lines.append(f"Overall grade: {grade}")
+            lines.append(f"| Grade | **{grade}** |")
         if not passed and reason:
-            lines.append(f"Reason: {reason}")
-        lines.append("Please review the results before proceeding with any further changes.")
+            lines.append("")
+            lines.append(f"> \u26a0\ufe0f **Reason:** {reason}")
+        lines.append("")
+        lines.append("Review the results above. Want to tweak parameters and re-run, or start a new setup?")
         return "\n".join(lines)
 
     if code == "workflow.backtest_failed":
         reason = normalize_backtest_failure_reason(facts.get("reason"))
-        return f"I was unable to complete the backtest. {reason}"
+        return f"## Backtest Failed\n\n> \u26a0\ufe0f {reason}\n\nReview the inputs and try again."
 
     if code == "workflow.backtest_already_available":
         return (
-            "A backtest result is already available for this strategy. "
-            "Please review the existing result before starting a new run."
+            "A backtest result is already available for this strategy.\n\n"
+            "Review the existing result before triggering a new run."
         )
 
     if code == "clarification.tutorial":
         supported_timeframes = _compact_text(facts.get("supported_timeframes"))
+        _tf = supported_timeframes or FIELD_EXAMPLES["timeframe"]
+        _obj = FIELD_EXAMPLES["objective"]
+        _sent = FIELD_EXAMPLES["sentiment"]
+        _exp = FIELD_EXAMPLES["experience"]
+        _goal = FIELD_EXAMPLES["goal"]
         return (
-            "Here is how Stretus works, step by step:\n"
-            f"1. Pick a stock from the supported universe ({SUPPORTED_STOCK_SELECTION_PROMPT}).\n"
-            f"2. Choose a {FIELD_LABELS['timeframe']} ({supported_timeframes or FIELD_EXAMPLES['timeframe']}).\n"
-            f"3. Tell me your {FIELD_LABELS['objective']} ({FIELD_EXAMPLES['objective']}).\n"
-            f"4. Share your {FIELD_LABELS['sentiment']} ({FIELD_EXAMPLES['sentiment']}).\n"
-            f"5. Share your {FIELD_LABELS['experience']} ({FIELD_EXAMPLES['experience']}).\n"
-            f"6. Describe your {FIELD_LABELS['goal']} in your own words ({FIELD_EXAMPLES['goal']}).\n\n"
-            "Once these are captured, I will plan signals from the knowledge base, "
-            "assemble the strategy, and run a backtest you can review.\n\n"
-            "Whenever you are ready, name a stock from the list above and I will guide you through the rest."
+            "## How Stretus Works\n\n"
+            "**6 steps from idea to backtest:**\n\n"
+            f"1. **Stock** \u2014 pick from the supported universe ({SUPPORTED_STOCK_SELECTION_PROMPT})\n"
+            f"2. **Timeframe** \u2014 {_tf}\n"
+            f"3. **Trade type** \u2014 {_obj}\n"
+            f"4. **Market view** \u2014 {_sent}\n"
+            f"5. **Experience** \u2014 {_exp}\n"
+            f"6. **Goal** \u2014 describe it in plain English ({_goal})\n\n"
+            "Once I have those, I\'ll:\n"
+            "- Pull the best-fit signals from the knowledge base\n"
+            "- Assemble the full strategy with entry, exit, and risk rules\n"
+            "- Run a historical backtest and report the results\n\n"
+            "Name a stock whenever you\'re ready."
         )
 
     if code == "clarification.onboarding":
         return (
-            "Welcome. I can help you in three ways:\n"
-            "1. Build and backtest a trading strategy. Just name one of the supported stocks "
-            f"({SUPPORTED_STOCK_SELECTION_PROMPT}) and I will walk you through the inputs.\n"
-            "2. Explain how this tool works step by step. Ask 'how to use this tool' or 'walk me through it'.\n"
-            "3. Explain a trading concept (for example RSI, EMA crossover, ATR). Just ask 'what is RSI?'.\n\n"
-            "Which of these would you like to start with?"
+            "## Getting Started\n\n"
+            "Three ways I can help:\n\n"
+            f"1. **Build a strategy** \u2014 name any supported stock ({SUPPORTED_STOCK_SELECTION_PROMPT}) and I\'ll guide you through it\n"
+            "2. **Learn how it works** \u2014 ask *\'walk me through it\'* for a step-by-step walkthrough\n"
+            "3. **Understand a concept** \u2014 ask *\'what is RSI?\'*, *\'explain ORB\'*, etc.\n\n"
+            "What would you like to do?"
         )
 
     if code == "clarification.purpose_overview":
         supported_timeframes = _compact_text(facts.get("supported_timeframes"))
+        _tf = supported_timeframes or FIELD_EXAMPLES["timeframe"]
         return (
-            "Stretus is an AI assistant that helps you design, validate, assemble, "
-            "and backtest algorithmic trading strategies for Indian equities — without coding.\n\n"
-            "What I can do for you:\n"
-            "- Plan entry and exit signals using a knowledge base of vetted indicators.\n"
-            "- Apply risk-aware defaults like stop loss, take profit, and daily loss cap based on your experience.\n"
-            "- Run a historical backtest and report return, win rate, total trades, and a grade.\n"
-            "- Let you modify, reject, or restart at any step.\n\n"
-            f"Currently supported stocks: {SUPPORTED_STOCK_SELECTION_PROMPT}.\n"
-            f"Supported timeframes: {supported_timeframes or FIELD_EXAMPLES['timeframe']}.\n\n"
-            "Tell me a stock when you are ready, or ask 'how to use this tool' for a step-by-step walkthrough."
+            "## What Stretus Does\n\n"
+            "AI-powered strategy design and backtesting for **Indian equities** \u2014 no coding.\n\n"
+            "**Core capabilities:**\n"
+            "- Select entry & exit signals from a vetted indicator knowledge base\n"
+            "- Apply risk parameters calibrated to your experience and volatility\n"
+            "- Backtest on historical data \u2014 return, win rate, grade\n"
+            "- Modify, reject, or restart at any step\n\n"
+            f"**Universe:** {SUPPORTED_STOCK_SELECTION_PROMPT}\n\n"
+            f"**Timeframes:** `{_tf}`\n\n"
+            "Name a stock to start, or ask *\'how to use this tool\'* for the full walkthrough."
         )
 
     if code == "clarification.capability_examples":
         return (
-            "Here are some things you can ask me:\n"
-            "- 'Create an intraday bullish TCS strategy on 15m for a beginner with breakout goal'\n"
-            "- 'Change timeframe to 5m and keep everything else'\n"
-            "- 'Plan the signals' / 'assemble the strategy' / 'run the backtest'\n"
-            "- 'What stocks do you support?'\n"
-            "- 'What is RSI?' or 'Explain EMA crossover'\n\n"
-            "Pick any of these or describe what you want in your own words."
+            "## What You Can Ask\n\n"
+            "**Start a strategy:**\n"
+            "- *\'Intraday bullish TCS strategy on 15m for an intermediate trader\'*\n"
+            "- *\'Build an ORB setup on HDFC Bank with 1:2 RR\'*\n\n"
+            "**Modify inputs:**\n"
+            "- *\'Change timeframe to 5m, keep everything else\'*\n"
+            "- *\'Switch to bearish and re-plan\'*\n\n"
+            "**Drive the workflow:**\n"
+            "- *\'Plan the signals\'* \u2192 *\'Assemble the strategy\'* \u2192 *\'Run the backtest\'*\n\n"
+            "**Learn:**\n"
+            "- *\'What is RSI?\'*, *\'Explain EMA crossover\'*, *\'What stocks do you support?\'*\n\n"
+            "Describe what you want in your own words \u2014 I\'ll figure out the rest."
         )
 
     if code == "clarification.ambiguous":
         return (
-            "I want to make sure I help with the right thing. Could you tell me which of these you would like?\n"
-            "1. Build or test a trading strategy (just name a supported stock to start).\n"
-            "2. Learn how this tool works (a step-by-step walkthrough).\n"
-            "3. Understand a trading concept (for example, ask 'what is RSI?').\n"
-            "4. Something else — please describe it in your own words.\n\n"
-            f"For reference, the supported stocks are: {SUPPORTED_STOCK_SELECTION_PROMPT}."
+            "What would you like to do?\n\n"
+            "1. **Build a strategy** \u2014 name a stock and I\'ll guide you\n"
+            "2. **Learn how it works** \u2014 ask for a walkthrough\n"
+            "3. **Understand a concept** \u2014 *\'what is RSI?\'*, *\'explain ORB\'*\n"
+            "4. **Something else** \u2014 describe it\n\n"
+            f"*Supported stocks: {SUPPORTED_STOCK_SELECTION_PROMPT}*"
         )
 
     raise ValueError(f"Unsupported assistant response code: {code}")
-
-
 def build_invalid_input_message(field_name: str | None) -> str:
     return compose_response("validation.invalid_input", field_name=field_name)
 

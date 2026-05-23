@@ -1,0 +1,391 @@
+MASTER PROMPT (Ideal Prompt that must be supported with all its parameters acknowledged)
+```
+Create a production-grade intraday long-only momentum trading strategy for RELIANCE on a 1-minute timeframe.
+
+The strategy should be suitable for an intermediate trader and must include all required parameters needed for system validation, broker approval, risk checks, and safe live deployment.
+
+Important constraints:
+Strategy type: Intraday
+Direction: Long only
+Timeframe: 1 minute
+Symbol: RELIANCE
+No short-selling allowed
+No overnight holding allowed
+All positions must be squared off before market close
+The strategy should enter only during bullish intraday momentum conditions
+If the market is bearish, sideways, illiquid, volatile, or unclear, the strategy should stay in no-trade mode
+
+Include the following sections:
+
+1. Strategy metadata:
+Strategy name
+Symbol: RELIANCE
+Segment: Equity
+Exchange: NSE
+Strategy type: Intraday
+Trading style: Momentum
+Direction: Long only
+Timeframe: 1 minute
+Trader level: Intermediate
+Supported market regime: Bullish intraday trend only
+Product type: MIS / intraday product allowed by broker
+Order type: Market or limit based on spread/liquidity
+Max holding time
+Mandatory square-off time
+No fresh entry cutoff time
+
+2. Bullish intraday market regime detection:
+Define how the strategy identifies whether RELIANCE is in bullish intraday momentum.
+
+Use measurable rules such as:
+Price is above VWAP
+9 EMA is above 21 EMA
+21 EMA is sloping upward
+Price is making higher highs and higher lows
+Current price is above previous 15-minute high
+Volume is above recent average
+Broader market filter is positive, such as NIFTY 50 or sector index trading above VWAP
+
+Define no-trade mode when:
+Price is below VWAP
+Price is too close to VWAP
+9 EMA and 21 EMA are flat or crossing repeatedly
+Price is sideways
+Volume is weak
+Volatility is too low or abnormally high
+Broader market is weak or unclear
+
+3. Intraday session filters:
+Define when the strategy is allowed to trade.
+
+Include:
+Avoid first 5 to 15 minutes after market open
+Allow fresh entries only during the defined entry window
+Avoid fresh entries during the last 15 to 30 minutes before market close
+Mandatory square-off before market close
+Trade only during normal market hours
+Avoid trading during major scheduled events if configured
+Avoid fresh entries during abnormal news-driven volatility
+
+4. Long entry conditions:
+Enter a buy trade only when all conditions are true:
+Intraday regime is bullish
+Price is above VWAP
+9 EMA > 21 EMA
+21 EMA slope is positive
+Current 1-minute candle closes above previous 5-minute high
+Current price is above previous 15-minute high
+Volume > 1.5 × average 1-minute volume of last 20 candles
+RSI(14) is between 55 and 75
+Spread is within allowed limit
+Slippage estimate is within allowed limit
+NIFTY 50 or relevant sector index is not bearish
+No existing open position in RELIANCE
+Current time is inside allowed entry window
+
+5. Product and direction rules:
+Clearly define the product constraints.
+
+For long trades:
+Use only broker-approved intraday product such as MIS or equivalent
+Buying is allowed only if symbol, segment, product type, and broker permissions are valid
+No short-selling
+No derivatives unless explicitly enabled by user and broker
+No overnight conversion unless explicitly allowed and separately risk-approved
+
+6. Exit conditions:
+Define all long-exit rules.
+
+Include:
+Initial stop loss below recent swing low or 1.5 × ATR(14) on 1-minute chart
+Target based on minimum 1.5R or 2R reward-to-risk
+Trailing stop using 9 EMA or recent 3-candle low
+VWAP exit if price closes below VWAP
+Momentum exit if RSI(14) falls below 50
+Market weakness exit if NIFTY 50 suddenly turns bearish
+Time exit if trade does not move in favor within 10 to 15 minutes
+Emergency exit if spread/slippage becomes abnormal
+Mandatory square-off before market close
+
+7. Risk management:
+Total capital
+Max risk per trade
+Max capital allocation per trade
+Max daily loss
+Max number of trades per day
+Max consecutive losses per day
+Max open positions
+Max slippage allowed
+Max spread allowed
+Max order retries
+Cooldown period after loss
+Cooldown period after profit booking
+Leverage rule
+Intraday margin rule
+Auto square-off rule
+Kill switch rule
+API failure handling
+Order rejection handling
+
+8. Position sizing:
+Use risk-based position sizing with allocation and broker-margin caps.
+
+Formula:
+Risk amount = capital × max risk per trade %
+Risk per share = entry price − stop loss
+Raw quantity = risk amount / risk per share
+Allocation quantity = max allocation value / entry price
+Broker allowed quantity = quantity allowed by available margin
+Final quantity = min(raw quantity, allocation quantity, broker allowed quantity)
+
+Reject trade if:
+Risk per share <= 0
+Final quantity <= 0
+Required margin is unavailable
+Stop loss distance is too small or too large
+Position value exceeds allowed exposure
+Trade risk exceeds system or broker limit
+
+9. Execution rules:
+Define how orders should be placed and managed.
+
+Include:
+Confirm signal only after 1-minute candle close
+Do not enter during incomplete candle
+Use market order only if liquidity and spread are acceptable
+Otherwise use limit order
+Cancel unfilled limit order after defined timeout
+Validate order status after placement
+Place stop loss immediately after entry confirmation
+Do not place duplicate orders
+Handle partial fills
+Handle rejected orders
+Handle network/API failure
+Do not average down
+Do not revenge trade
+Do not enter if previous order status is unknown
+
+10. Re-entry rules:
+After stop loss: wait at least 5 to 10 minutes
+After profit exit: allow only on fresh bullish breakout
+After false breakout: require fresh confirmation with volume
+Stop trading after max daily loss is reached
+Stop trading after max consecutive losses is reached
+Do not re-enter immediately on the same candle
+Do not re-enter if price falls below VWAP after exit
+
+11. No-trade conditions:
+The strategy must not enter any fresh trade when:
+Market regime is not bullish
+Price is below VWAP
+Price is too close to VWAP
+EMAs are flat or whipsawing
+Volume confirmation is missing
+RSI is below 55 or above 75
+Spread is too wide
+Slippage risk is too high
+Volatility is abnormally high or too low
+Broader market is bearish
+Required broker permissions are missing
+Margin is insufficient
+API is inactive
+Kill switch is active
+Max daily loss is reached
+Max trade count is reached
+Current time is outside allowed entry window
+Existing position already exists
+
+12. Broker/deployment validation:
+Symbol validity
+Segment allowed
+Product type allowed
+Intraday product enabled
+Long direction allowed
+Short-selling disabled
+Entry rule present
+Exit rule present
+Stop loss present
+Capital greater than zero
+Risk within allowed limit
+Allocation within allowed limit
+Margin/funds available
+Exposure within allowed limit
+Spread/slippage within allowed limit
+Auto square-off configured
+API active
+Kill switch not triggered
+User authorization valid
+
+13. broker_status decision logic:
+Define auto approval, auto rejection, and manual review conditions.
+
+Examples:
+Auto approve if all rules are valid, risk is within limits, product is allowed, margin is available, stop loss exists, short-selling is disabled, and square-off is configured
+Auto reject if stop loss is missing, capital is zero, risk exceeds limit, product is not allowed, square-off is missing, short-selling is enabled, or margin is insufficient
+Manual review if leverage is high, volatility is abnormal, trade frequency is high, slippage assumptions are aggressive, or user risk profile is borderline
+
+Also provide:
+A clean JSON configuration example
+A plain-English explanation of the strategy
+One long-trade example with entry, stop loss, target, quantity, and exit
+Auto approval, auto rejection, and manual review conditions for broker_status
+Runtime order-management checks
+Failure-handling rules for rejected orders, partial fills, API downtime, and square-off failure
+
+Keep the strategy simple, logical, measurable, and deployable. Avoid vague rules like “buy when momentum is good.” Every rule must be system-readable.
+```
+
+FOR EXPERT TRADERS:
+
+1. Intraday Scalping Strategy (High Speed)
+Prompt:
+
+"Generate a high-frequency scalping strategy for TCS. Timeframe: 1-minute. Entry Logic: Price crosses above 20 EMA and RSI(14) is above 60. Exit Logic: 0.25% profit or 0.15% stop loss. Include slippage costs in the backtest and run it for the last 6 months."
+
+Expert Insight: The trader defined specific percentages and indicators (EMA, RSI) clearly to avoid ambiguity.
+
+2. Options Selling Strategy (Theta Decay)
+Prompt:
+
+"Create a Short Straddle strategy for GMR Airports. Entry: Sell ATM (At The Money) straddle at session start on Thursday. Stop Loss: 50% increase in premium. Target: Hold until Friday expiry to benefit from Theta decay. Filter: India VIX must be below 15."
+
+Expert Insight: An expert knows that selling options requires low volatility. Hence, the condition on India VIX was added.
+
+3. Trend Following Strategy (Ride the Wave)
+Prompt:
+
+"Create a trend following strategy for HDFC Bank on a Daily timeframe. Use Supertrend(10,3). Generate a Buy signal when the candle closes above the Supertrend line. Exit when the line flips. Risk Management: Maximum 2% capital risk per trade. Add a Trailing Stop Loss to lock in profits."
+
+Expert Insight: Mentioning "Trailing Stop Loss" is an expert trait used to maximize gains during strong trends.
+
+4. Mean Reversion Strategy (Buy the Dip)
+Prompt:
+
+"Scan Nifty 50 constituents for stocks that are 10% below their 20 SMA (Oversold zone). Entry: When RSI(14) crosses above 30 (Reversal signal). Stop Loss: Below the recent swing low. Target: Price returns to the 20 SMA. Timeframe: 1 Hour."
+
+Expert Insight: Experts don't just buy because price is low; they wait for confirmation (RSI cross) before entering.
+
+5. Opening Range Breakout (ORB) Strategy
+Prompt:
+
+"Code an Opening Range Breakout (ORB) strategy for Equity stocks. Timeframe: 5 Minutes. Mark the High and Low of the first 15 minutes. Buy if price closes 0.5% above the 15-minute high. Stop Loss: Below the 15-minute low. Exit: No open positions after 3:00 PM."
+
+Expert Insight: A time-based exit (3:00 PM) and a buffer (0.5%) are crucial for experts to avoid false breakouts and overnight risk.
+
+6. Momentum Strategy (Breakout Stocks)
+Prompt:
+
+"Create a momentum scanner for NHPC. Criteria: Today's volume must be 3x the average volume. Price must be within 2% of its 52-week high. Entry: Alert when price breaks the high during market hours. Ignore stocks with a gap-up opening."
+
+Expert Insight: The instruction to "Ignore gap-up opening" shows experience, as gap-ups often lead to reversals or high-risk entries.
+
+7. Pair Trading (Statistical Arbitrage)
+Prompt:
+
+"Create a correlation-based pair trading strategy between HDFC Bank and KOTAKBANK. Entry: Go Long/Short when the ratio (HDFC/KOTAK) moves 2 standard deviations away from the mean. Risk per pair trade: 1% of capital. Exit: When the ratio reverts to the mean."
+
+Expert Insight: This is a mathematical approach. Experts focus on the relationship between two stocks rather than just market direction.
+
+8. VWAP Based Intraday Strategy
+Prompt:
+
+"Generate an Intraday strategy for Reliance Industries using VWAP (Volume Weighted Average Price). Long Entry: Price above VWAP and bullish candle close. Short Entry: Price below VWAP and bearish candle close. Stop Loss: 0.5%. Exit: Target 1% or 2:30 PM (whichever is earlier)."
+
+Expert Insight: VWAP is a favorite indicator for institutional traders. The time limit (2:30 PM) is set to avoid high volatility in the last 30 minutes.
+
+9. Price Action with Multi-Timeframe Analysis
+Prompt:
+
+"Create a multi-timeframe strategy for Bajaj Finance. Daily chart trend must be bullish (Price > 50 SMA). Entry: Look for a 'Bullish Engulfing' pattern at support on the 15-minute chart. Stop Loss: Below the candle low. Risk to Reward Ratio: Mandatory 1:2."
+
+Expert Insight: Using "Confluence" (Multi-timeframe) confirms the trend. The expert fixed the Risk:Reward ratio to ensure profitability over the long run.
+
+10. Sectoral Rotation Strategy
+Prompt:
+
+"Build a rotation strategy for the top 4 Nifty IT stocks. Use RS (Relative Strength) indicator to identify which stock is outperforming the index. Enter long on the dip in that stock. Exit when RS weakens. Rebalance weekly."
+
+Expert Insight: This strategy hunts for the strongest stock in the sector. Experts never put money in weak stocks.
+
+\FOR INTERMEDIATE TRADERS:
+1. Moving Average Crossover Strategy (The Classic)
+Prompt:
+"Create a trend-following strategy for Infosys on a Daily timeframe. Use the 'Golden Cross' logic: Buy when the 50-day SMA crosses above the 200-day SMA. Sell when the 50-day SMA crosses below the 200-day SMA. Add a fixed 3% Stop Loss to protect capital."
+Intermediate Insight: This is a staple strategy for intermediate traders. It uses standard indicators (SMA) to catch long-term trends without overcomplicating the entry.
+2. RSI Overbought/Oversold Strategy
+Prompt:
+"Build a mean reversion strategy for Reliance Industries on a 1-hour timeframe. Entry: Buy when RSI(14) crosses above 30 (indicating recovery from oversold). Exit: Book profit when RSI touches 70 (overbought). Stop Loss: 2% below the entry price."
+Intermediate Insight: Intermediate traders understand the concept of 'Buying Low and Selling High'. RSI 30/70 levels are the standard textbook levels they learn first.
+3. MACD Momentum Strategy
+Prompt:
+"Generate a momentum strategy for Axis Bank using MACD (12, 26, 9). Buy Signal: When the MACD Line crosses above the Signal Line (Bullish Crossover). Sell Signal: When MACD Line crosses below Signal Line. Exit if the price drops 4% from the entry point."
+Intermediate Insight: MACD is a favorite for intermediate traders because it visually shows momentum shifts. The logic is simple and effective for swing trading.
+4. Bollinger Bands Squeeze Strategy
+Prompt:
+"Create a volatility breakout strategy for SBIN on a 1-hour chart. Buy when the price breaks above the Upper Bollinger Band with strong volume. Target Profit: 5%. Stop Loss: At the Middle Bollinger Band (20 SMA)."
+Intermediate Insight: Traders at this level learn that 'Bands' contract before a big move. This prompt captures that expansion logic simply.
+5. Swing Trading with Candlestick Patterns
+Prompt:
+"Scan Nifty 100 stocks for a 'Bullish Engulfing' pattern at a major support level on the Daily chart. Entry: At the opening of the next candle. Stop Loss: Below the low of the engulfing candle. Target: Risk to Reward ratio of 1:2."
+Intermediate Insight: Instead of complex coding, intermediate traders often look for reliable visual patterns. Defining Risk:Reward (1:2) is a key step in their risk management education.
+6. Breakout & Retest Strategy
+Prompt:
+"Develop a strategy for Tata Motors on a 4-hour timeframe. Identify a resistance level from the last 20 candles. Wait for a candle to close above it. Entry: Buy on the retest of that resistance turned support. Stop Loss: Below the breakout candle."
+Intermediate Insight: This shows market maturity. Beginners buy breakouts instantly; intermediate traders wait for the 'Retest' to confirm the level holds, increasing the probability of success.
+7. Options Buying (Long Straddle)
+Prompt:
+"Create a Long Straddle strategy for Nifty Weekly Options. Entry: Buy 1 ATM Call and 1 ATM Put at 9:20 AM. Exit: If total premium increases by 20% or at 3:00 PM on expiry day. Stop Loss: If total premium value drops by 30%."
+Intermediate Insight: Unlike experts who sell options for theta decay, intermediate traders often buy straddles to play big moves without predicting direction. They need defined exit rules to manage risk.
+8. Fibonacci Retracement Strategy
+Prompt:
+"Build a pullback strategy for HDFC Bank. Identify the recent swing high and swing low. Buy when the price retraces to the 50% Fibonacci level and forms a green candle. Stop Loss: Below the 61.8% level. Target: Previous swing high."
+Intermediate Insight: Using Fibonacci levels shows a trader is moving past basic indicators and learning about key support/resistance zones based on math ratios.
+9. Volume Spread Analysis (Simple)
+Prompt:
+"Generate a scanner for 'High Volume Breakouts' in the Cash market. Criteria: Stock price crosses above yesterday's high AND volume is at least 2 times the 10-day average volume. Exit: Simple trailing stop loss at 3%."
+Intermediate Insight: Intermediate traders learn that 'Volume precedes Price'. This prompt ensures they don't buy a breakout that has no participation.
+10. Double Bottom Pattern (Chart Pattern)
+Prompt:
+"Identify a 'Double Bottom' (W Pattern) formation in ICICI Bank on a Daily chart. Entry: When price breaks the neckline of the pattern. Stop Loss: Just below the second bottom. Target: Equal to the height of the pattern added to the neckline."
+Intermediate Insight: Chart patterns like Double Bottoms are classic technical analysis tools. This prompt asks the bot to automate the identification and trade execution.
+FOR BEGINNER TRADERS:
+1. The "Buy Low" Strategy (Simple RSI)
+Prompt:
+"I want to buy Infosys stock when it is cheap. Create a strategy where I buy when the RSI is below 30. Sell when the RSI goes above 60. Please keep a Stop Loss of 2% to protect my money."
+Beginner Insight: Beginners understand "Buy Low, Sell High." This prompt uses the RSI (a standard tool) to define "low" simply, without complex math.
+2. The "Safe Investor" Strategy (SMA Crossover)
+Prompt:
+"Create a simple long-term strategy for TCS. I want to buy when the price is higher than the average price of the last 50 days. I want to sell when the price falls below that average. I want to hold for at least a few weeks."
+Beginner Insight: This introduces the concept of "Trend Following" without confusing the user with multiple lines. It explains the 50-day average as a simple benchmark.
+3. The Fixed Profit Target
+Prompt:
+"I want a simple strategy for Reliance. Buy 10 shares if the price goes up by 1% from the market open. Immediately place a sell order for a 2% profit and a 1% Stop Loss. I don't want to hold any trade overnight."
+Beginner Insight: Beginners often struggle with "When to exit." This prompt forces a strict exit rule (Intraday only), teaching them that trading is about booking profits, not falling in love with a stock.
+4. The "Green Candle" Strategy
+Prompt:
+"Scan Nifty 50 stocks. Tell me which stocks have closed higher than their opening price (Green Candle) for the last 3 days in a row. I want to buy these stocks for a short-term swing trade."
+Beginner Insight: Visual learning is key for beginners. "Green Candle" is easier to understand than "Bullish Momentum." It teaches them to look for strength.
+5. The Weekly Savings Plan (SIP Style)
+Prompt:
+"I want to invest in HDFC Bank every week. Create a rule that buys shares worth 5000 rupees every Monday morning at market open. Do not sell, just keep buying."
+Beginner Insight: Many beginners are actually investors. This prompt automates a Systematic Investment Plan (SIP), which is the safest way for a newbie to start.
+6. The "Don't Lose Money" Strategy
+Prompt:
+"Create a strategy for any stock where the most important rule is safety. Buy at market open. If the price falls by 1%, sell immediately (Stop Loss). If the price goes up, hold it until the market closes at 3:15 PM."
+Beginner Insight: This teaches the most important lesson in trading: Capital Protection. It prioritizes the Stop Loss over the Profit Target.
+7. Previous Day High Breakout
+Prompt:
+"I want to trade SBIN. If the price crosses yesterday's highest price today, buy the stock. Sell it if it falls below yesterday's low price."
+Beginner Insight: This is a basic concept of "Resistance" and "Support" but explained in simple terms using "Yesterday's High/Low" instead of drawing lines.
+8. Simple MACD Crossover
+Prompt:
+"Use the MACD indicator for Axis Bank. Show me a Buy signal when the Blue line crosses above the Red line. Show me a Sell signal when the Blue line crosses below the Red line."
+Beginner Insight: MACD lines are visually distinct. Beginners often start with signal crossovers because they are easy to spot on a chart.
+9. Budget Trading (Risk Management)
+Prompt:
+"I have 10,000 rupees capital. Create a strategy that ensures I never lose more than 500 rupees in a single trade. Find stocks where the Stop Loss is very tight."
+Beginner Insight: This teaches position sizing. It forces the bot to calculate how many shares to buy based on the risk amount, which is a crucial skill for beginners.
+10. The 5-Day Average Pullback
+Prompt:
+"Find stocks that are going up steadily. Buy if the price comes close to the 5-day average price line. Sell if it hits 3% profit. Stop Loss at 2%."
+Beginner Insight: This introduces the concept of "Pullback" (buying a dip in an uptrend). Using the 5-day average is a short-term tool that is easy to track for a beginner.

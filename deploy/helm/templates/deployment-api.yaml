@@ -52,6 +52,9 @@ spec:
             # Injected by the chart so the URL tracks the release name automatically.
             - name: QUANT_ENGINE_URL
               value: "http://{{ include "python-ai.fullname" . }}-quant:{{ .Values.quantService.port }}"
+            # Market data gRPC (and HTTP fallback) — not part of .Values.env so ArgoCD
+            # inline `env:` overrides cannot remove in-cluster marketdata-ingestion access.
+            {{- include "python-ai.marketDataEnv" . | nindent 12 }}
           {{- with .Values.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}

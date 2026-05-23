@@ -204,6 +204,7 @@ def _overlay_runtime_risk_execution(
     payload: dict | None,
     risk_and_execution: dict | None,
 ) -> dict | None:
+    """Fill missing risk fields only — never replace an assembled risk block."""
     if not isinstance(payload, dict) or not isinstance(risk_and_execution, dict):
         return payload
 
@@ -213,7 +214,16 @@ def _overlay_runtime_risk_execution(
         return payload
 
     for strategy_object in strategy_objects:
-        strategy_object["risk_and_execution"] = dict(risk_and_execution)
+        existing = strategy_object.get("risk_and_execution")
+        if isinstance(existing, dict) and existing:
+            # Preserve user/assembled SL/TP/window; backfill only null/missing keys.
+            merged = dict(risk_and_execution)
+            for key, value in existing.items():
+                if value is not None:
+                    merged[key] = value
+            strategy_object["risk_and_execution"] = merged
+        else:
+            strategy_object["risk_and_execution"] = dict(risk_and_execution)
 
     return updated_payload
 

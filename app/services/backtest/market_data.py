@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 from typing import Any
 import logging
 
@@ -14,7 +15,13 @@ import httpx
 import yaml
 
 from app.core.config import get_settings
+from app.core.timing import time_step
 from app.schemas.backtest import BacktestTriggerRequest
+from app.services.backtest.market_data_grpc import (
+    fetch_ohlcv_chunk_grpc,
+    open_grpc_channel,
+    use_grpc_transport,
+)
 from app.services.backtest.ohlcv_cache import (
     get_cached_records,
     save_records as save_ohlcv_cache,
@@ -657,23 +664,41 @@ async def _fetch_single_chunk(
 ) -> list[dict[str, Any]]:
     """Fetch one chunk and return normalized records. Raises RuntimeError on HTTP error."""
     params = {"symbol": symbol, "from": from_utc, "to": to_utc, "interval": interval}
+    
+    chunk_start = time.perf_counter()
     logger.info(
         "📡 Fetching chunk %d/%d | symbol=%s interval=%s from=%s to=%s",
         chunk_idx, total_chunks, symbol, interval, from_utc, to_utc,
     )
+    
     try:
         response = await client.get(endpoint, params=params)
         response.raise_for_status()
+        
+        chunk_duration = time.perf_counter() - chunk_start
+        logger.info(
+            "⏱️  TIMING|step=fetch_chunk_%d|status=COMPLETE|duration=%.4fs|symbol=%s|interval=%s",
+            chunk_idx, chunk_duration, symbol, interval,
+        )
+        
     except httpx.HTTPStatusError as exc:
+        chunk_duration = time.perf_counter() - chunk_start
         logger.exception(
+            "⏱️  TIMING|step=fetch_chunk_%d|status=FAILED|duration=%.4fs|"
             "Market data service returned HTTP %s (chunk %d/%d)",
+            chunk_idx, chunk_duration,
             exc.response.status_code, chunk_idx, total_chunks,
         )
         raise RuntimeError(
             f"Market data service rejected the request with HTTP {exc.response.status_code}."
         ) from exc
     except httpx.HTTPError as exc:
-        logger.exception("Market data request failed (chunk %d/%d)", chunk_idx, total_chunks)
+        chunk_duration = time.perf_counter() - chunk_start
+        logger.exception(
+            "⏱️  TIMING|step=fetch_chunk_%d|status=FAILED|duration=%.4fs|"
+            "Market data request failed (chunk %d/%d)",
+            chunk_idx, chunk_duration, chunk_idx, total_chunks
+        )
         raise RuntimeError("Failed to fetch market data from the upstream service.") from exc
 
     try:
@@ -691,6 +716,8 @@ async def fetch_ohlcv_records(
     chunks of settings.backtest_fetch_chunk_days to avoid HTTP 429 on large ranges."""
     import asyncio
 
+    fetch_start = time.perf_counter()
+    
     resolved = (
         extract_strategy_market_data_request(request, overrides=overrides)
         if isinstance(request, str)
@@ -698,57 +725,127 @@ async def fetch_ohlcv_records(
     )
 
     # ── Fix 3: cache hit short-circuits the entire HTTP fetch ─────────────────
-    cached = get_cached_records(
-        resolved.symbol, resolved.interval, resolved.from_utc, resolved.to_utc,
-    )
+    with time_step("check_ohlcv_cache", extra_context={
+        "symbol": resolved.symbol,
+        "interval": resolved.interval,
+    }):
+        cached = get_cached_records(
+            resolved.symbol, resolved.interval, resolved.from_utc, resolved.to_utc,
+        )
+    
     if cached is not None:
+        fetch_duration = time.perf_counter() - fetch_start
+        logger.info(
+            "⏱️  TIMING|step=fetch_ohlcv_records|status=CACHE_HIT|duration=%.4fs|"
+            "symbol=%s|interval=%s|rows=%d",
+            fetch_duration, resolved.symbol, resolved.interval, len(cached),
+        )
         return cached
 
-    endpoint    = _resolve_market_data_endpoint(settings.historical_data_url)
-    chunk_days  = max(7, settings.backtest_fetch_chunk_days)
-    chunks      = _build_date_chunks(resolved.from_utc, resolved.to_utc, chunk_days)
+    chunk_days = max(7, settings.backtest_fetch_chunk_days)
+    chunks = _build_date_chunks(resolved.from_utc, resolved.to_utc, chunk_days)
+    use_grpc = use_grpc_transport(settings)
 
-    logger.info(
-        "📡 Fetching market data | symbol=%s interval=%s from=%s to=%s "
-        "total_chunks=%d chunk_days=%d endpoint=%s",
-        resolved.symbol, resolved.interval,
-        resolved.from_utc, resolved.to_utc,
-        len(chunks), chunk_days, endpoint,
-    )
+    if use_grpc:
+        logger.info(
+            "📡 Fetching market data via gRPC | symbol=%s interval=%s from=%s to=%s "
+            "total_chunks=%d chunk_days=%d target=%s",
+            resolved.symbol,
+            resolved.interval,
+            resolved.from_utc,
+            resolved.to_utc,
+            len(chunks),
+            chunk_days,
+            settings.market_data_grpc_target,
+        )
+    else:
+        endpoint = _resolve_market_data_endpoint(settings.historical_data_url)
+        logger.info(
+            "📡 Fetching market data via HTTP | symbol=%s interval=%s from=%s to=%s "
+            "total_chunks=%d chunk_days=%d endpoint=%s",
+            resolved.symbol,
+            resolved.interval,
+            resolved.from_utc,
+            resolved.to_utc,
+            len(chunks),
+            chunk_days,
+            endpoint,
+        )
 
     all_rows: list[dict[str, Any]] = []
     seen_timestamps: set = set()
 
-    async with httpx.AsyncClient(timeout=settings.historical_data_timeout_seconds) as client:
-        for idx, (chunk_from, chunk_to) in enumerate(chunks, start=1):
-            chunk_rows = await _fetch_single_chunk(
-                client, endpoint,
-                resolved.symbol, resolved.interval,
-                chunk_from, chunk_to,
-                idx, len(chunks),
-            )
-            for row in chunk_rows:
-                ts = row.get("timestamp")
-                if ts not in seen_timestamps:
-                    seen_timestamps.add(ts)
-                    all_rows.append(row)
+    if use_grpc:
+        from app.proto.gen.marketdata_pb2_grpc import MarketDataServiceStub
 
-            if idx < len(chunks):
-                await asyncio.sleep(0.3)  # brief pause between chunks
+        timeout = settings.market_data_grpc_timeout_seconds
+        async with open_grpc_channel(settings) as channel:
+            stub = MarketDataServiceStub(channel)
+            for idx, (chunk_from, chunk_to) in enumerate(chunks, start=1):
+                raw_rows = await fetch_ohlcv_chunk_grpc(
+                    stub,
+                    symbol=resolved.symbol,
+                    interval=resolved.interval,
+                    from_utc=chunk_from,
+                    to_utc=chunk_to,
+                    chunk_idx=idx,
+                    total_chunks=len(chunks),
+                    timeout_seconds=timeout,
+                )
+                try:
+                    chunk_rows = normalize_ohlcv_payload(raw_rows) if raw_rows else []
+                except ValueError:
+                    chunk_rows = []
+                for row in chunk_rows:
+                    ts = row.get("timestamp")
+                    if ts not in seen_timestamps:
+                        seen_timestamps.add(ts)
+                        all_rows.append(row)
+                if idx < len(chunks):
+                    await asyncio.sleep(0.3)
+    else:
+        endpoint = _resolve_market_data_endpoint(settings.historical_data_url)
+        async with httpx.AsyncClient(timeout=settings.historical_data_timeout_seconds) as client:
+            for idx, (chunk_from, chunk_to) in enumerate(chunks, start=1):
+                chunk_rows = await _fetch_single_chunk(
+                    client,
+                    endpoint,
+                    resolved.symbol,
+                    resolved.interval,
+                    chunk_from,
+                    chunk_to,
+                    idx,
+                    len(chunks),
+                )
+                for row in chunk_rows:
+                    ts = row.get("timestamp")
+                    if ts not in seen_timestamps:
+                        seen_timestamps.add(ts)
+                        all_rows.append(row)
+
+                if idx < len(chunks):
+                    await asyncio.sleep(0.3)  # brief pause between chunks
 
     all_rows.sort(key=lambda r: r["timestamp"])
 
     if not all_rows:
         raise ValueError("Market data response did not return any OHLCV records.")
 
+    fetch_duration = time.perf_counter() - fetch_start
     logger.info(
-        "✅ Market data received | symbol=%s interval=%s total_rows=%d chunks=%d",
-        resolved.symbol, resolved.interval, len(all_rows), len(chunks),
+        "⏱️  TIMING|step=fetch_ohlcv_records|status=COMPLETE|duration=%.4fs|"
+        "symbol=%s|interval=%s|total_rows=%d|chunks=%d",
+        fetch_duration, resolved.symbol, resolved.interval, len(all_rows), len(chunks),
     )
 
     # Persist for next time. Best-effort; won't fail the request on cache errors.
-    save_ohlcv_cache(
-        resolved.symbol, resolved.interval, resolved.from_utc, resolved.to_utc, all_rows,
-    )
+    with time_step("save_ohlcv_cache", extra_context={
+        "symbol": resolved.symbol,
+        "interval": resolved.interval,
+        "rows": len(all_rows),
+    }):
+        save_ohlcv_cache(
+            resolved.symbol, resolved.interval, resolved.from_utc, resolved.to_utc, all_rows,
+        )
 
     return all_rows

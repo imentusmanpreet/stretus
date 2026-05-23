@@ -42,6 +42,17 @@ from app.planner.trace import DecisionTrace
 from app.planner.validator import PlanInvariantViolation, validate_plan
 from app.planner.semantic_signal_composer import SemanticSignalComposer
 
+# Import regime classifier — it lives in the quant engine, which may not be
+# installed in all environments.  Guard the import so the app layer still
+# works if the quant engine package is not available.
+try:
+    from quant_engine.engine.regime import classify_regime  # type: ignore[import]
+    _REGIME_AVAILABLE = True
+except ImportError:
+    _REGIME_AVAILABLE = False
+    def classify_regime(ohlcv, lookback=50):  # type: ignore[misc]
+        return {"type": "ranging"}
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,6 +262,26 @@ class Pipeline:
             exit_trigger_card, "exit_trigger", ex_params, timeframe,
         )
 
+        # ── Step 5b: Classify market regime ─────────────────────────────────
+        # Done after param resolution (signals are already picked) so the
+        # regime can inform SL/TP scaling but not signal selection (which
+        # would require re-running the ranker in a feedback loop).
+        # Regime is best-effort: if OHLCV is unavailable it defaults to "ranging".
+        regime: dict = {}
+        if isinstance(ohlcv, pd.DataFrame) and len(ohlcv) >= 20:
+            try:
+                regime = classify_regime(ohlcv)
+                trace.record_custom("regime", regime)
+                logger.info(
+                    "planner|step5b_regime|type=%s|adx=%s|trend_strength=%.2f|slope=%s",
+                    regime.get("type"),
+                    regime.get("adx"),
+                    regime.get("trend_strength", 0.0),
+                    regime.get("ema_slope_pct"),
+                )
+            except Exception as exc:
+                logger.warning("planner|regime_classification_failed|err=%s", exc)
+
         # ── Step 6: SL/TP ───────────────────────────────────────────────────
         # The user can pin a risk:reward via builder.risk_execution_config.
         # When supplied (e.g. "1:2"), SL stays ATR-scaled but TP = SL × RR so
@@ -258,7 +289,7 @@ class Pipeline:
         risk_cfg = getattr(builder, "risk_execution_config", None) or {}
         user_rr = risk_cfg.get("risk_reward")
         sl_pct, tp_pct, vol_mult = resolve_sl_tp(
-            risk_tier, ohlcv=ohlcv, user_risk_reward=user_rr,
+            risk_tier, ohlcv=ohlcv, user_risk_reward=user_rr, regime=regime,
         )
         trace.record_sl_tp(sl_pct, tp_pct, vol_mult)
         logger.info(

@@ -3,16 +3,16 @@ app/services/ai/llm.py
 ═══════════════════════
 LLMService — supports three providers:
 
-  Provider    Config              Description
-  ─────────   ──────────────────  ────────────────────────────────────────
-  groq        LLM_PROVIDER=groq   Groq Cloud API (fast, free tier available)
-  ollama      LLM_PROVIDER=ollama Local model via Ollama (private, no API key)
-  auto        LLM_PROVIDER=auto   Try Groq first, fall back to Ollama
+  Provider     Config                   Description
+  ──────────   ─────────────────────── ────────────────────────────────────────
+  openrouter   LLM_PROVIDER=openrouter OpenRouter Cloud API (unified LLM access)
+  ollama       LLM_PROVIDER=ollama     Local model via Ollama (private, no API key)
+  auto         LLM_PROVIDER=auto       Try OpenRouter → Ollama
 
 Set in .env:
-  LLM_PROVIDER=groq
-  GROQ_API_KEY=1:gsk_primary,2:gsk_backup
-  GROQ_MODEL=llama-3.3-70b-versatile
+  LLM_PROVIDER=openrouter
+  # OpenRouter keys are managed via JSON state file (openrouter_key_state.json)
+  OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct
 
   OR
 
@@ -22,7 +22,7 @@ Set in .env:
 
   OR
 
-  LLM_PROVIDER=auto   (tries groq, falls back to ollama automatically)
+  LLM_PROVIDER=auto   (tries openrouter → ollama automatically)
 """
 from __future__ import annotations
 
@@ -33,16 +33,19 @@ from typing import Any, Optional
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.services.ai.openrouter_key_manager import get_openrouter_key_manager
+from app.core.token_tracker import track_tokens
 
 logger   = logging.getLogger(__name__)
 
 
-# ── Available Groq models ─────────────────────────────────────────────────────
-GROQ_MODELS = {
-    "llama-3.3-70b-versatile": "Best quality — recommended",
-    "llama-3.1-8b-instant":    "Fastest, lighter quality",
-    "mixtral-8x7b-32768":      "Good for long contexts",
-    "gemma2-9b-it":            "Google Gemma model",
+# ── Available OpenRouter models ───────────────────────────────────────────────
+OPENROUTER_MODELS = {
+    "meta-llama/llama-3.3-70b-instruct": "Best quality — recommended",
+    "anthropic/claude-3.5-sonnet": "Excellent reasoning and coding",
+    "google/gemini-pro-1.5": "Good for long contexts",
+    "openai/gpt-4-turbo": "OpenAI's best model",
+    "mistralai/mixtral-8x7b-instruct": "Good balance of speed and quality",
 }
 
 # ── Available Ollama models (you must pull them first) ────────────────────────
@@ -58,7 +61,7 @@ OLLAMA_MODELS = {
 
 class LLMService:
     """
-    Unified LLM service supporting Groq Cloud and local Ollama.
+    Unified LLM service supporting OpenRouter Cloud and local Ollama.
 
     Usage:
         llm = LLMService()
@@ -68,33 +71,47 @@ class LLMService:
     just update .env and restart.
     """
 
-    _groq_key_cursor = 0
-
     def __init__(self):
         current_settings = get_settings()
         self._provider = current_settings.effective_provider()
-        self._groq_keys = current_settings.groq_api_key_pool()
-        self._groq_key = self._groq_keys[0] if self._groq_keys else current_settings.groq_api_key
-        self._groq_model = current_settings.groq_model
+        
+        # OpenRouter configuration - load keys from .env and pass to manager
+        openrouter_keys_from_env = current_settings.openrouter_api_key_pool()
+        if openrouter_keys_from_env:
+            self._openrouter_key_manager = get_openrouter_key_manager(openrouter_keys_from_env)
+            self._openrouter_key = self._openrouter_key_manager.get_active_key()
+        else:
+            self._openrouter_key_manager = None
+            self._openrouter_key = None
+        
+        self._openrouter_model = current_settings.openrouter_model
+        
+        # Ollama configuration
         self._ollama_url = current_settings.ollama_base_url
         self._ollama_model = current_settings.ollama_model
 
         # What model name to expose (used for logging / DB storage)
-        if self._provider == "groq":
-            self.model_name = self._groq_model
+        if self._provider == "openrouter":
+            self.model_name = self._openrouter_model
         elif self._provider == "ollama":
             self.model_name = self._ollama_model
         else:  # auto
-            self.model_name = f"{self._groq_model} (auto)"
+            self.model_name = f"{self._openrouter_model} (auto)"
 
+        keys_info = "not configured"
+        if self._openrouter_key_manager:
+            stats = self._openrouter_key_manager.get_stats()
+            keys_info = f"{stats['keys_remaining']} keys available (loaded from .env)"
+        
         logger.info(
             f"LLMService initialised — provider={self._provider}  "
-            f"model={self.model_name}"
+            f"model={self.model_name}  "
+            f"openrouter_keys={keys_info}"
         )
 
     # ── Public method ─────────────────────────────────────────────────────────
 
-    async def chat(self, messages: list[dict]) -> str:
+    async def chat(self, messages: list[dict], session_id: str | None = None) -> str:
         """
         Send a message list to the LLM and return the text response.
 
@@ -105,15 +122,19 @@ class LLMService:
                 {"role": "assistant", "content": "Great! Which timeframe?"},
                 {"role": "user",      "content": "15m"},
             ]
+        
+        Args:
+            messages: List of message dictionaries
+            session_id: Optional session ID for token tracking
         """
-        if self._provider == "groq":
-            return await self._call_groq(messages)
+        if self._provider == "openrouter":
+            return await self._call_openrouter(messages, session_id=session_id)
 
         elif self._provider == "ollama":
             return await self._call_ollama(messages)
 
-        else:  # auto — try groq first, fall back to ollama
-            return await self._auto(messages)
+        else:  # auto — try openrouter first, fall back to ollama
+            return await self._auto(messages, session_id=session_id)
 
     async def chat_with_tools(
         self,
@@ -121,6 +142,7 @@ class LLMService:
         tools: list[dict],
         *,
         tool_choice: str | dict = "auto",
+        session_id: str | None = None,
     ) -> dict:
         """
         Send messages with tool definitions and return a normalized response:
@@ -132,45 +154,48 @@ class LLMService:
                 ]
             }
 
-        Groq receives native function/tool definitions. Ollama uses native
+        OpenRouter receives native function/tool definitions. Ollama uses native
         tools when the installed SDK supports them, otherwise a strict JSON
         tool-selection fallback is used.
+        
+        Args:
+            messages: List of message dictionaries
+            tools: List of tool definitions
+            tool_choice: Tool selection strategy
+            session_id: Optional session ID for token tracking
         """
-        if self._provider == "groq":
-            return await self._call_groq_with_tools(messages, tools, tool_choice=tool_choice)
+        if self._provider == "openrouter":
+            return await self._call_openrouter_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id)
         if self._provider == "ollama":
             return await self._call_ollama_with_tools(messages, tools)
-        return await self._auto_with_tools(messages, tools, tool_choice=tool_choice)
+        return await self._auto_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id)
 
     # ── Provider info ─────────────────────────────────────────────────────────
 
     def info(self) -> dict:
         """Return current provider config — useful for /health endpoint."""
-        return {
+        result = {
             "provider":      self._provider,
-            "groq_model":    self._groq_model,
+            "openrouter_model":    self._openrouter_model,
             "ollama_model":  self._ollama_model,
             "ollama_url":    self._ollama_url,
             "active_model":  self.model_name,
-            "groq_key_set":  bool(self._groq_keys),
-            "groq_keys_configured": len(self._groq_keys),
-            "groq_failover_enabled": len(self._groq_keys) > 1,
+            "openrouter_key_set":  bool(self._openrouter_key),
         }
+        
+        if self._openrouter_key_manager:
+            stats = self._openrouter_key_manager.get_stats()
+            result.update({
+                "openrouter_keys_remaining": stats['keys_remaining'],
+                "openrouter_active_key_index": stats['active_key_index'],
+                "openrouter_keys_total": stats['total_keys'],
+            })
+        
+        return result
 
-    # ── Groq Cloud ────────────────────────────────────────────────────────────
+    # ── OpenRouter Cloud ──────────────────────────────────────────────────────
 
-    def _ordered_groq_keys(self) -> list[tuple[int, str]]:
-        if not self._groq_keys:
-            return []
-
-        key_count = len(self._groq_keys)
-        start = self.__class__._groq_key_cursor % key_count
-        return [
-            ((start + offset) % key_count, self._groq_keys[(start + offset) % key_count])
-            for offset in range(key_count)
-        ]
-
-    async def _call_groq_once(
+    async def _call_openrouter_once(
         self,
         messages: list[dict],
         api_key: str,
@@ -178,50 +203,61 @@ class LLMService:
         *,
         temperature: float = 0.2,
         max_tokens: int = 2048,
+        session_id: str | None = None,
     ) -> str:
         """
-        Call the Groq Cloud API.
+        Call the OpenRouter Cloud API.
 
-        Free tier limits (as of 2024):
-          llama-3.3-70b-versatile  → 6,000 requests/day,  30 req/min
-          llama-3.1-8b-instant     → 14,400 requests/day, 30 req/min
-
-        Get your free API key at: https://console.groq.com
+        OpenRouter provides unified access to multiple LLM providers.
+        Get your API key at: https://openrouter.ai/keys
         """
-        use_model = model or self._groq_model
+        use_model = model or self._openrouter_model
 
         try:
-            from groq import (
-                APIConnectionError,
-                AsyncGroq,
-                AuthenticationError,
-                BadRequestError,
-                GroqError,
-                NotFoundError,
-                RateLimitError,
-            )
+            from openai import AsyncOpenAI, APIConnectionError, AuthenticationError, BadRequestError, NotFoundError, RateLimitError, APIError
         except ImportError as exc:
             raise AppError(
                 503,
-                "Groq client is not available on the server. Please retry after some time.",
+                "OpenAI client is not available on the server. Please retry after some time.",
             ) from exc
 
         try:
-            client = AsyncGroq(api_key=api_key)
+            client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+            )
 
             resp = await client.chat.completions.create(
                 model=use_model,
                 messages=messages,
-                temperature=temperature,      # low = more consistent, less creative
+                temperature=temperature,
                 max_tokens=max_tokens,
             )
 
             content = resp.choices[0].message.content
-            logger.debug(f"Groq response — model={use_model}  tokens={resp.usage.total_tokens}")
+            logger.debug(f"OpenRouter response — model={use_model}  tokens={resp.usage.total_tokens if resp.usage else 'N/A'}")
+            
+            # Track token usage
+            if session_id and resp.usage:
+                track_tokens(
+                    session_id=session_id,
+                    provider="openrouter",
+                    model=use_model,
+                    total_tokens=resp.usage.total_tokens,
+                    prompt_tokens=resp.usage.prompt_tokens,
+                    completion_tokens=resp.usage.completion_tokens,
+                )
+            
             return content
 
         except RateLimitError as exc:
-            logger.warning("Groq rate limit reached for model=%s: %s", use_model, exc)
+            logger.warning("OpenRouter rate limit reached for model=%s: %s", use_model, exc)
+            
+            # Rotate to next key
+            new_key = self._openrouter_key_manager.rotate_key_on_exhaustion(api_key)
+            if new_key:
+                self._openrouter_key = new_key
+            
             raise AppError(
                 429,
                 (
@@ -230,93 +266,78 @@ class LLMService:
                 ),
             ) from exc
         except AuthenticationError as exc:
-            logger.error("Groq authentication failed for model=%s: %s", use_model, exc)
+            logger.error("OpenRouter authentication failed for model=%s: %s", use_model, exc)
             raise AppError(
                 401,
-                "Authentication failed. Please verify the configured Groq API key and try again.",
+                "Authentication failed. Please verify the configured OpenRouter API key and try again.",
             ) from exc
         except NotFoundError as exc:
-            logger.error("Groq model not found: %s", use_model)
+            logger.error("OpenRouter model not found: %s", use_model)
             raise AppError(
                 404,
-                f"The configured Groq model '{use_model}' was not found. Please verify the model name and try again.",
+                f"The configured OpenRouter model '{use_model}' was not found. Please verify the model name and try again.",
             ) from exc
         except APIConnectionError as exc:
-            logger.error("Groq connection error for model=%s: %s", use_model, exc)
+            logger.error("OpenRouter connection error for model=%s: %s", use_model, exc)
             raise AppError(
                 503,
-                "Unable to reach Groq right now. Please retry after some time.",
+                "Unable to reach OpenRouter right now. Please retry after some time.",
             ) from exc
         except BadRequestError as exc:
-            logger.error("Groq request rejected for model=%s: %s", use_model, exc)
+            logger.error("OpenRouter request rejected for model=%s: %s", use_model, exc)
             raise AppError(
                 400,
-                str(exc).strip() or "The Groq request was invalid. Please review the request and try again.",
+                str(exc).strip() or "The OpenRouter request was invalid. Please review the request and try again.",
             ) from exc
-        except GroqError as exc:
-            logger.error("Groq error for model=%s: %s", use_model, exc)
+        except APIError as exc:
+            logger.error("OpenRouter error for model=%s: %s", use_model, exc)
             raise AppError(
                 502,
-                "Groq could not process the request right now. Please retry after some time.",
+                "OpenRouter could not process the request right now. Please retry after some time.",
             ) from exc
         except Exception as exc:
-            logger.exception("Unexpected Groq error for model=%s", use_model)
+            logger.exception("Unexpected OpenRouter error for model=%s", use_model)
             raise AppError(
                 500,
                 "An unexpected LLM error occurred. Please retry after some time.",
             ) from exc
 
-    async def _call_groq(self, messages: list[dict], model: Optional[str] = None) -> str:
-        if not self._groq_keys:
+    async def _call_openrouter(self, messages: list[dict], model: Optional[str] = None, session_id: str | None = None) -> str:
+        if not self._openrouter_key:
             raise AppError(
                 503,
-                "Groq is not configured on the server. Please retry after some time.",
+                "OpenRouter is not configured on the server. Please retry after some time.",
             )
 
-        use_model = model or self._groq_model
-        retryable_errors: list[AppError] = []
+        use_model = model or self._openrouter_model
+        
+        # Get the active key from the manager
+        api_key = self._openrouter_key_manager.get_active_key()
+        
+        try:
+            result = await self._call_openrouter_once(messages, api_key, use_model, session_id=session_id)
+            return result
+        except AppError as exc:
+            if exc.status_code == 429:
+                # Key was already rotated in _call_openrouter_once
+                # Try once more with the new key
+                stats = self._openrouter_key_manager.get_stats()
+                if stats['keys_remaining'] > 0:
+                    logger.info(f"Retrying with rotated key ({stats['keys_remaining']} keys remaining)")
+                    new_key = self._openrouter_key_manager.get_active_key()
+                    try:
+                        result = await self._call_openrouter_once(messages, new_key, use_model, session_id=session_id)
+                        return result
+                    except AppError:
+                        pass  # Fall through to raise the original error
+                
+                raise AppError(
+                    429,
+                    "All configured OpenRouter API keys are currently rate limited. Please retry after some time.",
+                )
+            raise
 
-        for index, api_key in self._ordered_groq_keys():
-            try:
-                result = await self._call_groq_once(messages, api_key, use_model)
-                self._groq_key = api_key
-                self.__class__._groq_key_cursor = index
-                return result
-            except AppError as exc:
-                if exc.status_code in {401, 429} and len(self._groq_keys) > 1:
-                    retryable_errors.append(exc)
-                    logger.warning(
-                        "Groq key failover triggered for configured key %s/%s with status=%s.",
-                        index + 1,
-                        len(self._groq_keys),
-                        exc.status_code,
-                    )
-                    continue
-                raise
-
-        statuses = {error.status_code for error in retryable_errors}
-
-        if statuses == {429}:
-            raise AppError(
-                429,
-                "All configured Groq API keys are currently rate limited. Please retry after some time.",
-            )
-        if statuses == {401}:
-            raise AppError(
-                401,
-                "All configured Groq API keys failed authentication. Please verify the configured keys and try again.",
-            )
-        if retryable_errors:
-            raise AppError(
-                503,
-                "No configured Groq API key is currently usable. Please verify the configured keys or retry after some time.",
-            )
-        raise AppError(
-            503,
-            "Groq is not configured on the server. Please retry after some time.",
-        )
-
-    async def _call_groq_tools_once(
+    async def _call_openrouter_tools_once(
         self,
         messages: list[dict],
         tools: list[dict],
@@ -326,28 +347,24 @@ class LLMService:
         tool_choice: str | dict = "auto",
         temperature: float = 0.1,
         max_tokens: int = 1024,
+        session_id: str | None = None,
     ) -> dict:
-        """Call Groq with native tool definitions and normalize the result."""
-        use_model = model or self._groq_model
+        """Call OpenRouter with native tool definitions and normalize the result."""
+        use_model = model or self._openrouter_model
 
         try:
-            from groq import (
-                APIConnectionError,
-                AsyncGroq,
-                AuthenticationError,
-                BadRequestError,
-                GroqError,
-                NotFoundError,
-                RateLimitError,
-            )
+            from openai import AsyncOpenAI, APIConnectionError, AuthenticationError, BadRequestError, NotFoundError, RateLimitError, APIError
         except ImportError as exc:
             raise AppError(
                 503,
-                "Groq client is not available on the server. Please retry after some time.",
+                "OpenAI client is not available on the server. Please retry after some time.",
             ) from exc
 
         try:
-            client = AsyncGroq(api_key=api_key)
+            client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key,
+            )
             resp = await client.chat.completions.create(
                 model=use_model,
                 messages=messages,
@@ -356,88 +373,109 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            
+            # Track token usage
+            if session_id and resp.usage:
+                track_tokens(
+                    session_id=session_id,
+                    provider="openrouter",
+                    model=use_model,
+                    total_tokens=resp.usage.total_tokens,
+                    prompt_tokens=resp.usage.prompt_tokens,
+                    completion_tokens=resp.usage.completion_tokens,
+                )
+            
             return _normalise_tool_response(resp.choices[0].message)
         except RateLimitError as exc:
-            logger.warning("Groq rate limit reached for tool call model=%s: %s", use_model, exc)
+            logger.warning("OpenRouter rate limit reached for tool call model=%s: %s", use_model, exc)
+            
+            # Rotate to next key
+            new_key = self._openrouter_key_manager.rotate_key_on_exhaustion(api_key)
+            if new_key:
+                self._openrouter_key = new_key
+            
             raise AppError(429, "Rate limit exceeded. Please retry after some time.") from exc
         except AuthenticationError as exc:
-            logger.error("Groq authentication failed for tool call model=%s: %s", use_model, exc)
+            logger.error("OpenRouter authentication failed for tool call model=%s: %s", use_model, exc)
             raise AppError(
                 401,
-                "Authentication failed. Please verify the configured Groq API key and try again.",
+                "Authentication failed. Please verify the configured OpenRouter API key and try again.",
             ) from exc
         except NotFoundError as exc:
-            logger.error("Groq tool-call model not found: %s", use_model)
+            logger.error("OpenRouter tool-call model not found: %s", use_model)
             raise AppError(
                 404,
-                f"The configured Groq model '{use_model}' was not found.",
+                f"The configured OpenRouter model '{use_model}' was not found.",
             ) from exc
         except APIConnectionError as exc:
-            logger.error("Groq connection error for tool call model=%s: %s", use_model, exc)
-            raise AppError(503, "Unable to reach Groq right now. Please retry after some time.") from exc
+            logger.error("OpenRouter connection error for tool call model=%s: %s", use_model, exc)
+            raise AppError(503, "Unable to reach OpenRouter right now. Please retry after some time.") from exc
         except BadRequestError as exc:
-            logger.error("Groq tool-call request rejected for model=%s: %s", use_model, exc)
-            raise AppError(400, str(exc).strip() or "The Groq tool request was invalid.") from exc
-        except GroqError as exc:
-            logger.error("Groq tool-call error for model=%s: %s", use_model, exc)
-            raise AppError(502, "Groq could not process the tool request right now.") from exc
+            logger.error("OpenRouter tool-call request rejected for model=%s: %s", use_model, exc)
+            raise AppError(400, str(exc).strip() or "The OpenRouter tool request was invalid.") from exc
+        except APIError as exc:
+            logger.error("OpenRouter tool-call error for model=%s: %s", use_model, exc)
+            raise AppError(502, "OpenRouter could not process the tool request right now.") from exc
         except Exception as exc:
-            logger.exception("Unexpected Groq tool-call error for model=%s", use_model)
+            logger.exception("Unexpected OpenRouter tool-call error for model=%s", use_model)
             raise AppError(500, "An unexpected LLM tool-call error occurred.") from exc
 
-    async def _call_groq_with_tools(
+    async def _call_openrouter_with_tools(
         self,
         messages: list[dict],
         tools: list[dict],
         model: Optional[str] = None,
         *,
         tool_choice: str | dict = "auto",
+        session_id: str | None = None,
     ) -> dict:
-        if not self._groq_keys:
+        if not self._openrouter_key:
             raise AppError(
                 503,
-                "Groq is not configured on the server. Please retry after some time.",
+                "OpenRouter is not configured on the server. Please retry after some time.",
             )
 
-        use_model = model or self._groq_model
-        retryable_errors: list[AppError] = []
-
-        for index, api_key in self._ordered_groq_keys():
-            try:
-                result = await self._call_groq_tools_once(
-                    messages,
-                    tools,
-                    api_key,
-                    use_model,
-                    tool_choice=tool_choice,
+        use_model = model or self._openrouter_model
+        
+        # Get the active key from the manager
+        api_key = self._openrouter_key_manager.get_active_key()
+        
+        try:
+            result = await self._call_openrouter_tools_once(
+                messages,
+                tools,
+                api_key,
+                use_model,
+                tool_choice=tool_choice,
+                session_id=session_id,
+            )
+            return result
+        except AppError as exc:
+            if exc.status_code == 429:
+                # Key was already rotated in _call_openrouter_tools_once
+                # Try once more with the new key
+                stats = self._openrouter_key_manager.get_stats()
+                if stats['keys_remaining'] > 0:
+                    logger.info(f"Retrying tool call with rotated key ({stats['keys_remaining']} keys remaining)")
+                    new_key = self._openrouter_key_manager.get_active_key()
+                    try:
+                        result = await self._call_openrouter_tools_once(
+                            messages,
+                            tools,
+                            new_key,
+                            use_model,
+                            tool_choice=tool_choice,
+                            session_id=session_id,
+                        )
+                        return result
+                    except AppError:
+                        pass  # Fall through to raise the original error
+                
+                raise AppError(
+                    429,
+                    "All configured OpenRouter API keys are currently rate limited. Please retry after some time.",
                 )
-                self._groq_key = api_key
-                self.__class__._groq_key_cursor = index
-                return result
-            except AppError as exc:
-                if exc.status_code in {401, 429} and len(self._groq_keys) > 1:
-                    retryable_errors.append(exc)
-                    logger.warning(
-                        "Groq key failover triggered for tool call key %s/%s with status=%s.",
-                        index + 1,
-                        len(self._groq_keys),
-                        exc.status_code,
-                    )
-                    continue
-                raise
-
-        statuses = {error.status_code for error in retryable_errors}
-        if statuses == {429}:
-            raise AppError(
-                429,
-                "All configured Groq API keys are currently rate limited. Please retry after some time.",
-            )
-        if statuses == {401}:
-            raise AppError(
-                401,
-                "All configured Groq API keys failed authentication. Please verify the configured keys.",
-            )
-        raise AppError(503, "No configured Groq key is currently usable for tool calling.")
+            raise
 
     # ── Ollama Local ──────────────────────────────────────────────────────────
 
@@ -591,26 +629,26 @@ class LLMService:
                 "Ollama could not process the tool request right now. Please retry after some time.",
             ) from exc
 
-    # ── Auto (try Groq, fall back to Ollama) ─────────────────────────────────
+    # ── Auto (try OpenRouter, fall back to Ollama) ───────────────────────────
 
-    async def _auto(self, messages: list[dict]) -> str:
+    async def _auto(self, messages: list[dict], session_id: str | None = None) -> str:
         """
-        Try Groq first. If it fails (no key, rate limit, network issue),
+        Try OpenRouter first. If it fails (no key, rate limit, network issue),
         automatically fall back to the local Ollama model.
 
-        Good for development — use Groq when available, Ollama offline.
+        Good for development — use OpenRouter when available, Ollama offline.
         """
-        groq_error: AppError | None = None
+        openrouter_error: AppError | None = None
 
-        if self._groq_keys:
+        if self._openrouter_key:
             try:
-                result = await self._call_groq(messages)
-                self.model_name = self._groq_model
+                result = await self._call_openrouter(messages, session_id=session_id)
+                self.model_name = self._openrouter_model
                 return result
             except AppError as exc:
-                groq_error = exc
+                openrouter_error = exc
                 logger.warning(
-                    "Groq failed in auto mode, falling back to Ollama. Reason: %s",
+                    "OpenRouter failed in auto mode, falling back to Ollama. Reason: %s",
                     exc.message,
                 )
 
@@ -620,8 +658,8 @@ class LLMService:
         try:
             return await self._call_ollama(messages)
         except AppError as exc:
-            if groq_error and groq_error.status_code == 429:
-                raise groq_error from exc
+            if openrouter_error and openrouter_error.status_code == 429:
+                raise openrouter_error from exc
             raise
 
     async def _auto_with_tools(
@@ -630,22 +668,24 @@ class LLMService:
         tools: list[dict],
         *,
         tool_choice: str | dict = "auto",
+        session_id: str | None = None,
     ) -> dict:
-        groq_error: AppError | None = None
+        openrouter_error: AppError | None = None
 
-        if self._groq_keys:
+        if self._openrouter_key:
             try:
-                result = await self._call_groq_with_tools(
+                result = await self._call_openrouter_with_tools(
                     messages,
                     tools,
                     tool_choice=tool_choice,
+                    session_id=session_id,
                 )
-                self.model_name = self._groq_model
+                self.model_name = self._openrouter_model
                 return result
             except AppError as exc:
-                groq_error = exc
+                openrouter_error = exc
                 logger.warning(
-                    "Groq tool call failed in auto mode, falling back to Ollama. Reason: %s",
+                    "OpenRouter tool call failed in auto mode, falling back to Ollama. Reason: %s",
                     exc.message,
                 )
 
@@ -654,8 +694,8 @@ class LLMService:
         try:
             return await self._call_ollama_with_tools(messages, tools)
         except AppError as exc:
-            if groq_error and groq_error.status_code == 429:
-                raise groq_error from exc
+            if openrouter_error and openrouter_error.status_code == 429:
+                raise openrouter_error from exc
             raise
 
     # ── Health check ──────────────────────────────────────────────────────────
@@ -667,34 +707,29 @@ class LLMService:
         """
         result = {
             "provider":     self._provider,
-            "groq_status":  "not_configured",
+            "openrouter_status":  "not_configured",
             "ollama_status": "not_configured",
         }
 
-        # Check Groq
-        if self._groq_keys:
-            last_error: Exception | None = None
-            for index, api_key in self._ordered_groq_keys():
-                try:
-                    await self._call_groq_once(
-                        [{"role": "user", "content": "hi"}],
-                        api_key,
-                        self._groq_model,
-                        max_tokens=5,
-                    )
-                    self._groq_key = api_key
-                    self.__class__._groq_key_cursor = index
-                    result["groq_status"] = "ok"
-                    result["groq_model"] = self._groq_model
-                    result["groq_keys_configured"] = len(self._groq_keys)
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    continue
-            else:
-                result["groq_status"] = f"error: {str(last_error)[:80]}" if last_error else "error"
+        # Check OpenRouter
+        if self._openrouter_key:
+            try:
+                api_key = self._openrouter_key_manager.get_active_key()
+                await self._call_openrouter_once(
+                    [{"role": "user", "content": "hi"}],
+                    api_key,
+                    self._openrouter_model,
+                    max_tokens=5,
+                )
+                stats = self._openrouter_key_manager.get_stats()
+                result["openrouter_status"] = "ok"
+                result["openrouter_model"] = self._openrouter_model
+                result["openrouter_keys_remaining"] = stats['keys_remaining']
+                result["openrouter_active_key_index"] = stats['active_key_index']
+            except Exception as exc:
+                result["openrouter_status"] = f"error: {str(exc)[:80]}"
         else:
-            result["groq_status"] = "no_api_key"
+            result["openrouter_status"] = "no_api_key"
 
         # Check Ollama
         try:

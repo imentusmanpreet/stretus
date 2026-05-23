@@ -1,0 +1,27 @@
+# Regime-to-signal-family compatibility map.
+# Used by the planner (pipeline.py) to de-rank signals whose family
+# is incompatible with the detected market regime for the chosen stock.
+# De-ranking (not hard-exclusion) means preset signal stacks are never broken —
+# only the soft ranker score is adjusted.
+#
+# Regime types (from quant_engine/engine/regime.py):
+#   trending_up   — ADX > 20, EMA slope positive, price making HH/HL
+#   trending_down — ADX > 20, EMA slope negative, price making LL/LH
+#   ranging       — ADX < 20, price oscillating within a band
+#   volatile      — sudden high ATR expansion, often around events
+
+trending_up:
+  preferred: [momentum, breakout, ema_pullback, relative_strength, supertrend, trend]
+  avoid: [mean_reversion, vwap_reversion, oversold]
+
+trending_down:
+  preferred: [breakdown, momentum_bearish, ema_pullback_bearish, supertrend, trend]
+  avoid: [mean_reversion, oversold, bullish_reversal]
+
+ranging:
+  preferred: [vwap_reversion, mean_reversion, range_breakout, vwap_zscore, rsi_reversal]
+  avoid: [momentum, breakout, trend_following]
+
+volatile:
+  preferred: [orb, orb_structural, vwap_reversal, volume_breakout, opening_drive]
+  avoid: [slow_trend, ema_pullback, mean_reversion]

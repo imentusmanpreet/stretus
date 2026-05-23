@@ -181,7 +181,7 @@ class AgentRouter:
         ]
 
         try:
-            response = await self._llm.chat_with_tools(messages, AGENT_TOOL_SCHEMAS)
+            response = await self._llm.chat_with_tools(messages, AGENT_TOOL_SCHEMAS, session_id=session_id)
             decision = _decision_from_tool_response(response)
             if decision is not None:
                 _ensure_session_id(decision, session_id)

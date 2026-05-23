@@ -1,11 +1,31 @@
 # Risk tiers keyed by user-stated experience.
 # base_sl_pct/base_tp_pct are baselines; the planner scales them by realized ATR%.
+# New fields (Phase 10):
+#   max_consecutive_losses  — stop trading for the day after N consecutive losses (0 = disabled)
+#   cooldown_bars_after_loss   — wait N bars before re-entering after a losing trade
+#   cooldown_bars_after_profit — wait N bars before re-entering after a winning trade
+#   max_spread_bps             — reject entry if estimated spread > N bps (0 = disabled)
+#   entry_confirmation_bars    — signal must hold for N consecutive bars before entry
+#   max_capital_allocation_pct — max % of balance deployed in a single trade
+#   position_sizing_mode       — fixed_fractional | risk_based | fixed_units
+#   min_trade_value            — minimum trade value in INR (reject smaller positions)
+#   gap_filter                 — "none" | "ignore_gap_up" | "ignore_gap_down" | "ignore_both"
+
 beginner:
   per_trade_risk_pct: 1.0
   daily_loss_cap_pct: 1.0
   max_open_positions: 2
   base_sl_pct: 1.0
   base_tp_pct: 2.0
+  max_consecutive_losses: 2
+  cooldown_bars_after_loss: 3
+  cooldown_bars_after_profit: 1
+  max_spread_bps: 30
+  entry_confirmation_bars: 2
+  max_capital_allocation_pct: 10.0
+  position_sizing_mode: fixed_fractional
+  gap_filter: none
+  min_trade_value: 5000
 
 intermediate:
   per_trade_risk_pct: 2.0
@@ -13,6 +33,15 @@ intermediate:
   max_open_positions: 3
   base_sl_pct: 1.5
   base_tp_pct: 3.0
+  max_consecutive_losses: 3
+  cooldown_bars_after_loss: 1
+  cooldown_bars_after_profit: 0
+  max_spread_bps: 20
+  entry_confirmation_bars: 1
+  max_capital_allocation_pct: 20.0
+  position_sizing_mode: risk_based
+  gap_filter: none
+  min_trade_value: 2000
 
 expert:
   per_trade_risk_pct: 3.0
@@ -20,6 +49,15 @@ expert:
   max_open_positions: 5
   base_sl_pct: 2.0
   base_tp_pct: 4.0
+  max_consecutive_losses: 0
+  cooldown_bars_after_loss: 0
+  cooldown_bars_after_profit: 0
+  max_spread_bps: 0
+  entry_confirmation_bars: 1
+  max_capital_allocation_pct: 30.0
+  position_sizing_mode: risk_based
+  gap_filter: none
+  min_trade_value: 1000
 
 default:
   per_trade_risk_pct: 2.0
@@ -27,3 +65,12 @@ default:
   max_open_positions: 3
   base_sl_pct: 1.5
   base_tp_pct: 3.0
+  max_consecutive_losses: 3
+  cooldown_bars_after_loss: 1
+  cooldown_bars_after_profit: 0
+  max_spread_bps: 20
+  entry_confirmation_bars: 1
+  max_capital_allocation_pct: 20.0
+  position_sizing_mode: risk_based
+  gap_filter: none
+  min_trade_value: 2000
