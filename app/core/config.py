@@ -118,6 +118,24 @@ class Settings(BaseSettings):
     # If USE_OPENROUTER=true is set in .env, it overrides llm_provider
     use_openrouter: bool = False
 
+    # ── Strategy generation path ──────────────────────────────────────────────
+    # When True, chat strategy-building bypasses the KB planner and uses the direct
+    # LLM → strict StrategySpec → validator → engine path (app/strategy/). When
+    # False (default), the existing knowledge-base planner runs unchanged. The two
+    # paths coexist; this flag is the only switch.
+    use_direct_strategy_path: bool = False
+    # How many times the direct path feeds validation errors back to the LLM to repair.
+    direct_strategy_max_repairs: int = 2
+    # Output-token budget for the StrategySpec generation call. The spec JSON is large
+    # and reasoning models (e.g. GLM) spend tokens thinking, so the default chat cap of
+    # 2048 truncates to an empty/invalid response. 8192 leaves room for reasoning + JSON.
+    direct_strategy_max_output_tokens: int = 8192
+    # Reasoning effort for the generation call on reasoning models (e.g. GLM). These
+    # models can spend 20k+ chars "thinking" before the JSON, making a turn take
+    # ~90s. We don't need deep reasoning to emit a spec, so cap it. Values:
+    # "low"/"medium"/"high" (OpenRouter effort) or "off"/"none" to disable thinking.
+    direct_strategy_reasoning_effort: str = "low"
+
     # ── Strategy files ────────────────────────────────────────────────────────
     strategy_folder: str = "./strategies"
 

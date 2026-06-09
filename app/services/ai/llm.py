@@ -133,7 +133,7 @@ class LLMService:
 
     # ── Public method ─────────────────────────────────────────────────────────
 
-    async def chat(self, messages: list[dict], session_id: str | None = None) -> str:
+    async def chat(self, messages: list[dict], session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
         """
         Send a message list to the LLM and return the text response.
 
@@ -148,15 +148,16 @@ class LLMService:
         Args:
             messages: List of message dictionaries
             session_id: Optional session ID for token tracking
+            max_tokens: Optional output-token cap (defaults to the provider default).
         """
         if self._provider == "openrouter":
-            return await self._call_openrouter(messages, session_id=session_id)
+            return await self._call_openrouter(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
 
         elif self._provider == "ollama":
             return await self._call_ollama(messages)
 
         else:  # auto — try openrouter first, fall back to ollama
-            return await self._auto(messages, session_id=session_id)
+            return await self._auto(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
 
     async def chat_with_tools(
         self,
@@ -227,6 +228,7 @@ class LLMService:
         temperature: float = 0.2,
         max_tokens: int = 2048,
         session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """
         Call the OpenRouter Cloud API.
@@ -257,21 +259,64 @@ class LLMService:
                 api_key=api_key,
             )
 
+            # Cap reasoning on thinking models (e.g. GLM) — emitting a JSON spec does
+            # NOT need 20k+ chars of reasoning, which is the main latency cost. None =
+            # provider default (unchanged for callers that don't pass this).
+            extra_body = None
+            if reasoning_effort:
+                _eff = str(reasoning_effort).strip().lower()
+                if _eff in ("off", "none", "disabled", "false", "0"):
+                    extra_body = {"reasoning": {"enabled": False}}
+                else:
+                    extra_body = {"reasoning": {"effort": _eff}}
             resp = await client.chat.completions.create(
                 model=use_model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                extra_body=extra_body,
             )
 
-            content = resp.choices[0].message.content
+            choice = resp.choices[0]
+            content = choice.message.content
+            finish_reason = getattr(choice, "finish_reason", None)
+            # Reasoning models (GLM/o-series/…) may stream the answer into a separate
+            # `reasoning`/`reasoning_content` channel and leave `content` empty.
+            reasoning = (
+                getattr(choice.message, "reasoning", None)
+                or getattr(choice.message, "reasoning_content", None)
+            )
             total_tokens = resp.usage.total_tokens if resp.usage else None
+            completion_tokens = resp.usage.completion_tokens if resp.usage else None
             logger.info(
-                "💬 OpenRouter ← %s replied | tokens=%s | reply: %s",
+                "💬 OpenRouter ← %s | tokens=%s (completion=%s) | finish=%s | "
+                "content_len=%d | reasoning_len=%d | reply: %s",
                 use_model,
                 total_tokens if total_tokens is not None else "N/A",
+                completion_tokens if completion_tokens is not None else "N/A",
+                finish_reason,
+                len(content) if content else 0,
+                len(reasoning) if reasoning else 0,
                 _preview(content),
             )
+            # Smoking-gun diagnostics for the "empty reply" reports:
+            if not content and reasoning:
+                logger.warning(
+                    "🧠⚠️ %s returned EMPTY content but %d chars of REASONING (finish=%s) — "
+                    "answer landed in the reasoning channel, not content.",
+                    use_model, len(reasoning), finish_reason,
+                )
+            elif not content and finish_reason == "length":
+                logger.warning(
+                    "✂️⚠️ %s hit the token cap (finish=length) with EMPTY content "
+                    "(completion=%s) — max_tokens too small / consumed before content.",
+                    use_model, completion_tokens,
+                )
+            elif not content:
+                logger.warning(
+                    "📭⚠️ %s returned EMPTY content (finish=%s, completion=%s) — model produced no answer.",
+                    use_model, finish_reason, completion_tokens,
+                )
 
             # Track token usage
             if session_id and resp.usage:
@@ -342,7 +387,7 @@ class LLMService:
                 "An unexpected LLM error occurred. Please retry after some time.",
             ) from exc
 
-    async def _call_openrouter(self, messages: list[dict], model: Optional[str] = None, session_id: str | None = None) -> str:
+    async def _call_openrouter(self, messages: list[dict], model: Optional[str] = None, session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
         if not self._openrouter_key:
             raise AppError(
                 503,
@@ -350,8 +395,9 @@ class LLMService:
             )
 
         use_model = model or self._openrouter_model
+        effective_max_tokens = max_tokens or 2048
         return await self._openrouter_with_rotation(
-            lambda key: self._call_openrouter_once(messages, key, use_model, session_id=session_id),
+            lambda key: self._call_openrouter_once(messages, key, use_model, session_id=session_id, max_tokens=effective_max_tokens, reasoning_effort=reasoning_effort),
             label="chat",
         )
 
@@ -699,7 +745,7 @@ class LLMService:
 
     # ── Auto (try OpenRouter, fall back to Ollama) ───────────────────────────
 
-    async def _auto(self, messages: list[dict], session_id: str | None = None) -> str:
+    async def _auto(self, messages: list[dict], session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
         """
         Try OpenRouter first. If it fails (no key, rate limit, network issue),
         automatically fall back to the local Ollama model.
@@ -710,7 +756,7 @@ class LLMService:
 
         if self._openrouter_key:
             try:
-                result = await self._call_openrouter(messages, session_id=session_id)
+                result = await self._call_openrouter(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
                 self.model_name = self._openrouter_model
                 return result
             except AppError as exc:

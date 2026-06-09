@@ -1375,6 +1375,12 @@ class StrategyBuilder:
         return f"{clean}{suffix}"
 
     def extract_indicators(self) -> dict:
+        # Direct path supplies declared indicators + their exact params (e.g.
+        # MACD {fast,slow,signal}); use them verbatim so the read-back shows what
+        # the user actually requested instead of regex-extracted bare names.
+        direct = getattr(self, "_direct_indicators", None)
+        if direct:
+            return dict(direct)
         self._normalize_legacy_signal_conditions()
         combined = f"{self.entry_condition or ''} {self.exit_condition or ''}"
         out: dict[str, list[int]] = {}

@@ -2957,7 +2957,13 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
             # of truth that all downstream systems will consume.
             try:
                 from app.planner.semantic_normalizer import SemanticIntentNormalizer
-                _early_sem = SemanticExtractor().extract(user_content)
+                # Direct path bypasses KB preset resolution, so this KB-feeding
+                # semantic extraction is skipped entirely (flag ON).
+                _early_sem = (
+                    None
+                    if get_settings().use_direct_strategy_path
+                    else SemanticExtractor().extract(user_content)
+                )
                 if _early_sem and _early_sem.extraction_quality_score > 0:
                     _canonical = SemanticIntentNormalizer().normalize(
                         _early_sem,
@@ -3967,7 +3973,12 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         )
                         yaml_path = generate_yaml(builder)
                 else:
-                    yaml_path = generate_yaml(builder)
+                    _direct_spec_for_yaml = getattr(builder, "_direct_spec", None)
+                    if _direct_spec_for_yaml is not None:
+                        from app.strategy.yaml_writer import write_spec_yaml
+                        yaml_path = write_spec_yaml(_direct_spec_for_yaml, session_id=session_id)
+                    else:
+                        yaml_path = generate_yaml(builder)
                 logger.info(
                     "📝 chat_flow|event=strategy_yaml_written|session_id=%s|yaml_path=%s",
                     session_id,
@@ -4473,8 +4484,15 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     # ── Fetch OHLCV early so params can be calibrated before ──────
                     # showing the signal plan to the user — no YAML needed yet,
                     # we build the market-data request directly from the builder.
+                    # The direct path (flag ON) generates params from intent, so it needs
+                    # NO calibration candles here — skip the fetch (market data is still
+                    # fetched later for the actual backtest). The KB planner DOES use them.
                     _planning_ohlcv: list | None = None
-                    if builder.symbol and builder.timeframe:
+                    if (
+                        builder.symbol
+                        and builder.timeframe
+                        and not get_settings().use_direct_strategy_path
+                    ):
                         try:
                             _from, _to = _signal_eval_window(interval=builder.timeframe)
                             _planning_mdr = StrategyMarketDataRequest(
@@ -4532,20 +4550,48 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     # match%.  Nothing is silently dropped or invented.
                     # On any failure the code falls through to the legacy pipeline.
                     # ════════════════════════════════════════════════════════
-                    _sdl_prompt = _resolve_strategy_source_prompt(
-                        builder, user_content, all_messages,
-                    )
-                    try:
-                        from app.planner.sdl_flow import try_sdl_plan
-                        _sdl_result = await try_sdl_plan(
-                            _sdl_prompt, builder, session_id=session_id,
+                    # ── Direct path (flag ON): LLM → strict StrategySpec, bypass KB ──
+                    # On success the spec drives planning; on failure we fall back to the
+                    # KB pipeline below so the user still gets a strategy.
+                    _direct_used = False
+                    _direct_plan: dict | None = None
+                    _direct_error: str | None = None
+                    if get_settings().use_direct_strategy_path:
+                        from app.services.chat import direct_strategy_flow as _dsf
+                        _direct_spec, _direct_plan, _direct_error = await _dsf.plan_via_direct(
+                            builder, session_id=session_id, turn=len(all_messages),
                         )
-                    except Exception as _sdl_exc:
-                        logger.warning(
-                            "⚠️ chat_flow|event=sdl_flow_error|session_id=%s|err=%s",
-                            session_id, _sdl_exc,
+                        if _direct_spec is not None:
+                            _direct_used = True
+                            plan = _direct_plan
+                            semantic_instructions = None
+                            semantic_gates_applied = []
+                            logger.info(
+                                "🧭 chat_flow|event=direct_path_used|session_id=%s|symbol=%s",
+                                session_id, builder.symbol,
+                            )
+                        else:
+                            logger.warning(
+                                "⚠️ chat_flow|event=direct_path_fallback_to_kb|session_id=%s|err=%s",
+                                session_id, _direct_error,
+                            )
+
+                    _sdl_result = None
+                    if not _direct_used:
+                        _sdl_prompt = _resolve_strategy_source_prompt(
+                            builder, user_content, all_messages,
                         )
-                        _sdl_result = None
+                        try:
+                            from app.planner.sdl_flow import try_sdl_plan
+                            _sdl_result = await try_sdl_plan(
+                                _sdl_prompt, builder, session_id=session_id,
+                            )
+                        except Exception as _sdl_exc:
+                            logger.warning(
+                                "⚠️ chat_flow|event=sdl_flow_error|session_id=%s|err=%s",
+                                session_id, _sdl_exc,
+                            )
+                            _sdl_result = None
 
                     if _sdl_result and _sdl_result.used_sdl:
                         # SDL path succeeded — use the SDL plan directly.
@@ -4561,6 +4607,9 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         # jump straight to apply_signal_plan below.
                         semantic_instructions = None
                         semantic_gates_applied = []
+                    elif _direct_used:
+                        # Direct path already produced `plan`; skip the legacy pipeline.
+                        pass
                     else:
                         # ── Legacy pipeline (fallback) ─────────────────────
                         if _sdl_result:
@@ -4588,7 +4637,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     # more accurately than the regex + ranker pipeline.
                     _used_sdl_path = bool(_sdl_result and _sdl_result.used_sdl)
 
-                    if not _used_sdl_path:
+                    if not _used_sdl_path and not _direct_used:
                         # ── Phase 14: Catalog-driven signal picker ───────────
                         try:
                             from app.kb import kb as _kb_global
@@ -4758,6 +4807,11 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         if not _sdl_result.validation_ok and fidelity_findings:
                             from app.planner.fidelity_validator import format_user_message as _fmt_f
                             fidelity_user_message = _fmt_f(fidelity_findings)
+                    elif _direct_used:
+                        # Direct path: the strict StrategySpec validator already guaranteed
+                        # correctness against the engine grammar — the KB regex fidelity
+                        # check does not apply. Assumed-value notes come from the spec instead.
+                        pass
                     else:
                         try:
                             from app.planner.fidelity_validator import (

@@ -793,9 +793,18 @@ def add_all_indicators(df: pd.DataFrame, indicator_config: dict) -> pd.DataFrame
             for n in (periods or [14]):
                 df[f"AROONOSC_{int(n)}"] = aroonosc(df, int(n))
 
-        # ── MACD (scalar, no period suffix) ──────────────────────────────────
+        # ── MACD (scalar, no period suffix; params via indicator config) ─────
+        # Accepts {"fast":12,"slow":26,"signal":9} from the YAML indicators block,
+        # mirroring STOCH below. Absent/empty → the standard 12/26/9 (unchanged
+        # behaviour for every strategy that doesn't declare params).
         elif ind == "MACD":
-            macd_s, sig_s, hist_s = macd_all(df["close"])
+            params = periods if isinstance(periods, dict) else {}
+            macd_s, sig_s, hist_s = macd_all(
+                df["close"],
+                int(params.get("fast", 12)),
+                int(params.get("slow", 26)),
+                int(params.get("signal", 9)),
+            )
             df["MACD"], df["MACD_SIGNAL"], df["MACD_HIST"] = macd_s, sig_s, hist_s
 
         # ── Bollinger Bands ──────────────────────────────────────────────────
@@ -958,7 +967,8 @@ def max_indicator_warmup(indicator_config: dict) -> int:
         ind = indicator.upper()
 
         if ind == "MACD":
-            warmup = max(warmup, 26 + 9)
+            params = periods if isinstance(periods, dict) else {}
+            warmup = max(warmup, int(params.get("slow", 26)) + int(params.get("signal", 9)))
             continue
         if ind in ("BB_UPPER", "BB_LOWER", "BB"):
             for n in (periods or [20]):
