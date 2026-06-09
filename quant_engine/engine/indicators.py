@@ -38,6 +38,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import talib
+from talib import abstract as _abstract
+
+
+# Non-causal / repainting / variable-period TA-Lib studies — never exposed to
+# strategy conditions (they look ahead, repaint, or need a per-bar period array).
+_TALIB_BLACKLIST: frozenset[str] = frozenset({
+    "HT_DCPERIOD", "HT_DCPHASE", "HT_PHASOR", "HT_SINE",
+    "HT_TRENDMODE", "HT_TRENDLINE", "MAVP",
+})
+
+# Every causal TA-Lib study, by name. The generic evaluator accepts any of these.
+_TALIB_FUNCTIONS: frozenset[str] = frozenset(talib.get_functions()) - _TALIB_BLACKLIST
 
 
 # ─── Array helpers ──────────────────────────────────────────────────────────────
@@ -75,6 +87,49 @@ def rolling_agg(series: pd.Series, n: int, agg: str) -> pd.Series | None:
     else:
         return None
     return _s(out, series.index)
+
+
+def evaluate_indicator(
+    name: str,
+    df: pd.DataFrame,
+    parameters: dict | None = None,
+) -> dict[str, pd.Series]:
+    """Generic TA-Lib indicator evaluator via the Abstract API.
+
+    Works for ANY causal TA-Lib study by name — single-output (RSI, EMA, ATR,
+    LINEARREG, TSF, …) or multi-output (MACD, BBANDS, STOCH, …) — with no
+    per-indicator wrapper. Returns the normalised form {output_name: Series},
+    every Series index-aligned to df and NaN until the study's warm-up is met
+    (TA-Lib is purely left-to-right, so the result is causal/point-in-time safe).
+
+    Inputs are taken from whichever OHLCV columns df provides; the Abstract API
+    selects the ones the function actually needs. Raises ValueError for unknown
+    or blacklisted (repainting) functions.
+    """
+    name = name.upper()
+    if name in _TALIB_BLACKLIST:
+        raise ValueError(
+            f"{name!r} is a non-causal/repainting study and is blocked from "
+            "use in strategy conditions."
+        )
+    if name not in _TALIB_FUNCTIONS:
+        raise ValueError(f"Unknown TA-Lib indicator {name!r}.")
+
+    func = _abstract.Function(name)
+    if parameters:
+        func.set_parameters(parameters)
+
+    inputs = {
+        col: _arr(df[col])
+        for col in ("open", "high", "low", "close", "volume")
+        if col in df.columns
+    }
+    result = func(inputs)
+    output_names = func.output_names
+    idx = df.index
+    if isinstance(result, (list, tuple)):
+        return {oname: _s(arr, idx) for oname, arr in zip(output_names, result)}
+    return {output_names[0]: _s(result, idx)}
 
 
 # ─── Overlap / trend ────────────────────────────────────────────────────────────
@@ -906,6 +961,17 @@ def add_all_indicators(df: pd.DataFrame, indicator_config: dict) -> pd.DataFrame
         elif ind in _CDL_FUNCTIONS:
             df[ind] = candlestick_pattern(df, ind)
 
+        # ── Generic single-timeperiod TA-Lib studies (LINEARREG, TSF, …) ─────
+        # Routed through compute_indicator_column → evaluate_indicator so any
+        # causal TA-Lib study works without a hand-written wrapper.
+        elif ind in _TALIB_PERIODIC_EXTRA:
+            for n in (periods or [14]):
+                col = f"{ind}_{int(n)}"
+                if col not in df.columns:
+                    series = compute_indicator_column(df, ind, int(n))
+                    if series is not None:
+                        df[col] = series
+
     # PREV_DAY_HIGH / PREV_DAY_LOW are cheap and broadly useful — always add when
     # the frame spans multiple days, matching the engine's historical behaviour.
     if "PREV_DAY_HIGH" not in df.columns and isinstance(df.index, pd.DatetimeIndex):
@@ -915,12 +981,44 @@ def add_all_indicators(df: pd.DataFrame, indicator_config: dict) -> pd.DataFrame
     return df
 
 
+# Every remaining causal TA-Lib study that takes a single `timeperiod` and emits
+# a single output — discovered once, at import, via the Abstract API. These need
+# no hand-written wrapper: compute_indicator_column()/add_all_indicators() route
+# them through evaluate_indicator(), so e.g. LINEARREG(14), TSF(20), MIDPOINT(14)
+# work in conditions automatically. Studies already handled above (and multi-arg
+# or multi-output ones like MACD/BBANDS/STOCH) are excluded.
+# DSL-reserved function names that look like TA-Lib studies but are aggregate /
+# operator primitives in conditions.py (e.g. MAX(FIELD, n), MIN(FIELD, n)). They
+# must NOT be reclassified as periodic indicators or their FIELD,period form breaks.
+_DSL_RESERVED_NAMES = frozenset({"AVG", "MAX", "MIN", "STDEV", "ZSCORE", "PREV", "RS", "SUM"})
+
+
+def _discover_periodic_extra() -> frozenset[str]:
+    already = set(_CLOSE_PERIODIC) | set(_OHLC_PERIODIC) | _DSL_RESERVED_NAMES | {
+        "BB_UPPER", "BB_LOWER", "BB_MID", "AROON_UP", "AROON_DOWN", "AROONOSC",
+    }
+    extra: set[str] = set()
+    for fname in _TALIB_FUNCTIONS:
+        if fname in already:
+            continue
+        try:
+            func = _abstract.Function(fname)
+            if list(func.parameters.keys()) == ["timeperiod"] and len(func.output_names) == 1:
+                extra.add(fname)
+        except Exception:
+            continue
+    return frozenset(extra)
+
+
+_TALIB_PERIODIC_EXTRA: frozenset[str] = _discover_periodic_extra()
+
+
 # Names addressable as a single periodic column NAME(period) → column NAME_period.
 # This is the contract conditions.py relies on for precompute-if-missing: any
 # study here computes IDENTICALLY whether requested via YAML config or discovered
 # in a formula — one implementation, no per-bar recompute, no divergence.
 PERIODIC_INDICATOR_NAMES = frozenset(
-    set(_CLOSE_PERIODIC) | set(_OHLC_PERIODIC) | {
+    set(_CLOSE_PERIODIC) | set(_OHLC_PERIODIC) | _TALIB_PERIODIC_EXTRA | {
         "BB_UPPER", "BB_LOWER", "BB_MID", "AROON_UP", "AROON_DOWN", "AROONOSC",
     }
 )
@@ -950,6 +1048,14 @@ def compute_indicator_column(df: pd.DataFrame, name: str, period: int) -> pd.Ser
         return opening_range_series(df, "high", period, "max")
     if name == "OPENING_RANGE_LOW":
         return opening_range_series(df, "low", period, "min")
+    # Generic fallback: any other causal single-timeperiod TA-Lib study
+    # (LINEARREG, TSF, MIDPOINT, …), computed once via the Abstract API.
+    if name in _TALIB_PERIODIC_EXTRA:
+        try:
+            outputs = evaluate_indicator(df=df, name=name, parameters={"timeperiod": period})
+            return next(iter(outputs.values()))
+        except Exception:
+            return None
     return None
 
 
