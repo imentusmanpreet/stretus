@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ── Enumerations ──────────────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 SignalCategory = Literal["trend", "momentum", "volume", "volatility", "pattern", "india"]
 SignalDirection = Literal["bullish", "bearish", "neutral"]
 SignalKind = Literal["crossover", "regime", "threshold", "pattern"]
-SignalRole = Literal["entry_trigger", "entry_filter", "exit_trigger"]
+SignalRole = Literal["entry_trigger", "entry_filter", "exit_trigger", "exit_filter"]
 
 HoldHorizon = Literal["seconds", "minutes", "hours", "days", "weeks"]
 Frequency = Literal["very_low", "low", "medium", "high", "very_high"]
@@ -39,6 +39,134 @@ class ContraindicationRule(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+# ── Catalog-driven phrase matching ────────────────────────────────────────────
+#
+# Each signal card can declare HOW the user might refer to it in natural
+# language via a `match_when` block. The catalog signal picker uses these
+# declarations to map user prompts directly to KB signals — replacing the
+# hardcoded mapping dictionaries that used to live in constraint_compiler.py.
+#
+# A YAML example for macd_bullish_cross.yaml:
+#
+#     match_when:
+#       phrases:
+#         - "macd (line\\s+)?(?:crosses?|crossed)\\s+above\\s+signal"
+#         - "macd bullish cross(over)?"
+#         - "macd positive cross(over)?"
+#       acts_as: entry_trigger      # role this signal plays when matched
+#       mirrors_to: macd_bearish_cross
+#       extract_params:
+#         window: { from_group: 1, default: null, kind: int }
+#
+# Each `phrase` is a Python regex. Named-capture groups (e.g. `(?P<window>\\d+)`)
+# can populate the signal's params when the picker assembles the plan.
+
+SignalMatchRole = Literal["entry_trigger", "entry_filter", "exit_trigger", "exit_filter"]
+
+
+class MatchParamSpec(BaseModel):
+    """How to extract a single param value from the regex match."""
+
+    from_group: str | int | None = None
+    """Named capture group (str) or numbered group (int). None → no extraction."""
+
+    default: float | int | str | None = None
+    """Value to use when the group is absent. None means leave the param unset."""
+
+    kind: Literal["int", "float", "str"] = "int"
+    """How to coerce the captured string."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class MatchWhen(BaseModel):
+    """Catalog-driven recognition block for a signal card."""
+
+    phrases: list[str] = Field(default_factory=list)
+    """User-text regex patterns. ANY match is sufficient."""
+
+    acts_as: SignalMatchRole = "entry_trigger"
+    """The role this signal plays in the assembled plan when matched."""
+
+    confidence: float = 1.0
+    """Default confidence (0–1) — higher beats lower when two signals compete."""
+
+    mirrors_to: str | None = None
+    """KB signal name to use as the mirror exit (for 'exit on opposite' phrases)."""
+
+    extract_params: dict[str, MatchParamSpec] = Field(default_factory=dict)
+    """Param name → how to pull its value from the matched regex."""
+
+    requires_keyword: list[str] = Field(default_factory=list)
+    """Additional keywords that MUST appear in the prompt for this match to
+    fire. Used to disambiguate (e.g. an RSI signal that should only fire when
+    the user explicitly mentioned 'oversold' AND a value <= 35). Each entry
+    is a regex; ALL must match."""
+
+    forbids_keyword: list[str] = Field(default_factory=list)
+    """Keywords that PREVENT this signal from matching. Inverse of
+    requires_keyword. Useful for "vwap_bullish" to NOT fire when user said
+    'vwap reclaim' (the reclaim signal should win)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+# ── Extended card metadata (WS3) ──────────────────────────────────────────────
+#
+# Three additive blocks make card behaviour data-driven so the gate/compiler stop
+# guessing (design §4):
+#   * comparison{lhs,rhs,op}  → lets the gate adjudicate "EMA above price" vs
+#     "price above EMA" deterministically (no LLM guesswork, precise repair).
+#   * param_specs{name:{type,default,min,max,violation_action}} → param ranges
+#     so out-of-range values become a note/clarify instead of a silent snap.
+#   * engine{kind,anchors_supported} → the exact engine anchor ids a risk card
+#     maps to, so the planner can never emit an anchor the engine rejects.
+# All optional → existing cards keep validating; the backfill script + the
+# card-validation test drive full population.
+
+ComparisonSide = Literal[
+    "price", "close", "open", "high", "low", "volume",
+    "ema", "sma", "wma", "dema", "tema", "vwap", "rsi", "macd", "macd_signal",
+    "adx", "atr", "bb_upper", "bb_lower", "bb_mid", "supertrend", "donchian",
+    "stoch", "cci", "mfi", "obv", "zero", "level", "prev_value", "indicator",
+]
+ComparisonOp = Literal["gt", "lt", "ge", "le", "eq", "cross_up", "cross_down"]
+
+
+class Comparison(BaseModel):
+    """Structured reading of what a signal compares (design §4)."""
+
+    lhs: ComparisonSide
+    rhs: ComparisonSide
+    op: ComparisonOp
+
+    model_config = ConfigDict(extra="forbid")
+
+
+ParamViolationAction = Literal["silent", "note", "clarify"]
+
+
+class ParamSpec(BaseModel):
+    """Per-param type + range + what to do when a value is out of range (§5d)."""
+
+    type: Literal["int", "float", "str"] = "int"
+    default: float | int | str | None = None
+    min: float | int | None = None
+    max: float | int | None = None
+    violation_action: ParamViolationAction = "note"
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EngineMeta(BaseModel):
+    """How a card maps onto the backtest engine contract."""
+
+    kind: Literal["trigger", "filter", "exit"] | None = None
+    anchors_supported: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SignalCard(BaseModel):
     """One structured card per signal — replaces free-text KB scoring."""
 
@@ -49,6 +177,11 @@ class SignalCard(BaseModel):
     roles: list[SignalRole]
     formula: str | None = None
     description: str = ""
+
+    # WS3 — data-driven metadata (all optional; see block above).
+    comparison: Comparison | None = None
+    param_specs: dict[str, ParamSpec] = Field(default_factory=dict)
+    engine: EngineMeta | None = None
 
     works_best_on: list[str] = Field(default_factory=list)
     weak_on: list[str] = Field(default_factory=list)
@@ -68,12 +201,39 @@ class SignalCard(BaseModel):
     experience_fit: dict[str, float] = Field(default_factory=dict)
     intent_fit: dict[str, float] = Field(default_factory=dict)
 
+    # Catalog-driven recognition (Phase 14). When present, the
+    # CatalogSignalPicker uses these patterns to map user prompts to this
+    # signal directly — bypassing the preset → constraint-compiler pipeline.
+    match_when: MatchWhen | None = None
+
     @field_validator("roles")
     @classmethod
     def _roles_not_empty(cls, value: list[SignalRole]) -> list[SignalRole]:
         if not value:
             raise ValueError("SignalCard.roles must contain at least one role")
         return value
+
+    @model_validator(mode="after")
+    def _derive_param_specs(self) -> "SignalCard":
+        """Auto-derive a ParamSpec for every param the card uses (from
+        params_by_timeframe) so EVERY card carries param metadata without
+        hand-editing 124 YAMLs. An explicit `param_specs` entry in the YAML wins
+        (it can add real min/max/violation_action); this only fills the gaps."""
+        by_tf = self.params_by_timeframe or {}
+        # Representative defaults: prefer 15m, else the first timeframe block.
+        defaults: dict = {}
+        if "15m" in by_tf:
+            defaults = dict(by_tf["15m"])
+        elif by_tf:
+            defaults = dict(next(iter(by_tf.values())))
+        for pname, pval in defaults.items():
+            if pname in self.param_specs:
+                continue
+            self.param_specs[pname] = ParamSpec(
+                type=("float" if isinstance(pval, float) else "int" if isinstance(pval, int) else "str"),
+                default=pval,
+            )
+        return self
 
     @property
     def family(self) -> str:
@@ -91,13 +251,14 @@ class PresetLeg(BaseModel):
     entry_trigger: str
     entry_filters: list[str] = Field(default_factory=list)
     exit_trigger: str
+    exit_filters: list[str] = Field(default_factory=list)
     # Phase 5 — leg-scoped HTF entry gates. Direction-dependent: a bullish
     # leg's HTF rules ("1h trend up") differ from a bearish leg's ("1h trend
     # down"), so they belong on the leg, not the preset.
     htf: list[dict] = Field(default_factory=list)
 
     def all_signal_names(self) -> list[str]:
-        return [self.entry_trigger, *self.entry_filters, self.exit_trigger]
+        return [self.entry_trigger, *self.entry_filters, self.exit_trigger, *self.exit_filters]
 
 
 class StrategyPreset(BaseModel):
@@ -157,12 +318,19 @@ class StrategyPreset(BaseModel):
 
 
 class Stock(BaseModel):
-    """One row of the stock universe (CSV)."""
+    """
+    One row of the universe CSV — a tradeable instrument.
 
-    symbol: str
+    KB holds canonical metadata only. Broker-specific identifiers (Upstox
+    instrument key, Binance trading pair, etc.) live in
+    ref_data.instrument_adapter_mappings and are resolved at runtime.
+    """
+
+    symbol: str                       # canonical identifier (RELIANCE.NS, BTC_USDT)
     display_name: str
-    exchange: str
-    upstox_key: str
+    exchange: str                     # NSE | BSE | BINANCE_SPOT | ...
+    asset_class: Literal["equity_cash", "crypto_spot"] = "equity_cash"
+    quote_asset: str = "INR"          # INR for NSE/BSE equities; USDT / USDC for crypto
     sector: str
     enabled: bool = True
 
@@ -298,6 +466,7 @@ class StrategyPlan(BaseModel):
     entry_trigger: PickedSignal
     entry_filters: list[PickedSignal] = Field(default_factory=list)
     exit_trigger: PickedSignal
+    exit_filters: list[PickedSignal] = Field(default_factory=list)
     sl_pct: float
     tp_pct: float
     risk: dict

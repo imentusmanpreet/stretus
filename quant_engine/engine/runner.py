@@ -23,7 +23,8 @@ import pandas as pd
 from engine.conditions import CompiledCondition, compile_condition
 from engine.config import BACKTEST_MARKET_DATA_FROM_UTC, BACKTEST_MARKET_DATA_TO_UTC
 from engine.data import load_ohlcv_data, merge_reference_data
-from engine.htf import HtfContext, build_htf_contexts
+from engine.htf import HtfContext, build_htf_contexts, timeframe_to_timedelta
+from engine.resample import build_subbar_slices, resample_ohlcv
 from engine.indicators import add_all_indicators, max_indicator_warmup
 from engine.patterns import (
     add_all_patterns,
@@ -33,7 +34,7 @@ from engine.patterns import (
 from engine.loader import load_strategy_from_content
 from engine.metrics import build_backtest_result
 from engine.kb_signals import estimate_kb_warmup
-from engine.simulator import simulate_trades
+from engine.simulator import build_minute_arrays, simulate_trades
 
 logger = logging.getLogger(__name__)
 
@@ -53,24 +54,26 @@ def _enforce_market_data_window(
     df: pd.DataFrame,
     market_data_request: dict[str, Any],
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    start_ts = _parse_window_timestamp(BACKTEST_MARKET_DATA_FROM_UTC)
-    end_ts = _parse_window_timestamp(BACKTEST_MARKET_DATA_TO_UTC)
+    normalized_request = dict(market_data_request)
+    from_utc = str(
+        normalized_request.get("from_utc") or BACKTEST_MARKET_DATA_FROM_UTC
+    )
+    to_utc = str(
+        normalized_request.get("to_utc") or BACKTEST_MARKET_DATA_TO_UTC
+    )
+    start_ts = _parse_window_timestamp(from_utc)
+    end_ts = _parse_window_timestamp(to_utc)
     trimmed_df = df.loc[(df.index >= start_ts) & (df.index <= end_ts)].copy()
 
-    normalized_request = dict(market_data_request)
-    requested_from = normalized_request.get("from_utc")
-    requested_to = normalized_request.get("to_utc")
-    normalized_request["from_utc"] = BACKTEST_MARKET_DATA_FROM_UTC
-    normalized_request["to_utc"] = BACKTEST_MARKET_DATA_TO_UTC
+    normalized_request["from_utc"] = from_utc
+    normalized_request["to_utc"] = to_utc
 
-    if requested_from != BACKTEST_MARKET_DATA_FROM_UTC or requested_to != BACKTEST_MARKET_DATA_TO_UTC or len(trimmed_df) != len(df):
+    if len(trimmed_df) != len(df):
         logger.info(
-            "Enforced backtest market-data window | requested_from=%s requested_to=%s "
-            "enforced_from=%s enforced_to=%s input_rows=%s trimmed_rows=%s",
-            requested_from,
-            requested_to,
-            BACKTEST_MARKET_DATA_FROM_UTC,
-            BACKTEST_MARKET_DATA_TO_UTC,
+            "Enforced backtest market-data window | from=%s to=%s "
+            "input_rows=%s trimmed_rows=%s",
+            from_utc,
+            to_utc,
             len(df),
             len(trimmed_df),
         )
@@ -78,7 +81,7 @@ def _enforce_market_data_window(
     if trimmed_df.empty:
         raise ValueError(
             "No OHLCV data is available inside the configured backtest window "
-            f"{BACKTEST_MARKET_DATA_FROM_UTC} to {BACKTEST_MARKET_DATA_TO_UTC}."
+            f"{from_utc} to {to_utc}."
         )
 
     return trimmed_df, normalized_request
@@ -123,6 +126,25 @@ def run_backtest(
     step_start = time.perf_counter()
     df  = load_ohlcv_data(ohlcv_data)
     df, market_data_request = _enforce_market_data_window(df, market_data_request)
+
+    # ── Phase 11: 1-minute execution ──────────────────────────────────────────
+    # When run_config["intrabar_execution"] is set, the supplied OHLCV is the
+    # 1-minute series. We keep it (`minute_df`) for execution and resample it up
+    # to the strategy timeframe so EVERY downstream step — indicator warm-up,
+    # condition evaluation, HTF mapping, metrics — sees exactly the strategy-
+    # timeframe frame it expects. Only the trade fills and SL/TP/trailing
+    # resolution drop to the minute series, by walking each strategy bar's
+    # minutes (see simulator.simulate_trades / engine.resample). Default off so
+    # callers still supplying pre-aggregated data are completely unaffected.
+    intrabar_execution = bool(run_config.get("intrabar_execution"))
+    minute_df: pd.DataFrame | None = None
+    if intrabar_execution:
+        minute_df = df
+        df = resample_ohlcv(minute_df, cfg.timeframe)
+        logger.info(
+            "🕐 1-minute execution | timeframe=%s minute_bars=%s strategy_bars=%s",
+            cfg.timeframe, len(minute_df), len(df),
+        )
     logger.info(
         "⏱️  TIMING|step=load_normalize_ohlcv|duration=%.4fs|rows=%d",
         time.perf_counter() - step_start,
@@ -139,6 +161,11 @@ def run_backtest(
                 "The API layer must fetch the reference series and pass it in."
             )
         ref_df = load_ohlcv_data(reference_ohlcv)
+        # In 1-minute execution the reference series arrives at 1m too; resample
+        # it to the strategy timeframe so REF_ columns align with the (resampled)
+        # main frame's bars rather than picking a single intrabar minute.
+        if intrabar_execution:
+            ref_df = resample_ohlcv(ref_df, cfg.timeframe)
         df = merge_reference_data(df, ref_df)
         logger.info(
             "⏱️  TIMING|step=merge_reference_data|duration=%.4fs|reference_symbol=%s|ref_rows=%s",
@@ -223,9 +250,38 @@ def run_backtest(
         compiled_entry = compile_condition(cfg.entry_condition or "")
     if cfg.exit_evaluation_mode == "formula":
         compiled_exit = compile_condition(cfg.exit_condition or "")
+
+    # ── Phase 12: resolve direction → which side(s) to simulate ───────────────
+    # A "both" strategy runs TWO passes (long + short); the long leg uses the
+    # main entry/exit conditions and the short leg uses short_entry/exit. A
+    # "short_only" strategy has its single leg in the main conditions, so the
+    # short pass just reuses those. Each pass is single-sided in the simulator.
+    direction = (cfg.direction or "both").lower().strip()
+    run_long  = direction in ("long_only", "both")
+    run_short = direction in ("short_only", "both")
+
+    compiled_short_entry: CompiledCondition | None = None
+    compiled_short_exit:  CompiledCondition | None = None
+    if direction == "short_only":
+        # The only leg lives in the main fields — the short pass reuses them.
+        short_entry_condition = cfg.entry_condition or ""
+        short_exit_condition  = cfg.exit_condition or ""
+        compiled_short_entry, compiled_short_exit = compiled_entry, compiled_exit
+        run_long = False
+    else:
+        short_entry_condition = cfg.short_entry_condition or ""
+        short_exit_condition  = cfg.short_exit_condition or ""
+        # Only run the short pass for "both" when a short leg was actually given.
+        if direction == "both" and not short_entry_condition:
+            run_short = False
+        if run_short and cfg.entry_evaluation_mode == "formula" and short_entry_condition:
+            compiled_short_entry = compile_condition(short_entry_condition)
+        if run_short and cfg.exit_evaluation_mode == "formula" and short_exit_condition:
+            compiled_short_exit = compile_condition(short_exit_condition)
+
     logger.info(
-        "⏱️  TIMING|step=compile_conditions|duration=%.4fs",
-        time.perf_counter() - step_start,
+        "⏱️  TIMING|step=compile_conditions|duration=%.4fs|direction=%s|run_long=%s|run_short=%s",
+        time.perf_counter() - step_start, direction, run_long, run_short,
     )
 
     # ── Compute indicators (Fix 1: precompute once, never again) ──────────────
@@ -240,14 +296,27 @@ def run_backtest(
         cfg.stop_loss_spec, cfg.trailing_stop_spec,
     )
 
+    # Phase 2 — the volatility-band gate reads ATR_{w}/NATR_{w} directly, so inject
+    # that column even when no formula mentions it (same shape as the SL specs).
+    extra_requirements: dict[str, list[int]] = {
+        name: list(periods) for name, periods in sl_indicator_requirements.items()
+    }
+    if cfg.vol_filter_metric in ("atr", "natr") and (
+        cfg.vol_filter_min is not None or cfg.vol_filter_max is not None
+    ):
+        key = cfg.vol_filter_metric.upper()
+        extra_requirements.setdefault(key, []).append(int(cfg.vol_filter_window))
+
     enriched_indicator_config = _merge_indicator_requirements(
         cfg.indicators,
         compiled_entry,
         compiled_exit,
-        extra=sl_indicator_requirements,
+        compiled_short_entry,
+        compiled_short_exit,
+        extra=extra_requirements,
     )
     df = add_all_indicators(df, enriched_indicator_config)
-    _ensure_scalar_indicators(df, compiled_entry, compiled_exit)
+    _ensure_scalar_indicators(df, compiled_entry, compiled_exit, compiled_short_entry, compiled_short_exit)
     logger.info(
         "⏱️  TIMING|step=compute_indicators|duration=%.4fs|indicators=%s",
         time.perf_counter() - step_start,
@@ -260,7 +329,7 @@ def run_backtest(
     # cfg.patterns. Order matters: detected requirements first (sets defaults),
     # YAML overrides last (so user-specified windows win).
     pattern_idents: set[str] = set()
-    for compiled in (compiled_entry, compiled_exit):
+    for compiled in (compiled_entry, compiled_exit, compiled_short_entry, compiled_short_exit):
         if compiled is not None:
             pattern_idents.update(compiled.pattern_refs)
     if pattern_idents:
@@ -292,48 +361,118 @@ def run_backtest(
         objective, max_holding_candles, daily_loss_cap_pct, max_trades_per_day,
     )
 
+    # ── Phase 11: build the 1-minute execution arrays for the simulator ───────
+    # Map each (resampled) strategy bar to the half-open slice of minute bars
+    # inside its window, and extract the minute OHLC arrays. No-look-ahead is
+    # guaranteed by build_subbar_slices (a bar only ever sees its own minutes).
+    minute_arrays = None
+    subbar_starts = None
+    subbar_ends = None
+    if intrabar_execution and minute_df is not None:
+        td = timeframe_to_timedelta(cfg.timeframe)
+        subbar_starts, subbar_ends = build_subbar_slices(df.index, minute_df.index, td)
+        minute_arrays = build_minute_arrays(minute_df)
+
     # ── Run simulation ────────────────────────────────────────────────────────
+    # Phase 12 — a "both" strategy is two single-sided passes (long + short) that
+    # share every gate/cost/risk setting and differ only in `side` and the
+    # entry/exit conditions. _run_pass wraps simulate_trades with the shared
+    # kwargs so each pass is one call.
     step_start = time.perf_counter()
-    trades, diagnostics = simulate_trades(
-        df=df,
-        symbol=cfg.symbol,
-        entry_condition=cfg.entry_condition,
-        exit_condition=cfg.exit_condition,
-        compiled_entry=compiled_entry,
-        compiled_exit=compiled_exit,
-        stop_loss_pct=cfg.stop_loss,
-        take_profit_pct=cfg.take_profit,
-        slippage_bps=float(run_config.get("slippage_bps", 5.0)),
-        commission_bps=float(run_config.get("commission_bps", 2.0)),
-        warm_up_candles=required_warmup,
-        max_holding_candles=max_holding_candles,
-        objective=objective,
-        daily_loss_cap_pct=daily_loss_cap_pct,
-        max_trades_per_day=max_trades_per_day,
-        stt_intraday_sell_pct=float(run_config.get("stt_intraday_sell_pct", 0.025)),
-        stt_delivery_pct=float(run_config.get("stt_delivery_pct", 0.1)),
-        entry_evaluation_mode=cfg.entry_evaluation_mode,
-        exit_evaluation_mode=cfg.exit_evaluation_mode,
-        entry_signal_rules=cfg.entry_signal_rules,
-        exit_signal_rules=cfg.exit_signal_rules,
-        stop_loss_spec=cfg.stop_loss_spec,
-        trailing_stop_spec=cfg.trailing_stop_spec,
-        htf_contexts=htf_contexts,
-        time_exit_spec=cfg.time_exit_spec,
-        # Phase 10 — new entry gates and circuit breakers
-        entry_window_start_utc=cfg.entry_window_start_utc,
-        entry_window_end_utc=cfg.entry_window_end_utc,
-        max_consecutive_losses=cfg.max_consecutive_losses,
-        cooldown_bars_after_loss=cfg.cooldown_bars_after_loss,
-        cooldown_bars_after_profit=cfg.cooldown_bars_after_profit,
-        max_spread_bps=cfg.max_spread_bps,
-        gap_filter=cfg.gap_filter,
-        gap_threshold_pct=cfg.gap_threshold_pct,
-        entry_confirmation_bars=cfg.entry_confirmation_bars,
-        rsi_entry_band_min=cfg.rsi_entry_band_min,
-        rsi_entry_band_max=cfg.rsi_entry_band_max,
-        volume_ratio_threshold=cfg.volume_ratio_threshold,
-    )
+
+    def _run_pass(
+        side, p_entry_condition, p_exit_condition, p_compiled_entry, p_compiled_exit,
+        *, p_entry_mode=None, p_exit_mode=None, p_entry_rules=None, p_exit_rules=None,
+    ):
+        return simulate_trades(
+            df=df,
+            symbol=cfg.symbol,
+            side=side,
+            entry_condition=p_entry_condition,
+            exit_condition=p_exit_condition,
+            compiled_entry=p_compiled_entry,
+            compiled_exit=p_compiled_exit,
+            entry_evaluation_mode=p_entry_mode if p_entry_mode is not None else cfg.entry_evaluation_mode,
+            exit_evaluation_mode=p_exit_mode if p_exit_mode is not None else cfg.exit_evaluation_mode,
+            entry_signal_rules=p_entry_rules if p_entry_mode is not None else cfg.entry_signal_rules,
+            exit_signal_rules=p_exit_rules if p_exit_mode is not None else cfg.exit_signal_rules,
+            stop_loss_pct=cfg.stop_loss,
+            take_profit_pct=cfg.take_profit,
+            slippage_bps=float(run_config.get("slippage_bps", 5.0)),
+            commission_bps=float(run_config.get("commission_bps", 2.0)),
+            warm_up_candles=required_warmup,
+            max_holding_candles=max_holding_candles,
+            objective=objective,
+            daily_loss_cap_pct=daily_loss_cap_pct,
+            max_trades_per_day=max_trades_per_day,
+            stt_intraday_sell_pct=float(run_config.get("stt_intraday_sell_pct", 0.025)),
+            stt_delivery_pct=float(run_config.get("stt_delivery_pct", 0.1)),
+            stop_loss_spec=cfg.stop_loss_spec,
+            trailing_stop_spec=cfg.trailing_stop_spec,
+            htf_contexts=htf_contexts,
+            time_exit_spec=cfg.time_exit_spec,
+            # Phase 10 — new entry gates and circuit breakers
+            entry_window_start_utc=cfg.entry_window_start_utc,
+            entry_window_end_utc=cfg.entry_window_end_utc,
+            max_consecutive_losses=cfg.max_consecutive_losses,
+            cooldown_bars_after_loss=cfg.cooldown_bars_after_loss,
+            cooldown_bars_after_profit=cfg.cooldown_bars_after_profit,
+            max_spread_bps=cfg.max_spread_bps,
+            gap_filter=cfg.gap_filter,
+            gap_threshold_pct=cfg.gap_threshold_pct,
+            entry_confirmation_bars=cfg.entry_confirmation_bars,
+            rsi_entry_band_min=cfg.rsi_entry_band_min,
+            rsi_entry_band_max=cfg.rsi_entry_band_max,
+            volume_ratio_threshold=cfg.volume_ratio_threshold,
+            # Volatility / regime filters
+            vol_filter_metric=cfg.vol_filter_metric,
+            vol_filter_window=cfg.vol_filter_window,
+            vol_filter_min=cfg.vol_filter_min,
+            vol_filter_max=cfg.vol_filter_max,
+            regime_filter_allowed=cfg.regime_filter_allowed,
+            rs_filter_window=cfg.rs_filter_window,
+            rs_filter_min_ratio=cfg.rs_filter_min_ratio,
+            event_skip_dates=cfg.event_skip_dates,
+            lunch_lull_start_utc=cfg.lunch_lull_start_utc,
+            lunch_lull_end_utc=cfg.lunch_lull_end_utc,
+            # Phase 11 — 1-minute execution (None unless intrabar_execution is set)
+            minute_arrays=minute_arrays,
+            subbar_starts=subbar_starts,
+            subbar_ends=subbar_ends,
+        )
+
+    trades: list = []
+    diagnostics: list = []
+    if run_long:
+        long_trades, diagnostics = _run_pass(
+            "LONG", cfg.entry_condition, cfg.exit_condition, compiled_entry, compiled_exit,
+        )
+        trades.extend(long_trades)
+    if run_short:
+        if direction == "short_only":
+            # The single short leg reuses the main conditions AND their eval
+            # mode/rules (which may be registry).
+            short_kwargs = {}
+        else:
+            # "both": the short leg comes from the SDL compiler as a FORMULA
+            # string, so force formula evaluation regardless of the long leg's
+            # mode (there are no separate short registry rules).
+            short_kwargs = dict(
+                p_entry_mode="formula", p_exit_mode="formula",
+                p_entry_rules=None, p_exit_rules=None,
+            )
+        short_trades, short_diag = _run_pass(
+            "SHORT", short_entry_condition, short_exit_condition,
+            compiled_short_entry, compiled_short_exit, **short_kwargs,
+        )
+        trades.extend(short_trades)
+        # Diagnostics are per-bar and single-sided; keep the long pass's as the
+        # primary view and fall back to the short pass's when long didn't run.
+        if not diagnostics:
+            diagnostics = short_diag
+    # Interleave both passes' trades back into chronological order.
+    trades.sort(key=lambda t: str(t.entry_date))
+
     simulation_duration = time.perf_counter() - step_start
     logger.info(
         "⏱️  TIMING|step=simulate_trades|duration=%.4fs|trades=%d|candles=%d",
@@ -487,23 +626,16 @@ def _ensure_scalar_indicators(
     df,
     *compiled_conditions: CompiledCondition | None,
 ) -> None:
-    """Compute scalar (period-less) indicators — MACD, VWAP — that conditions reference."""
-    from engine.indicators import macd_line, macd_signal, vwap
+    """Compute scalar (period-less) studies — MACD, VWAP, OBV, SAR, STOCH_*,
+    CDL_*, … — that conditions reference, so the simulator's fast array path can
+    read them as columns. Single source of truth: delegates to conditions, which
+    builds each via the same engine.indicators code add_all_indicators() uses."""
+    from engine.conditions import ensure_scalar_columns
 
     needed: set[str] = set()
     for compiled in compiled_conditions:
         if compiled is not None:
             needed.update(compiled.scalar_refs)
 
-    if not needed:
-        return
-
-    close = df["close"]
-    if "MACD" in needed and "MACD" not in df.columns:
-        df["MACD"] = macd_line(close)
-    if "MACD_SIGNAL" in needed and "MACD_SIGNAL" not in df.columns:
-        df["MACD_SIGNAL"] = macd_signal(close)
-    if "MACD_HIST" in needed and "MACD_HIST" not in df.columns and "MACD" in df.columns and "MACD_SIGNAL" in df.columns:
-        df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
-    if "VWAP" in needed and "VWAP" not in df.columns:
-        df["VWAP"] = vwap(df)
+    if needed:
+        ensure_scalar_columns(df, needed)

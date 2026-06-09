@@ -12,8 +12,10 @@ Market phase and monthly performance are built by market_classifier.py.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from engine.assessment import build_assessment
@@ -27,7 +29,6 @@ from engine.config import (
 )
 from engine.market_classifier import (
     build_market_phase_analysis,
-    classify_entry_condition,
     compute_monthly_performance,
 )
 from engine.simulator import Trade
@@ -51,6 +52,20 @@ def _parse_timestamp(value: str) -> pd.Timestamp:
     if getattr(timestamp, "tzinfo", None) is not None:
         return timestamp.tz_convert("UTC").tz_localize(None)
     return timestamp.tz_localize(None)
+
+
+def _parse_timestamps(values: list[Any]) -> pd.DatetimeIndex:
+    """Vectorized counterpart to _parse_timestamp.
+
+    pd.to_datetime() is ~100× faster when given the whole list than when
+    called per-string. We use this at the entrance to calculate_metrics so the
+    downstream hot loops can consume datetime64 arrays instead of re-parsing
+    the same strings tens of thousands of times.
+    """
+    idx = pd.to_datetime(list(values), utc=True)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    return idx
 
 
 def _round(value: float, ndigits: int = 4) -> float:
@@ -160,6 +175,7 @@ def build_backtest_result(
     diagnostics: list[dict] | None = None,
     config: dict | None = None,
 ) -> dict:
+    _t = time.perf_counter()
     metrics = calculate_metrics(
         trades=trades,
         df=df,
@@ -167,7 +183,17 @@ def build_backtest_result(
         start_utc=start_utc,
         end_utc=end_utc,
     )
+    logger.info(
+        "⏱️  TIMING|step=calculate_metrics|duration=%.4fs|trades=%d|candles=%d",
+        time.perf_counter() - _t, len(trades), len(df) if df is not None else 0,
+    )
+
+    _t = time.perf_counter()
     assessment = build_assessment(metrics)
+    logger.info(
+        "⏱️  TIMING|step=build_assessment|duration=%.4fs",
+        time.perf_counter() - _t,
+    )
 
     thresholds    = _get_thresholds(objective)
     total_trades  = int(metrics["total_trades"])
@@ -185,11 +211,18 @@ def build_backtest_result(
     # Build human-readable failure reason
     if total_trades == 0:
         diag_hints     = _build_no_trade_hints(diagnostics or [], df)
+        # Don't claim entries "never triggered" when they did — the diag hint
+        # carries the precise cause (e.g. a gate blocked every fill).
+        any_entry_signal = any(d.get("entry_signal") for d in (diagnostics or []))
+        lead = (
+            "Historical data loaded successfully, but no entry produced a trade"
+            if any_entry_signal
+            else "Historical data loaded successfully, but the entry conditions "
+                 f"never triggered across {len(df)} candles"
+        )
         failure_reason = (
             f"Strategy failed: no trades were executed during the "
-            f"{metrics['num_days']}-day backtest window. "
-            f"Historical data loaded successfully, but the entry conditions "
-            f"never triggered across {len(df)} candles. {diag_hints}"
+            f"{metrics['num_days']}-day backtest window. {lead}. {diag_hints}"
         ).strip()
     elif win_rate < min_win_rate:
         failure_reason = (
@@ -204,15 +237,32 @@ def build_backtest_result(
     else:
         failure_reason = ""
 
-    # Market phase analysis (quarters)
-    market_phase_analysis = build_market_phase_analysis(df, trades, strategy_side)
+    # Market phase analysis (quarters). The classifier needs the trade entry
+    # timestamps in DatetimeIndex form; share the same batch parse so we don't
+    # re-walk all entry strings here.
+    _t = time.perf_counter()
+    entry_ts_for_phase = (
+        _parse_timestamps([t.entry_date for t in trades]) if trades else pd.DatetimeIndex([])
+    )
+    market_phase_analysis = build_market_phase_analysis(
+        df, trades, strategy_side, entry_ts_sorted=entry_ts_for_phase,
+    )
+    logger.info(
+        "⏱️  TIMING|step=build_market_phase_analysis|duration=%.4fs|phases=%d",
+        time.perf_counter() - _t, len(market_phase_analysis),
+    )
 
     # Monthly performance + statistics (already inside metrics dict)
     monthly_performance = metrics.pop("monthly_performance", [])
     monthly_statistics  = metrics.pop("monthly_statistics", {})
 
     # Diagnostic summary
+    _t = time.perf_counter()
     diag_summary = _build_diagnostic_summary(diagnostics or [])
+    logger.info(
+        "⏱️  TIMING|step=build_diagnostic_summary|duration=%.4fs",
+        time.perf_counter() - _t,
+    )
 
     result = {
         "backtest_ref_id":       backtest_ref_id,
@@ -268,7 +318,30 @@ def calculate_metrics(
         )
 
     num_days        = _calendar_days(start_utc, end_utc)
-    trade_snapshots = _trade_snapshots(trades, starting_balance)
+
+    # One-shot batch parse of every trade entry/exit timestamp. The previous
+    # code re-parsed these strings via pd.to_datetime per call inside the hot
+    # loops (~7× len(trades) calls); doing it once here is ~100× faster.
+    _t = time.perf_counter()
+    entry_ts_all = _parse_timestamps([t.entry_date for t in trades]) if trades else pd.DatetimeIndex([])
+    exit_ts_all  = _parse_timestamps([t.exit_date  for t in trades]) if trades else pd.DatetimeIndex([])
+    sort_order   = entry_ts_all.argsort()
+    trades_sorted   = [trades[i] for i in sort_order]
+    entry_ts_sorted = entry_ts_all[sort_order]
+    exit_ts_sorted  = exit_ts_all[sort_order]
+    logger.info(
+        "⏱️  TIMING|step=parse_and_sort_trade_timestamps|duration=%.4fs|trades=%d",
+        time.perf_counter() - _t, len(trades),
+    )
+
+    _t = time.perf_counter()
+    trade_snapshots = _trade_snapshots(
+        trades_sorted, entry_ts_sorted, exit_ts_sorted, starting_balance,
+    )
+    logger.info(
+        "⏱️  TIMING|step=trade_snapshots|duration=%.4fs|trades=%d",
+        time.perf_counter() - _t, len(trades),
+    )
     ending_balance  = trade_snapshots[-1]["ending_balance"] if trade_snapshots else starting_balance
     total_trades    = len(trades)
     wins            = sum(1 for t in trades if t.pnl_pct > 0)
@@ -294,12 +367,17 @@ def calculate_metrics(
         else 0.0
     )
 
+    _t = time.perf_counter()
     daily_values   = _daily_portfolio_values(
         df=df,
         trade_snapshots=trade_snapshots,
         starting_balance=starting_balance,
         start_utc=start_utc,
         end_utc=end_utc,
+    )
+    logger.info(
+        "⏱️  TIMING|step=daily_portfolio_values|duration=%.4fs|candles=%d|trades=%d|daily_rows=%d",
+        time.perf_counter() - _t, len(df), len(trade_snapshots), len(daily_values),
     )
     # daily_returns in decimal form (e.g. 0.01 = 1% gain)
     daily_returns     = daily_values.pct_change().fillna(0.0)
@@ -332,14 +410,28 @@ def calculate_metrics(
     var_95_pct, expected_shortfall_95_pct = _historical_var_and_expected_shortfall(
         daily_returns_pct
     )
-    average_holding_duration = _avg_trade_duration_days(trades)
+    average_holding_duration = _avg_trade_duration_days(entry_ts_sorted, exit_ts_sorted)
     trades_per_month         = _trades_per_month(total_trades, num_days)
-    longest_losing_streak    = _longest_losing_streak(trades)
+    longest_losing_streak    = _longest_losing_streak(trades_sorted)
     rounded_average_holding_duration = _round(average_holding_duration, 4)
     rounded_average_outcome_per_trade = _round(average_outcome_per_trade)
 
+    _t = time.perf_counter()
     monthly_performance, monthly_statistics = compute_monthly_performance(
-        daily_values, trades
+        daily_values, trades, entry_ts_sorted=entry_ts_sorted,
+    )
+    logger.info(
+        "⏱️  TIMING|step=compute_monthly_performance|duration=%.4fs|months=%d",
+        time.perf_counter() - _t, len(monthly_performance),
+    )
+
+    _t = time.perf_counter()
+    serialized_trades = _serialize_backtest_trades(
+        trades_sorted, entry_ts_sorted, exit_ts_sorted, df,
+    )
+    logger.info(
+        "⏱️  TIMING|step=serialize_backtest_trades|duration=%.4fs|trades=%d|candles=%d",
+        time.perf_counter() - _t, len(trades), len(df),
     )
 
     return {
@@ -376,49 +468,77 @@ def calculate_metrics(
         "recovery_time_days":          recovery_time_days,
         "monthly_performance":         monthly_performance,
         "monthly_statistics":          monthly_statistics,
-        "backtest_trades":             _serialize_backtest_trades(trades, df),
+        "backtest_trades":             serialized_trades,
     }
 
 
 # ── Trade serialization ────────────────────────────────────────────────────────
 
-def _serialize_backtest_trades(trades: list[Trade], df: pd.DataFrame) -> list[dict]:
+def _serialize_backtest_trades(
+    trades_sorted: list[Trade],
+    entry_ts_sorted: pd.DatetimeIndex,
+    exit_ts_sorted: pd.DatetimeIndex,
+    df: pd.DataFrame,
+) -> list[dict]:
+    """Serialize each trade to a dict with entry-bar market condition + MAE/MFE.
+
+    Vectorized rewrite. Caller supplies trades already sorted by entry_ts plus
+    the matching parsed timestamp arrays, so we avoid ~4× len(trades)
+    `pd.to_datetime` calls. classify_entry_condition's rolling means are
+    precomputed once over the whole close series, then looked up by bar index.
     """
-    Serialize each trade to a dict, enriched with:
-      - entry_market_condition (Bull / Bear / Sideways at entry bar)
-      - mae_pct (maximum adverse excursion %)
-      - mfe_pct (maximum favorable excursion %)
-      - holding_duration_days (calendar days between entry and exit)
-    """
-    sorted_trades = sorted(trades, key=lambda t: _parse_timestamp(t.entry_date))
+    from engine.config import ENTRY_CONDITION_FAST_WINDOW, ENTRY_CONDITION_SLOW_WINDOW
 
-    # Build a bar-index lookup from the DataFrame index
-    df_index = df.index if df is not None and not df.empty else None
+    n = len(trades_sorted)
+    if n == 0:
+        return []
 
-    result = []
-    for trade in sorted_trades:
-        # Resolve entry bar index for classify_entry_condition
-        entry_condition_label = "Unknown"
-        if df_index is not None:
-            try:
-                entry_ts  = _parse_timestamp(trade.entry_date)
-                bar_idx   = int(df_index.searchsorted(entry_ts, side="left"))
-                entry_condition_label = classify_entry_condition(df, bar_idx)
-            except Exception:
-                pass
+    # Entry-bar market condition labels — vectorized lookup.
+    labels: list[str] = ["Unknown"] * n
+    if df is not None and not df.empty:
+        close_series = df["close"]
+        fast_avg_arr = close_series.rolling(ENTRY_CONDITION_FAST_WINDOW).mean().to_numpy(dtype=float)
+        slow_avg_arr = close_series.rolling(ENTRY_CONDITION_SLOW_WINDOW).mean().to_numpy(dtype=float)
+        close_arr    = close_series.to_numpy(dtype=float)
+        bar_idx_arr  = np.asarray(df.index.searchsorted(entry_ts_sorted, side="left"), dtype=np.int64)
 
-        # Holding duration in calendar days
-        try:
-            entry_ts   = _parse_timestamp(trade.entry_date)
-            exit_ts    = _parse_timestamp(trade.exit_date)
-            hold_days  = round((exit_ts - entry_ts).total_seconds() / 86400.0, 2)
-        except Exception:
-            hold_days = 0.0
+        valid_mask = (
+            (bar_idx_arr >= ENTRY_CONDITION_SLOW_WINDOW)
+            & (bar_idx_arr < len(close_arr))
+        )
+        for i in range(n):
+            if not valid_mask[i]:
+                continue
+            bi = int(bar_idx_arr[i])
+            cur = close_arr[bi]
+            f   = fast_avg_arr[bi]
+            s   = slow_avg_arr[bi]
+            if not (np.isfinite(cur) and np.isfinite(f) and np.isfinite(s)):
+                continue
+            if cur > f > s:
+                labels[i] = "Bull"
+            elif cur < f < s:
+                labels[i] = "Bear"
+            else:
+                labels[i] = "Sideways"
 
+    # Holding duration in calendar days — vectorized.
+    hold_secs = (
+        exit_ts_sorted.asi8 - entry_ts_sorted.asi8
+    ).astype(np.float64) / 1e9  # ns → s
+    hold_days_arr = hold_secs / 86400.0
+
+    # ISO timestamps for output — formatted from the already-parsed arrays
+    # (UTC, naive after parse) so we don't re-call pd.to_datetime per trade.
+    entry_iso = [ts.isoformat() + "Z" for ts in entry_ts_sorted]
+    exit_iso  = [ts.isoformat() + "Z" for ts in exit_ts_sorted]
+
+    result: list[dict] = []
+    for i, trade in enumerate(trades_sorted):
         result.append({
             "instrument":            str(trade.symbol),
-            "entry_date":            _format_trade_timestamp(trade.entry_date),
-            "exit_date":             _format_trade_timestamp(trade.exit_date),
+            "entry_date":            entry_iso[i],
+            "exit_date":             exit_iso[i],
             "side":                  str(trade.side),
             "entry_price":           _round(trade.entry_price),
             "exit_price":            _round(trade.exit_price),
@@ -428,32 +548,56 @@ def _serialize_backtest_trades(trades: list[Trade], df: pd.DataFrame) -> list[di
             "pnl_inr":               _round(getattr(trade, "pnl_inr", 0.0), 4),
             "exit_reason":           str(trade.exit_reason),
             "holding_candles":       int(trade.holding_candles),
-            "holding_duration_days": hold_days,
-            "entry_market_condition": entry_condition_label,
+            "holding_duration_days": round(float(hold_days_arr[i]), 2),
+            "entry_market_condition": labels[i],
             "max_adverse_excursion_pct":  _round(getattr(trade, "mae_pct", 0.0)),
             "max_favorable_excursion_pct": _round(getattr(trade, "mfe_pct", 0.0)),
+            # Structured rationale captured by the simulator: the full "why" of
+            # each entry and exit (matched bar, indicator values, prices, costs).
+            "entry_reason":          getattr(trade, "entry_reason", None),
+            "exit_reason_detail":    getattr(trade, "exit_reason_detail", None),
         })
     return result
 
 
 # ── Portfolio helpers ─────────────────────────────────────────────────────────
 
-def _trade_snapshots(trades: list[Trade], starting_balance: float) -> list[dict]:
-    snapshots: list[dict] = []
-    balance = float(starting_balance)
+def _trade_snapshots(
+    trades_sorted: list[Trade],
+    entry_ts_sorted: pd.DatetimeIndex,
+    exit_ts_sorted: pd.DatetimeIndex,
+    starting_balance: float,
+) -> list[dict]:
+    """Build per-trade balance snapshots without re-parsing any timestamp.
 
-    for trade in sorted(trades, key=lambda t: _parse_timestamp(t.entry_date)):
-        pnl_value      = balance * float(trade.pnl_abs)
-        ending_balance = balance + pnl_value
-        snapshots.append({
-            "entry_ts":         _parse_timestamp(trade.entry_date),
-            "exit_ts":          _parse_timestamp(trade.exit_date),
-            "entry_price":      float(trade.entry_price),
-            "starting_balance": balance,
-            "ending_balance":   ending_balance,
-        })
-        balance = ending_balance
+    Caller has already batch-parsed entry/exit timestamps and sorted everything
+    by entry_ts. We just walk the parallel arrays, compute the running balance
+    with one cumprod, and emit dicts.
+    """
+    n = len(trades_sorted)
+    if n == 0:
+        return []
 
+    pnl_abs_arr     = np.fromiter((float(t.pnl_abs) for t in trades_sorted), dtype=float, count=n)
+    entry_price_arr = np.fromiter((float(t.entry_price) for t in trades_sorted), dtype=float, count=n)
+    # balance[i+1] = balance[i] * (1 + pnl_abs_arr[i]) — same recurrence as the
+    # original Python loop; cumprod expresses it in one numpy call.
+    growth          = 1.0 + pnl_abs_arr
+    end_balances    = float(starting_balance) * np.cumprod(growth)
+    start_balances  = np.empty(n, dtype=float)
+    start_balances[0]  = float(starting_balance)
+    start_balances[1:] = end_balances[:-1]
+
+    snapshots: list[dict] = [
+        {
+            "entry_ts":         entry_ts_sorted[i],
+            "exit_ts":          exit_ts_sorted[i],
+            "entry_price":      float(entry_price_arr[i]),
+            "starting_balance": float(start_balances[i]),
+            "ending_balance":   float(end_balances[i]),
+        }
+        for i in range(n)
+    ]
     return snapshots
 
 
@@ -465,34 +609,58 @@ def _daily_portfolio_values(
     start_utc: str,
     end_utc: str,
 ) -> pd.Series:
+    """Per-candle portfolio value series, resampled to daily.
+
+    Hot path: was a 13 k-iteration loop of pandas iloc setitems on a 1.26 M-row
+    Series (~48s). We now operate on a numpy buffer instead: the searchsorted is
+    bulk-vectorized, gap-fills between trades are scalar numpy slice writes
+    (in-C), in-trade fills are a single numpy vector op. The Python loop still
+    runs once per trade but each iteration is now O(slice) numpy work with no
+    pandas overhead.
+    """
     start_day = _parse_timestamp(start_utc).normalize()
     end_day   = _parse_timestamp(end_utc).normalize()
     full_days = pd.date_range(start_day, end_day, freq="D")
 
-    portfolio = pd.Series(index=df.index, dtype=float)
-    cursor    = 0
-    balance   = float(starting_balance)
+    n_candles = len(df)
+    if n_candles == 0:
+        return pd.Series(float(starting_balance), index=full_days, dtype=float)
 
-    for snapshot in trade_snapshots:
-        entry_idx = int(df.index.searchsorted(snapshot["entry_ts"], side="left"))
-        exit_idx  = int(df.index.searchsorted(snapshot["exit_ts"],  side="right"))
+    close_arr = df["close"].to_numpy(dtype=float)
+    pos       = np.empty(n_candles, dtype=float)
 
-        if entry_idx > cursor:
-            portfolio.iloc[cursor:entry_idx] = balance
+    # Bulk-resolve entry/exit bar indices in one vectorized searchsorted each.
+    if trade_snapshots:
+        entry_ts_idx = pd.DatetimeIndex([s["entry_ts"] for s in trade_snapshots])
+        exit_ts_idx  = pd.DatetimeIndex([s["exit_ts"]  for s in trade_snapshots])
+        entry_idx_arr = np.asarray(df.index.searchsorted(entry_ts_idx, side="left"),  dtype=np.int64)
+        exit_idx_arr  = np.asarray(df.index.searchsorted(exit_ts_idx,  side="right"), dtype=np.int64)
+    else:
+        entry_idx_arr = np.empty(0, dtype=np.int64)
+        exit_idx_arr  = np.empty(0, dtype=np.int64)
 
-        trade_slice = df["close"].iloc[entry_idx:exit_idx].astype(float)
-        if not trade_slice.empty:
-            portfolio.iloc[entry_idx:exit_idx] = snapshot["starting_balance"] * (
-                trade_slice / snapshot["entry_price"]
+    cursor  = 0
+    balance = float(starting_balance)
+
+    for i, snap in enumerate(trade_snapshots):
+        e = int(entry_idx_arr[i])
+        x = int(exit_idx_arr[i])
+
+        if e > cursor:
+            pos[cursor:e] = balance
+
+        if x > e:
+            pos[e:x] = float(snap["starting_balance"]) * (
+                close_arr[e:x] / float(snap["entry_price"])
             )
 
-        balance = float(snapshot["ending_balance"])
-        cursor  = exit_idx
+        balance = float(snap["ending_balance"])
+        cursor  = x
 
-    if cursor < len(portfolio):
-        portfolio.iloc[cursor:] = balance
+    if cursor < n_candles:
+        pos[cursor:] = balance
 
-    portfolio    = portfolio.ffill().fillna(float(starting_balance))
+    portfolio    = pd.Series(pos, index=df.index, dtype=float)
     daily_values = portfolio.resample("D").last().ffill()
     daily_values = (
         daily_values
@@ -625,20 +793,21 @@ def _historical_var_and_expected_shortfall(
     return _round(var_95), _round(es_95)
 
 
-def _avg_trade_duration_days(trades: list[Trade]) -> float:
-    """Mean calendar days between entry and exit across all trades."""
-    if not trades:
+def _avg_trade_duration_days(
+    entry_ts_sorted: pd.DatetimeIndex,
+    exit_ts_sorted: pd.DatetimeIndex,
+) -> float:
+    """Mean calendar days between entry and exit across all trades.
+
+    Vectorized. Caller passes the already-parsed timestamp arrays so we don't
+    re-parse 2 × len(trades) strings.
+    """
+    n = len(entry_ts_sorted)
+    if n == 0:
         return 0.0
-    durations = []
-    for trade in trades:
-        try:
-            entry    = _parse_timestamp(trade.entry_date)
-            exit_    = _parse_timestamp(trade.exit_date)
-            duration = max(0.0, (exit_ - entry).total_seconds() / 86_400.0)
-            durations.append(duration)
-        except Exception:
-            pass
-    return float(sum(durations) / len(durations)) if durations else 0.0
+    secs = (exit_ts_sorted.asi8 - entry_ts_sorted.asi8).astype(np.float64) / 1e9
+    days = np.clip(secs / 86_400.0, 0.0, None)
+    return float(days.mean())
 
 
 def _trades_per_month(total_trades: int, num_days: int) -> float:
@@ -648,14 +817,17 @@ def _trades_per_month(total_trades: int, num_days: int) -> float:
     return total_trades / (num_days / CALENDAR_DAYS_PER_MONTH)
 
 
-def _longest_losing_streak(trades: list[Trade]) -> int:
-    """Longest consecutive sequence of losing trades (pnl_pct ≤ 0)."""
-    if not trades:
+def _longest_losing_streak(trades_sorted: list[Trade]) -> int:
+    """Longest consecutive sequence of losing trades (pnl_pct ≤ 0).
+
+    Caller passes trades already sorted by entry_ts so we skip the per-trade
+    pd.to_datetime sort key that dominated this function before.
+    """
+    if not trades_sorted:
         return 0
-    sorted_trades  = sorted(trades, key=lambda t: _parse_timestamp(t.entry_date))
     max_streak     = 0
     current_streak = 0
-    for trade in sorted_trades:
+    for trade in trades_sorted:
         if float(trade.pnl_pct) <= 0:
             current_streak += 1
             max_streak      = max(max_streak, current_streak)
@@ -665,6 +837,34 @@ def _longest_losing_streak(trades: list[Trade]) -> int:
 
 
 # ── Diagnostic helpers ────────────────────────────────────────────────────────
+
+# Every entry-gate diagnostic field, paired with a human-readable cause. Order
+# matters only for tie-breaking when reporting the dominant blocker.
+_ENTRY_BLOCK_REASONS: tuple[tuple[str, str], ...] = (
+    ("entry_blocked_session_last",
+     "the strategy's objective is intraday but its timeframe spans a full "
+     "session (e.g. a 1d timeframe), so every entry would have to be squared "
+     "off on the same bar it opened — set the objective to 'positional' for "
+     "daily/swing strategies"),
+    ("entry_blocked_daily_cap",        "the daily loss cap halted new entries"),
+    ("entry_blocked_max_trades",       "the max-trades-per-day limit was reached"),
+    ("entry_blocked_htf",              "a higher-timeframe trend gate was not satisfied"),
+    ("entry_blocked_time_exit",        "the signals fired past the intraday time-exit cutoff"),
+    ("entry_blocked_entry_window",     "the signals fired outside the allowed entry window"),
+    ("entry_blocked_consecutive_losses","the consecutive-loss circuit breaker was active"),
+    ("entry_blocked_cooldown",         "a post-trade cooldown was active"),
+    ("entry_blocked_spread",           "the estimated spread exceeded the max-spread gate"),
+    ("entry_blocked_gap",              "the gap filter rejected the session"),
+    ("entry_blocked_confirmation",     "the signal never held for the required confirmation bars"),
+    ("entry_blocked_rsi_band",         "the RSI entry-band gate rejected the bars"),
+    ("entry_blocked_volume_ratio",     "the volume-ratio gate rejected the bars"),
+    ("entry_blocked_volatility",       "the volatility-band gate rejected the bars"),
+    ("entry_blocked_regime",           "the market regime was not in the allow-list"),
+    ("entry_blocked_relative_strength","the relative-strength gate rejected the bars"),
+    ("entry_blocked_event",            "the entries fell on configured blackout/event dates"),
+    ("entry_blocked_lunch_lull",       "the entries fell inside the midday lull window"),
+)
+
 
 def _build_no_trade_hints(diagnostics: list[dict], df: pd.DataFrame) -> str:
     if not diagnostics:
@@ -685,22 +885,45 @@ def _build_no_trade_hints(diagnostics: list[dict], df: pd.DataFrame) -> str:
             "but never returned True. Check that your entry condition logic is correct "
             "and that the indicators are generating valid values."
         )
-    return (
+
+    # Entries fired but produced no trades — report the dominant ACTUAL blocker
+    # rather than a hardcoded guess. Each diagnostic counts the bars where that
+    # gate was the reason the entry didn't fill.
+    block_counts = [
+        (reason, sum(1 for d in diagnostics if d.get(field)))
+        for field, reason in _ENTRY_BLOCK_REASONS
+    ]
+    block_counts = [(r, c) for r, c in block_counts if c > 0]
+
+    base = (
         f"Entry conditions fired {entry_signals} time(s) across {entry_evaluated} "
-        "eligible candles but were blocked by circuit-breakers (daily cap / max trades)."
+        "eligible candles but no trade filled"
     )
+    if not block_counts:
+        return base + " (no entry gate recorded a block — review entry/exit configuration)."
+
+    block_counts.sort(key=lambda rc: rc[1], reverse=True)
+    dominant_reason, dominant_count = block_counts[0]
+    return f"{base}: most often ({dominant_count}×) because {dominant_reason}."
 
 
 def _build_diagnostic_summary(diagnostics: list[dict]) -> dict:
     if not diagnostics:
         return {}
-    return {
+    summary = {
         "total_candles":     len(diagnostics),
         "entry_evaluated":   sum(1 for d in diagnostics if d.get("entry_evaluated")),
         "entry_signals":     sum(1 for d in diagnostics if d.get("entry_signal")),
-        "daily_cap_blocks":  sum(1 for d in diagnostics if d.get("entry_blocked_daily_cap")),
-        "max_trades_blocks": sum(1 for d in diagnostics if d.get("entry_blocked_max_trades")),
         "exit_signals":      sum(1 for d in diagnostics if d.get("exit_signal")),
         "stop_hits":         sum(1 for d in diagnostics if d.get("stop_hit")),
         "tp_hits":           sum(1 for d in diagnostics if d.get("tp_hit")),
     }
+    # Per-gate block counts (0 omitted) so callers see exactly what rejected entries.
+    for field, _reason in _ENTRY_BLOCK_REASONS:
+        count = sum(1 for d in diagnostics if d.get(field))
+        if count:
+            summary[f"{field}_count"] = count
+    # Preserve the two legacy keys other code/tests may read.
+    summary["daily_cap_blocks"]  = sum(1 for d in diagnostics if d.get("entry_blocked_daily_cap"))
+    summary["max_trades_blocks"] = sum(1 for d in diagnostics if d.get("entry_blocked_max_trades"))
+    return summary

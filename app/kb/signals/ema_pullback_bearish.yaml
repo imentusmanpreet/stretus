@@ -2,35 +2,60 @@ name: ema_pullback_bearish
 category: trend
 direction: bearish
 kind: pattern
-roles: [entry_trigger]
-formula: "CLOSE < EMA({window}) AND MAX(HIGH, {lookback}) >= EMA({window}) AND CLOSE < OPEN"
-description: "Price rallied up to the EMA within the last few bars and is now closing back below — classic downtrend pullback short entry."
-
-works_best_on: [3m, 5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m]
+roles:
+- entry_trigger
+formula: CLOSE < EMA({window}) AND MAX(HIGH, {lookback}) >= EMA({window}) AND CLOSE < OPEN
+description: Price rallied up to the EMA within the last few bars and is now closing back below — classic downtrend pullback short entry.
+works_best_on:
+- 3m
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bullish
-
-pairs_well_with: [volume_spike, ema_below, vwap_bearish, bearish_rejection_candle]
-contradicts: [ema_pullback_bullish, price_above_ema]
-
+- sentiment: bullish
+pairs_well_with:
+- volume_spike
+- ema_below
+- vwap_bearish
+- bearish_rejection_candle
+contradicts:
+- ema_pullback_bullish
+- price_above_ema
 params_by_timeframe:
-  1m:   {window: 20, lookback: 3}
-  3m:   {window: 20, lookback: 3}
-  5m:   {window: 20, lookback: 3}
-  10m:  {window: 20, lookback: 3}
-  15m:  {window: 20, lookback: 3}
-  30m:  {window: 20, lookback: 3}
-  1h:   {window: 34, lookback: 3}
-  1d:   {window: 50, lookback: 3}
-
+  1m:
+    window: 20
+    lookback: 3
+  3m:
+    window: 20
+    lookback: 3
+  5m:
+    window: 20
+    lookback: 3
+  10m:
+    window: 20
+    lookback: 3
+  15m:
+    window: 20
+    lookback: 3
+  30m:
+    window: 20
+    lookback: 3
+  1h:
+    window: 34
+    lookback: 3
+  1d:
+    window: 50
+    lookback: 3
 experience_fit:
   beginner: 0.8
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 1.0
   momentum: 0.7
@@ -39,3 +64,10 @@ intent_fit:
   scalping: 0.6
   mean_reversion: 0.5
   confirmation: 0.8
+match_when:
+  phrases:
+  - (?:bearish\s+)?ema\s+pullback
+  - rally\s+to\s+(?:the\s+)?(?:falling\s+)?ema
+  - short\s+on\s+(?:ema\s+)?(?:pullback|rally)
+  acts_as: entry_trigger
+  mirrors_to: ema_pullback_bullish

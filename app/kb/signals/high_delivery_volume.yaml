@@ -2,34 +2,51 @@ name: high_delivery_volume
 category: india
 direction: neutral
 kind: threshold
-roles: [entry_filter]
-formula: "VOL > AVG(VOL, {window}) * {multiplier}"
-description: "Above-average delivery volume — institutional accumulation/distribution (NSE/BSE specific)."
-
-works_best_on: [1d]
-weak_on: [1m, 3m, 5m]
+roles:
+- entry_filter
+formula: VOL > AVG(VOL, {window}) * {multiplier}
+description: Above-average delivery volume — institutional accumulation/distribution (NSE/BSE specific).
+works_best_on:
+- 1d
+weak_on:
+- 1m
+- 3m
+- 5m
 unsupported_on: []
-
 contraindicated_when: []
-
-pairs_well_with: [price_above_ema, ema_above]
+pairs_well_with:
+- price_above_ema
+- ema_above
 contradicts: []
-
 params_by_timeframe:
-  1m:   {window: 10, multiplier: 1.3}
-  3m:   {window: 10, multiplier: 1.3}
-  5m:   {window: 10, multiplier: 1.3}
-  10m:  {window: 10, multiplier: 1.3}
-  15m:  {window: 10, multiplier: 1.3}
-  30m:  {window: 10, multiplier: 1.3}
-  1h:   {window: 10, multiplier: 1.3}
-  1d:   {window: 10, multiplier: 1.3}
-
+  1m:
+    window: 10
+    multiplier: 1.3
+  3m:
+    window: 10
+    multiplier: 1.3
+  5m:
+    window: 10
+    multiplier: 1.3
+  10m:
+    window: 10
+    multiplier: 1.3
+  15m:
+    window: 10
+    multiplier: 1.3
+  30m:
+    window: 10
+    multiplier: 1.3
+  1h:
+    window: 10
+    multiplier: 1.3
+  1d:
+    window: 10
+    multiplier: 1.3
 experience_fit:
   beginner: 0.7
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 1.0
   momentum: 0.7
@@ -38,3 +55,9 @@ intent_fit:
   scalping: 0.2
   mean_reversion: 0.4
   confirmation: 1.0
+match_when:
+  phrases:
+  - high\s+delivery\s+volume
+  - strong\s+delivery
+  - delivery\s+percentage\s+(?:high|above)
+  acts_as: entry_filter

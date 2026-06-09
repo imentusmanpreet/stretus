@@ -1,26 +1,36 @@
 {
-  "ema_above:IDEA.NS:1m": {
-    "signal_name": "ema_above",
-    "symbol": "IDEA.NS",
-    "timeframe": "1m",
+  "sma_cross_down:TCS.NS:15m": {
+    "signal_name": "sma_cross_down",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
     "best_params": {
-      "window_fast": 5,
-      "window_slow": 13
+      "window_fast": 30,
+      "window_slow": 200
     },
-    "win_rate": 0.1373,
-    "total_trades": 51,
-    "last_updated": "2026-05-22"
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
   },
-  "price_above_ema:IDEA.NS:1m": {
-    "signal_name": "price_above_ema",
-    "symbol": "IDEA.NS",
-    "timeframe": "1m",
+  "supertrend_bearish:TCS.NS:15m": {
+    "signal_name": "supertrend_bearish",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
+    "best_params": {},
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
+  },
+  "ema_cross_up:TCS.NS:15m": {
+    "signal_name": "ema_cross_up",
+    "symbol": "TCS.NS",
+    "timeframe": "15m",
     "best_params": {
-      "window": 20
+      "window_fast": 30,
+      "window_slow": 64
     },
-    "win_rate": 0.1373,
-    "total_trades": 51,
-    "last_updated": "2026-05-22"
+    "win_rate": 0.1053,
+    "total_trades": 95,
+    "last_updated": "2026-04-30"
   },
   "rsi_above_50:IDEA.NS:1m": {
     "signal_name": "rsi_above_50",
@@ -30,28 +40,1215 @@
       "window": 14,
       "threshold": 50.0
     },
-    "win_rate": 0.1373,
-    "total_trades": 51,
-    "last_updated": "2026-05-22"
+    "win_rate": 0.1576,
+    "total_trades": 5768,
+    "last_updated": "2026-05-20"
   },
   "vwap_bullish:IDEA.NS:1m": {
     "signal_name": "vwap_bullish",
     "symbol": "IDEA.NS",
     "timeframe": "1m",
     "best_params": {},
-    "win_rate": 0.1373,
-    "total_trades": 51,
-    "last_updated": "2026-05-22"
+    "win_rate": 0.1576,
+    "total_trades": 5768,
+    "last_updated": "2026-05-20"
+  },
+  "vwap_bearish:IDEA.NS:1m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1328,
+    "total_trades": 3254,
+    "last_updated": "2026-05-01"
+  },
+  "rsi_above_50:NHPC.NS:30m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "vwap_bullish:NHPC.NS:30m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "vwap_bearish:NHPC.NS:30m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "NHPC.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2353,
+    "total_trades": 561,
+    "last_updated": "2026-04-30"
+  },
+  "ema_above:NHPC.NS:15m": {
+    "signal_name": "ema_above",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "price_above_ema:NHPC.NS:15m": {
+    "signal_name": "price_above_ema",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 29
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "price_below_ema:NHPC.NS:15m": {
+    "signal_name": "price_below_ema",
+    "symbol": "NHPC.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 29
+    },
+    "win_rate": 0.1957,
+    "total_trades": 506,
+    "last_updated": "2026-05-01"
+  },
+  "rsi_above_50:NHPC.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "vwap_bullish:NHPC.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "vwap_bearish:NHPC.NS:1m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "NHPC.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1023,
+    "total_trades": 3596,
+    "last_updated": "2026-05-05"
+  },
+  "rsi_above_50:TCS.NS:5m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  },
+  "vwap_bullish:TCS.NS:5m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  },
+  "vwap_bearish:TCS.NS:5m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "TCS.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.1347,
+    "total_trades": 1633,
+    "last_updated": "2026-05-08"
+  },
+  "vwap_reclaim_bullish:NESTLEIND.NS:1m": {
+    "signal_name": "vwap_reclaim_bullish",
+    "symbol": "NESTLEIND.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1213,
+    "total_trades": 1138,
+    "last_updated": "2026-05-14"
+  },
+  "rsi_above_50:NESTLEIND.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "NESTLEIND.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1213,
+    "total_trades": 1138,
+    "last_updated": "2026-05-14"
+  },
+  "volume_spike:NESTLEIND.NS:1m": {
+    "signal_name": "volume_spike",
+    "symbol": "NESTLEIND.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.1213,
+    "total_trades": 1138,
+    "last_updated": "2026-05-14"
+  },
+  "price_above_ema:NESTLEIND.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "NESTLEIND.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 21
+    },
+    "win_rate": 0.1213,
+    "total_trades": 1138,
+    "last_updated": "2026-05-14"
+  },
+  "rsi_below_50:NESTLEIND.NS:1m": {
+    "signal_name": "rsi_below_50",
+    "symbol": "NESTLEIND.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1213,
+    "total_trades": 1138,
+    "last_updated": "2026-05-14"
+  },
+  "vwap_reclaim_bullish:SBICARD.NS:1m": {
+    "signal_name": "vwap_reclaim_bullish",
+    "symbol": "SBICARD.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1546,
+    "total_trades": 1087,
+    "last_updated": "2026-05-18"
+  },
+  "rsi_above_50:SBICARD.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "SBICARD.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1546,
+    "total_trades": 1087,
+    "last_updated": "2026-05-18"
+  },
+  "volume_spike:SBICARD.NS:1m": {
+    "signal_name": "volume_spike",
+    "symbol": "SBICARD.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.1546,
+    "total_trades": 1087,
+    "last_updated": "2026-05-18"
+  },
+  "price_above_ema:SBICARD.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "SBICARD.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.1546,
+    "total_trades": 1087,
+    "last_updated": "2026-05-18"
+  },
+  "rsi_below_50:SBICARD.NS:1m": {
+    "signal_name": "rsi_below_50",
+    "symbol": "SBICARD.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1546,
+    "total_trades": 1087,
+    "last_updated": "2026-05-18"
+  },
+  "vwap_reclaim_bullish:HDFCBANK.NS:30m": {
+    "signal_name": "vwap_reclaim_bullish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2963,
+    "total_trades": 27,
+    "last_updated": "2026-05-19"
+  },
+  "rsi_above_50:HDFCBANK.NS:30m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.2963,
+    "total_trades": 27,
+    "last_updated": "2026-05-19"
+  },
+  "volume_spike:HDFCBANK.NS:30m": {
+    "signal_name": "volume_spike",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.307,
+    "total_trades": 215,
+    "last_updated": "2026-05-19"
+  },
+  "bullish_fvg_signal:HDFCBANK.NS:30m": {
+    "signal_name": "bullish_fvg_signal",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.2963,
+    "total_trades": 27,
+    "last_updated": "2026-05-19"
+  },
+  "rsi_below_50:HDFCBANK.NS:30m": {
+    "signal_name": "rsi_below_50",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.2963,
+    "total_trades": 27,
+    "last_updated": "2026-05-19"
+  },
+  "rsi_cross_down:HDFCBANK.NS:30m": {
+    "signal_name": "rsi_cross_down",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window": 21,
+      "threshold": 50.0
+    },
+    "win_rate": 0.307,
+    "total_trades": 215,
+    "last_updated": "2026-05-19"
+  },
+  "vwap_bearish:HDFCBANK.NS:30m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.307,
+    "total_trades": 215,
+    "last_updated": "2026-05-19"
+  },
+  "ema_below:HDFCBANK.NS:30m": {
+    "signal_name": "ema_below",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.307,
+    "total_trades": 215,
+    "last_updated": "2026-05-19"
+  },
+  "vwap_bullish:HDFCBANK.NS:30m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "30m",
+    "best_params": {},
+    "win_rate": 0.307,
+    "total_trades": 215,
+    "last_updated": "2026-05-19"
+  },
+  "rsi_cross_up:ADANIENT.NS:5m": {
+    "signal_name": "rsi_cross_up",
+    "symbol": "ADANIENT.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 16,
+      "threshold": 50.0
+    },
+    "win_rate": 0.2279,
+    "total_trades": 816,
+    "last_updated": "2026-05-19"
+  },
+  "volume_spike:ADANIENT.NS:5m": {
+    "signal_name": "volume_spike",
+    "symbol": "ADANIENT.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.5
+    },
+    "win_rate": 0.2279,
+    "total_trades": 816,
+    "last_updated": "2026-05-19"
+  },
+  "vwap_bullish:ADANIENT.NS:5m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "ADANIENT.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.2279,
+    "total_trades": 816,
+    "last_updated": "2026-05-19"
+  },
+  "ema_above:ADANIENT.NS:5m": {
+    "signal_name": "ema_above",
+    "symbol": "ADANIENT.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.2279,
+    "total_trades": 816,
+    "last_updated": "2026-05-19"
+  },
+  "vwap_bearish:ADANIENT.NS:5m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "ADANIENT.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.2279,
+    "total_trades": 816,
+    "last_updated": "2026-05-19"
+  },
+  "supertrend_bullish:HDFCBANK.NS:15m": {
+    "signal_name": "supertrend_bullish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 10,
+      "multiplier": 3.0
+    },
+    "win_rate": 0.3604,
+    "total_trades": 480,
+    "last_updated": "2026-05-19"
+  },
+  "price_above_ema:HDFCBANK.NS:15m": {
+    "signal_name": "price_above_ema",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 18
+    },
+    "win_rate": 0.3604,
+    "total_trades": 480,
+    "last_updated": "2026-05-19"
+  },
+  "adx_strong_trend:HDFCBANK.NS:15m": {
+    "signal_name": "adx_strong_trend",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 14,
+      "threshold": 25.0
+    },
+    "win_rate": 0.3604,
+    "total_trades": 480,
+    "last_updated": "2026-05-19"
+  },
+  "supertrend_bearish:HDFCBANK.NS:15m": {
+    "signal_name": "supertrend_bearish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 10,
+      "multiplier": 3.0
+    },
+    "win_rate": 0.3604,
+    "total_trades": 480,
+    "last_updated": "2026-05-19"
+  },
+  "vwap_reclaim_bullish:GMRAIRPORT.NS:1m": {
+    "signal_name": "vwap_reclaim_bullish",
+    "symbol": "GMRAIRPORT.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1895,
+    "total_trades": 1140,
+    "last_updated": "2026-05-20"
+  },
+  "volume_spike:GMRAIRPORT.NS:1m": {
+    "signal_name": "volume_spike",
+    "symbol": "GMRAIRPORT.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.1895,
+    "total_trades": 1140,
+    "last_updated": "2026-05-20"
+  },
+  "price_above_ema:GMRAIRPORT.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "GMRAIRPORT.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 22
+    },
+    "win_rate": 0.1895,
+    "total_trades": 1140,
+    "last_updated": "2026-05-20"
+  },
+  "rsi_above_50:GMRAIRPORT.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "GMRAIRPORT.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1895,
+    "total_trades": 1140,
+    "last_updated": "2026-05-20"
+  },
+  "price_below_ema:GMRAIRPORT.NS:1m": {
+    "signal_name": "price_below_ema",
+    "symbol": "GMRAIRPORT.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 22
+    },
+    "win_rate": 0.1895,
+    "total_trades": 1140,
+    "last_updated": "2026-05-20"
+  },
+  "opening_range_breakout:ICICIPRULI.NS:1m": {
+    "signal_name": "opening_range_breakout",
+    "symbol": "ICICIPRULI.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "opening_bars": 15
+    },
+    "win_rate": 0.383,
+    "total_trades": 282,
+    "last_updated": "2026-05-20"
+  },
+  "volume_spike:ICICIPRULI.NS:1m": {
+    "signal_name": "volume_spike",
+    "symbol": "ICICIPRULI.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.383,
+    "total_trades": 282,
+    "last_updated": "2026-05-20"
+  },
+  "rsi_above_50:ICICIPRULI.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "ICICIPRULI.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.383,
+    "total_trades": 282,
+    "last_updated": "2026-05-20"
+  },
+  "vwap_bullish:ICICIPRULI.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "ICICIPRULI.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.383,
+    "total_trades": 282,
+    "last_updated": "2026-05-20"
+  },
+  "gap_down_open:ICICIPRULI.NS:1m": {
+    "signal_name": "gap_down_open",
+    "symbol": "ICICIPRULI.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "gap_pct": 0.15
+    },
+    "win_rate": 0.383,
+    "total_trades": 282,
+    "last_updated": "2026-05-20"
+  },
+  "ema_cross_up:TCS.NS:1d": {
+    "signal_name": "ema_cross_up",
+    "symbol": "TCS.NS",
+    "timeframe": "1d",
+    "best_params": {
+      "window_fast": 10,
+      "window_slow": 22
+    },
+    "win_rate": 0.2667,
+    "total_trades": 15,
+    "last_updated": "2026-05-20"
+  },
+  "price_above_ema:TCS.NS:1d": {
+    "signal_name": "price_above_ema",
+    "symbol": "TCS.NS",
+    "timeframe": "1d",
+    "best_params": {
+      "window": 41
+    },
+    "win_rate": 0.2667,
+    "total_trades": 15,
+    "last_updated": "2026-05-20"
+  },
+  "high_delivery_volume:TCS.NS:1d": {
+    "signal_name": "high_delivery_volume",
+    "symbol": "TCS.NS",
+    "timeframe": "1d",
+    "best_params": {
+      "window": 10,
+      "multiplier": 1.3
+    },
+    "win_rate": 0.2667,
+    "total_trades": 15,
+    "last_updated": "2026-05-20"
+  },
+  "adx_strong_trend:TCS.NS:1d": {
+    "signal_name": "adx_strong_trend",
+    "symbol": "TCS.NS",
+    "timeframe": "1d",
+    "best_params": {
+      "window": 14,
+      "threshold": 25.0
+    },
+    "win_rate": 0.2667,
+    "total_trades": 15,
+    "last_updated": "2026-05-20"
+  },
+  "price_below_ema:TCS.NS:1d": {
+    "signal_name": "price_below_ema",
+    "symbol": "TCS.NS",
+    "timeframe": "1d",
+    "best_params": {
+      "window": 41
+    },
+    "win_rate": 0.2667,
+    "total_trades": 15,
+    "last_updated": "2026-05-20"
+  },
+  "ema_above:IDEA.NS:1m": {
+    "signal_name": "ema_above",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window_fast": 5,
+      "window_slow": 13
+    },
+    "win_rate": 0.1576,
+    "total_trades": 5768,
+    "last_updated": "2026-05-20"
+  },
+  "price_above_ema:IDEA.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "IDEA.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 19
+    },
+    "win_rate": 0.1576,
+    "total_trades": 5768,
+    "last_updated": "2026-05-20"
   },
   "price_below_ema:IDEA.NS:1m": {
     "signal_name": "price_below_ema",
     "symbol": "IDEA.NS",
     "timeframe": "1m",
     "best_params": {
-      "window": 20
+      "window": 19
     },
-    "win_rate": 0.1373,
-    "total_trades": 51,
+    "win_rate": 0.1576,
+    "total_trades": 5768,
+    "last_updated": "2026-05-20"
+  },
+  "ema_above:IDFCFIRSTB.NS:1m": {
+    "signal_name": "ema_above",
+    "symbol": "IDFCFIRSTB.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window_fast": 5,
+      "window_slow": 13
+    },
+    "win_rate": 0.1155,
+    "total_trades": 5948,
     "last_updated": "2026-05-22"
+  },
+  "price_above_ema:IDFCFIRSTB.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "IDFCFIRSTB.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 24
+    },
+    "win_rate": 0.1155,
+    "total_trades": 5948,
+    "last_updated": "2026-05-22"
+  },
+  "rsi_above_50:IDFCFIRSTB.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "IDFCFIRSTB.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.1155,
+    "total_trades": 5948,
+    "last_updated": "2026-05-22"
+  },
+  "vwap_bullish:IDFCFIRSTB.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "IDFCFIRSTB.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.1155,
+    "total_trades": 5948,
+    "last_updated": "2026-05-22"
+  },
+  "price_below_ema:IDFCFIRSTB.NS:1m": {
+    "signal_name": "price_below_ema",
+    "symbol": "IDFCFIRSTB.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 24
+    },
+    "win_rate": 0.1155,
+    "total_trades": 5948,
+    "last_updated": "2026-05-22"
+  },
+  "rsi_above_50:TCS.NS:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-22"
+  },
+  "vwap_bullish:TCS.NS:1m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-22"
+  },
+  "volume_spike:TCS.NS:1m": {
+    "signal_name": "volume_spike",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.3
+    },
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-22"
+  },
+  "price_above_ema:TCS.NS:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.0366,
+    "total_trades": 10945,
+    "last_updated": "2026-06-02"
+  },
+  "vwap_bearish:TCS.NS:1m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-22"
+  },
+  "rsi_above_50:INFY.NS:5m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "INFY.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.0,
+    "total_trades": 2,
+    "last_updated": "2026-05-22"
+  },
+  "vwap_bullish:INFY.NS:5m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "INFY.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.0,
+    "total_trades": 2,
+    "last_updated": "2026-05-22"
+  },
+  "volume_spike:INFY.NS:5m": {
+    "signal_name": "volume_spike",
+    "symbol": "INFY.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.5
+    },
+    "win_rate": 0.0,
+    "total_trades": 2,
+    "last_updated": "2026-05-22"
+  },
+  "price_above_ema:INFY.NS:5m": {
+    "signal_name": "price_above_ema",
+    "symbol": "INFY.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 22
+    },
+    "win_rate": 0.0,
+    "total_trades": 2,
+    "last_updated": "2026-05-22"
+  },
+  "vwap_bearish:INFY.NS:5m": {
+    "signal_name": "vwap_bearish",
+    "symbol": "INFY.NS",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.0,
+    "total_trades": 2,
+    "last_updated": "2026-05-22"
+  },
+  "ema_above:WIPRO.NS:5m": {
+    "signal_name": "ema_above",
+    "symbol": "WIPRO.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-25"
+  },
+  "price_above_ema:WIPRO.NS:5m": {
+    "signal_name": "price_above_ema",
+    "symbol": "WIPRO.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-25"
+  },
+  "price_below_ema:WIPRO.NS:5m": {
+    "signal_name": "price_below_ema",
+    "symbol": "WIPRO.NS",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.3333,
+    "total_trades": 3,
+    "last_updated": "2026-05-25"
+  },
+  "opening_range_breakout:BTC_USDT:1m": {
+    "signal_name": "opening_range_breakout",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "opening_bars": 15
+    },
+    "win_rate": 0.4286,
+    "total_trades": 98,
+    "last_updated": "2026-06-03"
+  },
+  "ema_above:ETH_USDT:1h": {
+    "signal_name": "ema_above",
+    "symbol": "ETH_USDT",
+    "timeframe": "1h",
+    "best_params": {
+      "window_fast": 12,
+      "window_slow": 26
+    },
+    "win_rate": 0.3479,
+    "total_trades": 1581,
+    "last_updated": "2026-05-27"
+  },
+  "price_below_ema:ETH_USDT:1h": {
+    "signal_name": "price_below_ema",
+    "symbol": "ETH_USDT",
+    "timeframe": "1h",
+    "best_params": {
+      "window": 25
+    },
+    "win_rate": 0.3479,
+    "total_trades": 1581,
+    "last_updated": "2026-05-27"
+  },
+  "ema_above:ETH_USDT:1m": {
+    "signal_name": "ema_above",
+    "symbol": "ETH_USDT",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.8237,
+    "total_trades": 312,
+    "last_updated": "2026-06-04"
+  },
+  "price_below_ema:ETH_USDT:1m": {
+    "signal_name": "price_below_ema",
+    "symbol": "ETH_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.1084,
+    "total_trades": 17042,
+    "last_updated": "2026-05-27"
+  },
+  "ema_above:ETH_USDC:1m": {
+    "signal_name": "ema_above",
+    "symbol": "ETH_USDC",
+    "timeframe": "1m",
+    "best_params": {
+      "window_fast": 5,
+      "window_slow": 13
+    },
+    "win_rate": 0.1063,
+    "total_trades": 16979,
+    "last_updated": "2026-05-28"
+  },
+  "price_below_ema:ETH_USDC:1m": {
+    "signal_name": "price_below_ema",
+    "symbol": "ETH_USDC",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 23
+    },
+    "win_rate": 0.1063,
+    "total_trades": 16979,
+    "last_updated": "2026-05-28"
+  },
+  "rsi_above_50:ETH_USDT:5m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.455,
+    "total_trades": 14687,
+    "last_updated": "2026-05-28"
+  },
+  "zscore_oversold:ETH_USDT:5m": {
+    "signal_name": "zscore_oversold",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20,
+      "threshold": -2.0
+    },
+    "win_rate": 0.8674,
+    "total_trades": 3070,
+    "last_updated": "2026-05-28"
+  },
+  "rsi_above_50:ETH_USDC:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "ETH_USDC",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 14,
+      "threshold": 50.0
+    },
+    "win_rate": 0.358,
+    "total_trades": 15934,
+    "last_updated": "2026-05-30"
+  },
+  "bullish_engulfing:ETH_USDC:5m": {
+    "signal_name": "bullish_engulfing",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.4129,
+    "total_trades": 2647,
+    "last_updated": "2026-05-30"
+  },
+  "vwap_bullish:ETH_USDC:5m": {
+    "signal_name": "vwap_bullish",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.4129,
+    "total_trades": 2647,
+    "last_updated": "2026-05-30"
+  },
+  "volume_spike:ETH_USDC:5m": {
+    "signal_name": "volume_spike",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.4129,
+    "total_trades": 2647,
+    "last_updated": "2026-05-30"
+  },
+  "hammer_candle:ETH_USDC:5m": {
+    "signal_name": "hammer_candle",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {},
+    "win_rate": 0.4129,
+    "total_trades": 2647,
+    "last_updated": "2026-05-30"
+  },
+  "price_above_ema:ETH_USDC:5m": {
+    "signal_name": "price_above_ema",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "period": 20,
+      "window": 25
+    },
+    "win_rate": 0.4129,
+    "total_trades": 2647,
+    "last_updated": "2026-05-30"
+  },
+  "price_above_bb_upper:ETH_USDC:15m": {
+    "signal_name": "price_above_bb_upper",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {
+      "window_dev": 2.0
+    },
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "price_above_ema:ETH_USDC:15m": {
+    "signal_name": "price_above_ema",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {
+      "period": 20,
+      "window": 200
+    },
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "volume_spike:ETH_USDC:15m": {
+    "signal_name": "volume_spike",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 20,
+      "multiplier": 1.4
+    },
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "atr_high_volatility:ETH_USDC:15m": {
+    "signal_name": "atr_high_volatility",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {},
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "price_below_bb_lower:ETH_USDC:15m": {
+    "signal_name": "price_below_bb_lower",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {
+      "window_dev": 2.0
+    },
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "price_below_ema:ETH_USDC:15m": {
+    "signal_name": "price_below_ema",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 200
+    },
+    "win_rate": 0.328,
+    "total_trades": 1811,
+    "last_updated": "2026-05-30"
+  },
+  "ema_pullback_bullish:HDFCBANK.NS:15m": {
+    "signal_name": "ema_pullback_bullish",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 20,
+      "lookback": 3
+    },
+    "win_rate": 0.1995,
+    "total_trades": 787,
+    "last_updated": "2026-05-30"
+  },
+  "price_below_ema:HDFCBANK.NS:15m": {
+    "signal_name": "price_below_ema",
+    "symbol": "HDFCBANK.NS",
+    "timeframe": "15m",
+    "best_params": {
+      "window": 17
+    },
+    "win_rate": 0.1995,
+    "total_trades": 787,
+    "last_updated": "2026-05-30"
+  },
+  "bullish_engulfing:ETH_USDC:15m": {
+    "signal_name": "bullish_engulfing",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {},
+    "win_rate": 0.1869,
+    "total_trades": 5237,
+    "last_updated": "2026-05-30"
+  },
+  "bearish_engulfing:ETH_USDC:15m": {
+    "signal_name": "bearish_engulfing",
+    "symbol": "ETH_USDC",
+    "timeframe": "15m",
+    "best_params": {},
+    "win_rate": 0.1869,
+    "total_trades": 5237,
+    "last_updated": "2026-05-30"
+  },
+  "ema_above:BTC_USDT:1m": {
+    "signal_name": "ema_above",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "window_fast": 5,
+      "window_slow": 13
+    },
+    "win_rate": 0.0829,
+    "total_trades": 16712,
+    "last_updated": "2026-06-01"
+  },
+  "price_above_ema:BTC_USDT:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "period": 5,
+      "window": 24
+    },
+    "win_rate": 0.0829,
+    "total_trades": 16712,
+    "last_updated": "2026-06-01"
+  },
+  "price_below_ema:BTC_USDT:1m": {
+    "signal_name": "price_below_ema",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 24
+    },
+    "win_rate": 0.0829,
+    "total_trades": 16712,
+    "last_updated": "2026-06-01"
+  },
+  "rsi_oversold:BTC_USDT:1m": {
+    "signal_name": "rsi_oversold",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 13,
+      "threshold": 37.5
+    },
+    "win_rate": 0.4128,
+    "total_trades": 3576,
+    "last_updated": "2026-06-01"
+  },
+  "vwap_reclaim_bullish:BTC_USDT:1m": {
+    "signal_name": "vwap_reclaim_bullish",
+    "symbol": "BTC_USDT",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.0731,
+    "total_trades": 12229,
+    "last_updated": "2026-06-01"
+  },
+  "rsi_above_50:ETH_USDT:1m": {
+    "signal_name": "rsi_above_50",
+    "symbol": "ETH_USDT",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.8237,
+    "total_trades": 312,
+    "last_updated": "2026-06-04"
+  },
+  "price_above_ema:ETH_USDT:1m": {
+    "signal_name": "price_above_ema",
+    "symbol": "ETH_USDT",
+    "timeframe": "1m",
+    "best_params": {
+      "window": 5
+    },
+    "win_rate": 0.0991,
+    "total_trades": 16924,
+    "last_updated": "2026-06-01"
+  },
+  "ema_below:TCS.NS:1m": {
+    "signal_name": "ema_below",
+    "symbol": "TCS.NS",
+    "timeframe": "1m",
+    "best_params": {
+      "window_fast": 5,
+      "window_slow": 13
+    },
+    "win_rate": 0.0366,
+    "total_trades": 10945,
+    "last_updated": "2026-06-02"
   }
 }

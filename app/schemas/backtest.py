@@ -26,6 +26,15 @@ class BacktestTriggerRequest(BaseModel):
     # Indian market: Securities Transaction Tax
     stt_intraday_sell_pct: float = 0.025
     stt_delivery_pct: float = 0.1
+    # 1-minute execution (Phase 11). Tri-state:
+    #   None  → AUTO: on for any strategy timeframe coarser than 1m (default).
+    #   True  → force on.
+    #   False → force off (e.g. a quick/cheap run).
+    # When on, the main (and reference) OHLCV is fetched at 1-minute resolution
+    # and the quant engine resamples it up to the strategy timeframe for signals
+    # while resolving fills / stop-loss / take-profit on the underlying minute
+    # bars for accuracy. A 1m strategy resolves to off (1m IS its execution TF).
+    intrabar_execution: Optional[bool] = None
 
     @field_validator("starting_balance")
     @classmethod
@@ -56,6 +65,54 @@ class BacktestTriggerResponse(BaseModel):
     message: str
 
 
+# ── Trade entry / exit rationale ──────────────────────────────────────────────
+
+class TradeEntryReason(BaseModel):
+    """Structured explanation of *why* a trade opened.
+
+    Captured by the simulator at fill time: the bar whose data matched the entry
+    signal, the indicator values that made it match, the fill price + cost
+    breakdown, and the gates the bar cleared. `summary` is a one-line narrative
+    of all of the above; the remaining fields expose the same detail in a
+    machine-readable form. extra="allow" so the engine can add detail without a
+    breaking schema change.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    summary: str
+    evaluation_mode: str = "formula"               # formula | registry
+    condition: str = ""                            # the entry formula that fired
+    signal_bar: Optional[dict[str, Any]] = None    # OHLCV + index/timestamp of matched bar
+    entry_bar: Optional[dict[str, Any]] = None     # index/timestamp of the fill bar
+    indicators: dict[str, Optional[float]] = Field(default_factory=dict)  # matched values at signal bar
+    confirmation_bars_required: int = 1
+    confirmation_bars_observed: int = 1
+    fill: dict[str, Any] = Field(default_factory=dict)   # raw/effective price + cost breakdown
+    initial_stop_price: Optional[float] = None
+    gates_passed: list[str] = Field(default_factory=list)
+
+
+class TradeExitReason(BaseModel):
+    """Structured explanation of *why* a trade closed.
+
+    `code` mirrors the short `exit_reason` enum (STOP_LOSS / TAKE_PROFIT / …);
+    `trigger` holds the price/condition that fired the exit; `fill` holds the
+    raw/effective price and cost breakdown. `summary` narrates the complete
+    reason in one line.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    summary: str
+    code: str                                      # matches BacktestTrade.exit_reason
+    trigger: dict[str, Any] = Field(default_factory=dict)
+    exit_bar: Optional[dict[str, Any]] = None
+    fill: dict[str, Any] = Field(default_factory=dict)
+    holding_candles: int = 0
+    pnl_pct: float = 0.0
+    pnl_inr: float = 0.0
+    indicators: dict[str, Optional[float]] = Field(default_factory=dict)
+
+
 # ── Individual trade ──────────────────────────────────────────────────────────
 
 class BacktestTrade(BaseModel):
@@ -71,12 +128,15 @@ class BacktestTrade(BaseModel):
     pnl_pct: float
     pnl_abs: float          # fractional return (used for compounding)
     pnl_inr: float = 0.0   # absolute rupee P&L per unit
-    exit_reason: str
+    exit_reason: str        # short machine code, e.g. STOP_LOSS / TAKE_PROFIT
     holding_candles: int
     holding_duration_days: float = 0.0
     entry_market_condition: str = "Unknown"       # Bull / Bear / Sideways
     max_adverse_excursion_pct: float = 0.0        # worst unrealised loss during trade
     max_favorable_excursion_pct: float = 0.0      # best unrealised gain during trade
+    # Full "why" behind the trade — see TradeEntryReason / TradeExitReason.
+    entry_reason: Optional[TradeEntryReason] = None
+    exit_reason_detail: Optional[TradeExitReason] = None
 
 
 # ── Core performance metrics ──────────────────────────────────────────────────

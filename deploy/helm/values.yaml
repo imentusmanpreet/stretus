@@ -8,32 +8,44 @@ api:
   image:
     repository: stretus/python-ai-api
     pullPolicy: IfNotPresent
-    tag: "99601a1-20260522-113933"
+    tag: "cba4ec7-20260608-054739"
   resources:
     requests:
-      cpu: 200m
-      memory: 512Mi
+      cpu: 500m
+      memory: 1Gi
     limits:
-      cpu: 1000m
-      memory: 2Gi
-  # FastAPI exposes /docs by default; use it as a cheap health gate.
-  # The app runs Alembic migrations before starting Uvicorn, so
-  # initialDelaySeconds must be generous for cold starts.
+      # Long backtests load ~1.3M OHLCV rows into Python lists + DataFrames
+      # and then post them to the quant engine. With the old 1 vCPU / 2 GiB
+      # limit the pod hit CFS throttling during the sync post-fetch sections
+      # (`_dedup_and_sort_records`, JSON serialization) which made the
+      # liveness probe time out and K8s killed the pod mid-backtest. 2 vCPU /
+      # 4 GiB gives the loop enough headroom that probes always respond.
+      cpu: 2000m
+      memory: 4Gi
+  # Probe against the lightweight async /health route (a 3-key dict return),
+  # NOT /docs. /docs renders the OpenAPI schema and was unreliable under load:
+  # it competed for the event loop with the in-flight backtest and timed out,
+  # triggering pod restarts that killed the in-flight backtest.
+  #
+  # failureThreshold is intentionally large on liveness so a transient sync
+  # CPU section in the backtest doesn't trip a restart — readiness still
+  # responds fast enough to pull the pod from the service if it's genuinely
+  # stuck.
   livenessProbe:
     httpGet:
-      path: /docs
+      path: /health
       port: 8000
     initialDelaySeconds: 90
     periodSeconds: 30
-    timeoutSeconds: 30
-    failureThreshold: 3
+    timeoutSeconds: 10
+    failureThreshold: 10
   readinessProbe:
     httpGet:
-      path: /docs
+      path: /health
       port: 8000
     initialDelaySeconds: 60
     periodSeconds: 10
-    timeoutSeconds: 30
+    timeoutSeconds: 10
     failureThreshold: 6
 
 # ── Quant Engine (FastAPI) ─────────────────────────────────────────────────
@@ -41,7 +53,7 @@ quant:
   image:
     repository: stretus/python-ai-quant
     pullPolicy: IfNotPresent
-    tag: "99601a1-20260522-113933"
+    tag: "cba4ec7-20260608-054739"
   resources:
     requests:
       cpu: 500m

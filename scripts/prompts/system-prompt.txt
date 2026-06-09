@@ -1,0 +1,148 @@
+STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  "strategy_name": "ORB Momentum Breakout",
+  "asset_class": "equity_cash",
+  "symbol": "HDFCBANK.NS",
+  "timeframe": "5m",
+  "direction": "long",
+  "objective": "intraday momentum breakout",
+
+  "entry": {
+    "trigger": {
+      "type": "opening_range_breakout",
+      "range_minutes": 15,
+      "condition": "price_break_above_high"
+    },
+    "filters": [
+      {
+        "type": "volume_confirmation",
+        "value": "volume > sma(volume, 20) * 1.5"
+      }
+    ]
+  },
+
+  "exit": {
+    "stop_loss": {
+      "type": "range_low"
+    },
+    "take_profit": {
+      "type": "risk_reward",
+      "ratio": 2
+    }
+  },
+
+  "risk": {
+    "position_sizing": {
+      "type": "risk_based",
+      "risk_pct": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.

@@ -257,7 +257,7 @@ def _history_message_payload(message) -> dict:
         "error": error_payload if message.role.value == "assistant" else None,
         "strategy_draft": (
             _public_strategy_draft(message.strategy_draft)
-            if message.role.value == "assistant" and state != "backtest_complete"
+            if message.role.value == "assistant"
             else None
         ),
         "created_at": message.created_at.isoformat() if message.role.value == "assistant" else None,
@@ -348,7 +348,14 @@ async def create_chat(
     body: ChatCreateRequest = ChatCreateRequest(),
     db: AsyncSession = Depends(get_db),
 ):
-    chat = await create_chat_session(db, title=body.title)
+    capabilities_payload = (
+        body.capabilities.model_dump() if body.capabilities is not None else None
+    )
+    chat = await create_chat_session(
+        db,
+        title=body.title,
+        capabilities=capabilities_payload,
+    )
     status_value = await get_chat_status(db, str(chat.id))
     return ChatCreateResponse(
         session_id=str(chat.id),

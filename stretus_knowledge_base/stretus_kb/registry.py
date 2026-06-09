@@ -55,8 +55,9 @@ class RuleRegistry:
             params["window_fast"] = params.pop("short_period")
         if "long_period" in params and "window_slow" not in params:
             params["window_slow"] = params.pop("long_period")
-        if "period" in params and "window" not in params:
-            params["window"] = params.pop("period")
+        if "period" in params:
+            params.setdefault("window", params["period"])
+            del params["period"]
         return cls._registry[rule_name](df, **params)
 
     @classmethod

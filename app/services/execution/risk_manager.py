@@ -11,14 +11,20 @@ Inputs  (RiskInputs dataclass):
   exec_state            — ExecutionState ORM row  (capital, max_risk_per_trade_pct,
                           min_trade_value, cash_reserve_pct)
   instrument            — InstrumentDefaults dataclass (tick_size, lot_size,
-                          upper_circuit, lower_circuit) built from ref_data
+                          upper_circuit, lower_circuit, qty_step_size,
+                          min_notional) built from ref_data
   circuit_threshold_pct — fraction of circuit limit at which we refuse to trade
                           (default: settings.market_data_circuit_threshold_pct)
+  asset_class           — equity_cash or crypto_spot. Drives:
+                            • position-size rounding (integer lot for equity
+                              vs fractional qty_step for crypto)
+                            • min-trade value vs Binance min_notional
 
 Outputs (RiskOutput dataclass):
   stop_loss_price   — rounded to tick_size
   take_profit_price — rounded to tick_size
-  position_size     — quantity (rounded to lot_size multiple)
+  position_size     — Decimal quantity (lot-rounded for equity, qty_step-rounded
+                      for crypto). Equity values are integer-valued Decimals.
   principal_amount  — entry_price * position_size
   ok                — False when any hard check fails (min_trade, circuit, etc.)
   messages          — log-friendly decision trail
@@ -30,21 +36,23 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from decimal import ROUND_DOWN, Decimal
 from typing import List, Optional
 
 from app.core.config import get_settings
+from app.schemas.execution import AssetClass
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Safe defaults used when ORM rows are None (fallback only — DB rows preferred)
-_DEFAULT_STOP_LOSS_PCT       = 2.0
-_DEFAULT_TAKE_PROFIT_PCT     = 5.0
+_DEFAULT_STOP_LOSS_PCT       = 0.25
+_DEFAULT_TAKE_PROFIT_PCT     = 0.5
 _DEFAULT_TICK_SIZE           = 0.05
 _DEFAULT_LOT_SIZE            = 1
 _DEFAULT_CAPITAL             = 100_000.0
 _DEFAULT_MAX_RISK_PCT        = 2.0
-_DEFAULT_MIN_TRADE_VALUE     = 500.0
+_DEFAULT_MIN_TRADE_VALUE     =10.0
 # Max single-position size as % of capital.
 # Prevents tight-SL + risk% combos from generating over-sized positions
 # that exceed available margin (e.g. SL=1.5% + risk=2% on ₹1353 stock → 492 shares).
@@ -63,13 +71,17 @@ class RiskInput:
     circuit_threshold_pct: float = field(
         default_factory=lambda: settings.market_data_circuit_threshold_pct
     )
+    asset_class: AssetClass = AssetClass.equity_cash
 
 
 @dataclass
 class RiskOutput:
     stop_loss_price: float
     take_profit_price: float
-    position_size: int
+    # ``Decimal`` so equity (int-valued) and crypto (fractional) sizing share
+    # one return shape. The TradeManager normalises before constructing
+    # OrderLeg, and the RiskSnapshot exposes the same Decimal in the API.
+    position_size: Decimal
     principal_amount: float
     ok: bool
     messages: List[str] = field(default_factory=list)
@@ -84,46 +96,60 @@ class RiskManager:
         """
         Run all risk calculations and normalisations.
 
-        Returns a RiskOutput.  When ok=False, the evaluator must NOT
+        Returns a RiskOutput. When ok=False, the evaluator must NOT
         generate a bracket order.
         """
         messages: List[str] = []
         entry = inp.entry_price
+        asset_class = inp.asset_class
+        is_crypto = asset_class == AssetClass.crypto_spot
+        currency_sym = "$" if is_crypto else "₹"
 
         # ── 1. Extract parameters (prefer DB rows; fall back to defaults) ──────
         stop_loss_pct, take_profit_pct = self._extract_sl_tp(inp.risk_config, messages)
         capital, max_risk_pct, min_trade_value = self._extract_exec_params(
-            inp.exec_state, messages
+            inp.exec_state, messages, currency_sym,
         )
-        tick_size, lot_size, upper_circuit, lower_circuit = self._extract_instrument(
-            inp.instrument, messages
+        tick_size, lot_size, upper_circuit, lower_circuit, qty_step, min_notional = (
+            self._extract_instrument(inp.instrument, messages, currency_sym)
         )
 
-        # ── 2. Circuit limit guard ─────────────────────────────────────────────
-        if upper_circuit is not None:
+        # For crypto we honour the Binance min_notional (denominated in the
+        # quote asset, e.g. USDT) on top of the user's min_trade_value.
+        effective_min_trade = max(min_trade_value, min_notional or 0.0)
+
+        # ── 2. Circuit / price-band guard ──────────────────────────────────────
+        # Binance 24h bands are not exchange circuit limits — skip for crypto.
+        if upper_circuit is not None and not is_crypto:
             threshold = upper_circuit * inp.circuit_threshold_pct
             if entry >= threshold:
                 msg = (
-                    f"  🔴 Near upper circuit | entry=₹{entry:.2f} ≥ threshold=₹{threshold:.2f}"
-                    f"  (upper_circuit=₹{upper_circuit:.2f}, guard={inp.circuit_threshold_pct*100:.0f}%)"
-                    f" — trade blocked."
+                    f"  🔴 Near upper bound | entry={currency_sym}{entry:.4f} ≥ "
+                    f"threshold={currency_sym}{threshold:.4f}"
+                    f"  (upper={currency_sym}{upper_circuit:.4f}, "
+                    f"guard={inp.circuit_threshold_pct*100:.0f}%) — trade blocked."
                 )
                 messages.append(msg)
                 logger.warning(msg)
-                return self._blocked(entry, stop_loss_pct, take_profit_pct, tick_size, messages)
+                return self._blocked(
+                    entry, stop_loss_pct, take_profit_pct, tick_size, messages,
+                )
 
-        if lower_circuit is not None and entry <= lower_circuit:
+        if lower_circuit is not None and not is_crypto and entry <= lower_circuit:
             msg = (
-                f"  🔴 At/below lower circuit | entry=₹{entry:.2f} ≤ lower=₹{lower_circuit:.2f}"
-                f" — trade blocked."
+                f"  🔴 At/below lower bound | entry={currency_sym}{entry:.4f} ≤ "
+                f"lower={currency_sym}{lower_circuit:.4f} — trade blocked."
             )
             messages.append(msg)
             logger.warning(msg)
-            return self._blocked(entry, stop_loss_pct, take_profit_pct, tick_size, messages)
+            return self._blocked(
+                entry, stop_loss_pct, take_profit_pct, tick_size, messages,
+            )
 
         messages.append(
-            f"  ✅ Circuit check passed | entry=₹{entry:.2f}"
-            f"  upper=₹{upper_circuit:.2f}  lower=₹{lower_circuit:.2f}"
+            f"  ✅ Price-band check passed | entry={currency_sym}{entry:.4f}"
+            f"  upper={currency_sym}{(upper_circuit or 0):.4f}"
+            f"  lower={currency_sym}{(lower_circuit or 0):.4f}"
         )
 
         # ── 3. SL / TP price calculation ──────────────────────────────────────
@@ -134,77 +160,84 @@ class RiskManager:
         tp_price = self._round_tick(raw_tp, tick_size)
 
         messages.append(
-            f"  📉 SL | ₹{entry:.2f} × (1 - {stop_loss_pct}%) = ₹{raw_sl:.4f}"
-            f" → tick-rounded ₹{sl_price:.4f}"
+            f"  📉 SL | {currency_sym}{entry:.4f} × (1 - {stop_loss_pct}%) = "
+            f"{currency_sym}{raw_sl:.6f} → tick-rounded {currency_sym}{sl_price:.6f}"
         )
         messages.append(
-            f"  📈 TP | ₹{entry:.2f} × (1 + {take_profit_pct}%) = ₹{raw_tp:.4f}"
-            f" → tick-rounded ₹{tp_price:.4f}"
+            f"  📈 TP | {currency_sym}{entry:.4f} × (1 + {take_profit_pct}%) = "
+            f"{currency_sym}{raw_tp:.6f} → tick-rounded {currency_sym}{tp_price:.6f}"
         )
 
         # ── 4. Position size ──────────────────────────────────────────────────
-        # Step A: risk-based sizing (how many shares to lose exactly risk_amount if SL hit)
-        risk_amount    = capital * max_risk_pct / 100
-        risk_per_share = entry - sl_price
+        risk_amount   = capital * max_risk_pct / 100
+        risk_per_unit = entry - sl_price
 
-        if risk_per_share <= 0:
-            msg = f"  ❌ risk_per_share ₹{risk_per_share:.4f} ≤ 0 — cannot size position."
+        if risk_per_unit <= 0:
+            msg = f"  ❌ risk_per_unit {currency_sym}{risk_per_unit:.6f} ≤ 0 — cannot size."
             messages.append(msg)
             logger.error(msg)
             return RiskOutput(
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
-                position_size=0,
+                position_size=Decimal(0),
                 principal_amount=0.0,
                 ok=False,
                 messages=messages,
             )
 
-        raw_qty  = risk_amount / risk_per_share
-        quantity = self._round_lot(raw_qty, lot_size)
-
-        messages.append(
-            f"  🔢 Position size | risk_amount=₹{risk_amount:.2f}"
-            f"  risk/share=₹{risk_per_share:.4f}"
-            f"  raw_qty={raw_qty:.2f}  lot_rounded={quantity}"
+        raw_qty = risk_amount / risk_per_unit
+        quantity = self._round_quantity(
+            raw_qty,
+            asset_class=asset_class,
+            lot_size=lot_size,
+            qty_step=qty_step,
         )
 
-        # Step B: capital cap — clamp so principal never exceeds max_position_capital_pct
-        # of total capital.  This prevents tight SL + risk% from generating over-sized
-        # positions that exceed available margin.
-        # Default cap: 20% of capital.  Override via exec_state.max_position_capital_pct.
+        messages.append(
+            f"  🔢 Position size | risk_amount={currency_sym}{risk_amount:.2f}"
+            f"  risk/unit={currency_sym}{risk_per_unit:.6f}"
+            f"  raw_qty={raw_qty:.8f}  rounded={quantity}"
+        )
+
+        # Capital cap — same logic for both asset classes.
         max_pos_pct = float(
             getattr(inp.exec_state, "max_position_capital_pct", _DEFAULT_MAX_POSITION_PCT)
             or _DEFAULT_MAX_POSITION_PCT
         )
-        max_principal   = capital * max_pos_pct / 100
-        max_qty_by_cap  = self._round_lot(max_principal / entry, lot_size)
+        max_principal  = capital * max_pos_pct / 100
+        max_qty_by_cap = self._round_quantity(
+            max_principal / entry,
+            asset_class=asset_class,
+            lot_size=lot_size,
+            qty_step=qty_step,
+        )
 
         if quantity > max_qty_by_cap and max_qty_by_cap > 0:
             messages.append(
                 f"  ⚠️  Capital cap applied | risk-based qty={quantity}"
                 f" → capped to {max_qty_by_cap}"
-                f" ({max_pos_pct:.0f}% of ₹{capital:,.0f} = ₹{max_principal:,.0f})"
+                f" ({max_pos_pct:.0f}% of {currency_sym}{capital:,.2f} = "
+                f"{currency_sym}{max_principal:,.2f})"
             )
             quantity = max_qty_by_cap
 
         if quantity <= 0:
-            messages.append("  ❌ Quantity is 0 after lot rounding — trade blocked.")
+            messages.append("  ❌ Quantity is 0 after rounding — trade blocked.")
             return RiskOutput(
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
-                position_size=0,
+                position_size=Decimal(0),
                 principal_amount=0.0,
                 ok=False,
                 messages=messages,
             )
 
         # ── 5. Min trade value check ───────────────────────────────────────────
-        principal = entry * quantity
-        if principal < min_trade_value:
+        principal = float(entry * float(quantity))
+        if principal < effective_min_trade:
             msg = (
-                f"  ❌ Trade value ₹{principal:,.2f} < min_trade_value ₹{min_trade_value:,.2f}"
-                f" — trade blocked."
+                f"  ❌ Trade value {currency_sym}{principal:,.4f} < "
+                f"min_trade={currency_sym}{effective_min_trade:,.4f} — trade blocked."
             )
             messages.append(msg)
             logger.warning(msg)
@@ -218,8 +251,8 @@ class RiskManager:
             )
 
         messages.append(
-            f"  ✅ Risk OK | qty={quantity}  principal=₹{principal:,.2f}"
-            f"  SL=₹{sl_price:.2f}  TP=₹{tp_price:.2f}"
+            f"  ✅ Risk OK | qty={quantity}  principal={currency_sym}{principal:,.4f}"
+            f"  SL={currency_sym}{sl_price:.6f}  TP={currency_sym}{tp_price:.6f}"
         )
 
         return RiskOutput(
@@ -250,12 +283,15 @@ class RiskManager:
         return sl, tp
 
     def _extract_exec_params(
-        self, exec_state: Optional[object], messages: List[str]
+        self,
+        exec_state: Optional[object],
+        messages: List[str],
+        currency_sym: str = "₹",
     ) -> tuple[float, float, float]:
         if exec_state is None:
             messages.append(
-                f"  ⚠️  No exec state — using fallback capital=₹{_DEFAULT_CAPITAL:,.0f}"
-                f"  max_risk={_DEFAULT_MAX_RISK_PCT}%  min_trade=₹{_DEFAULT_MIN_TRADE_VALUE:,.0f}"
+                f"  ⚠️  No exec state — using fallback capital={currency_sym}{_DEFAULT_CAPITAL:,.2f}"
+                f"  max_risk={_DEFAULT_MAX_RISK_PCT}%  min_trade={currency_sym}{_DEFAULT_MIN_TRADE_VALUE:,.2f}"
             )
             return _DEFAULT_CAPITAL, _DEFAULT_MAX_RISK_PCT, _DEFAULT_MIN_TRADE_VALUE
 
@@ -267,40 +303,54 @@ class RiskManager:
         max_risk = float(_DEFAULT_MAX_RISK_PCT if raw_max_risk is None else raw_max_risk)
         min_trade = float(_DEFAULT_MIN_TRADE_VALUE if raw_min_trade is None else raw_min_trade)
         messages.append(
-            f"  💡 Exec state | capital=₹{capital:,.0f}"
-            f"  max_risk={max_risk}%  min_trade=₹{min_trade:,.0f}"
+            f"  💡 Exec state | capital={currency_sym}{capital:,.2f}"
+            f"  max_risk={max_risk}%  min_trade={currency_sym}{min_trade:,.2f}"
         )
         return capital, max_risk, min_trade
 
     def _extract_instrument(
-        self, instrument: Optional[object], messages: List[str]
-    ) -> tuple[float, int, Optional[float], Optional[float]]:
+        self,
+        instrument: Optional[object],
+        messages: List[str],
+        currency_sym: str = "₹",
+    ) -> tuple[float, int, Optional[float], Optional[float], Optional[float], Optional[float]]:
         if instrument is None:
             messages.append(
-                f"  ⚠️  No instrument defaults — using fallback tick=₹{_DEFAULT_TICK_SIZE}"
+                f"  ⚠️  No instrument defaults — using fallback tick={currency_sym}{_DEFAULT_TICK_SIZE}"
                 f"  lot={_DEFAULT_LOT_SIZE}"
             )
             logger.warning("RiskManager: no instrument defaults; using fallback values")
-            return _DEFAULT_TICK_SIZE, _DEFAULT_LOT_SIZE, None, None
+            return _DEFAULT_TICK_SIZE, _DEFAULT_LOT_SIZE, None, None, None, None
 
         tick  = float(getattr(instrument, "tick_size", _DEFAULT_TICK_SIZE) or _DEFAULT_TICK_SIZE)
         lot   = int(getattr(instrument, "lot_size", _DEFAULT_LOT_SIZE) or _DEFAULT_LOT_SIZE)
         upper = getattr(instrument, "upper_circuit", None)
         lower = getattr(instrument, "lower_circuit", None)
+        qty_step = getattr(instrument, "qty_step_size", None)
+        min_notional = getattr(instrument, "min_notional", None)
         upper = float(upper) if upper is not None else None
         lower = float(lower) if lower is not None else None
+        qty_step = float(qty_step) if qty_step is not None else None
+        min_notional = float(min_notional) if min_notional is not None else None
         messages.append(
-            f"  💡 Instrument | tick=₹{tick}  lot={lot}"
-            f"  upper_circuit=₹{upper:.2f}  lower_circuit=₹{lower:.2f}"
+            f"  💡 Instrument | tick={currency_sym}{tick}  lot={lot}"
+            f"  upper={currency_sym}{(upper or 0):.4f}  lower={currency_sym}{(lower or 0):.4f}"
+            f"  qty_step={qty_step}  min_notional={min_notional}"
         )
-        return tick, lot, upper, lower
+        return tick, lot, upper, lower, qty_step, min_notional
 
     @staticmethod
     def _round_tick(price: float, tick_size: float) -> float:
         """Round price to the nearest tick_size multiple."""
         if tick_size <= 0:
-            return round(price, 4)
-        return round(round(price / tick_size) * tick_size, 4)
+            return round(price, 8)
+        # Use Decimal to avoid float-arithmetic drift at small tick sizes
+        # (e.g. crypto 0.00000001 ticks).
+        d_price = Decimal(str(price))
+        d_tick  = Decimal(str(tick_size))
+        steps   = (d_price / d_tick).quantize(Decimal("1"), rounding=ROUND_DOWN)
+        result  = (steps * d_tick)
+        return float(result)
 
     @staticmethod
     def _round_lot(qty: float, lot_size: int) -> int:
@@ -309,6 +359,35 @@ class RiskManager:
             return max(1, math.floor(qty))
         lots = math.floor(qty / lot_size)
         return max(lot_size, lots * lot_size)
+
+    @classmethod
+    def _round_quantity(
+        cls,
+        raw_qty: float,
+        *,
+        asset_class: AssetClass,
+        lot_size: int,
+        qty_step: Optional[float],
+    ) -> Decimal:
+        """
+        Floor a raw quantity to the venue-allowed step.
+
+          equity_cash : nearest integer lot (Decimal-valued integer).
+          crypto_spot : floor to the qty_step multiple (e.g. 0.00001 BTC).
+
+        Returns a ``Decimal`` so the caller can compare / multiply without
+        re-introducing float drift.
+        """
+        if asset_class == AssetClass.crypto_spot:
+            step = Decimal(str(qty_step)) if qty_step and qty_step > 0 else Decimal("0.00000001")
+            d_raw = Decimal(str(raw_qty))
+            if step <= 0:
+                return d_raw.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+            steps = (d_raw / step).quantize(Decimal("1"), rounding=ROUND_DOWN)
+            return steps * step
+
+        # equity_cash
+        return Decimal(cls._round_lot(raw_qty, lot_size))
 
     def _blocked(
         self,
@@ -323,7 +402,7 @@ class RiskManager:
         return RiskOutput(
             stop_loss_price=sl,
             take_profit_price=tp,
-            position_size=0,
+            position_size=Decimal(0),
             principal_amount=0.0,
             ok=False,
             messages=messages,

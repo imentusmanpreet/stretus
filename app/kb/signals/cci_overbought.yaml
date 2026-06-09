@@ -2,34 +2,59 @@ name: cci_overbought
 category: momentum
 direction: bearish
 kind: threshold
-roles: [entry_trigger, entry_filter]
-description: "Commodity Channel Index above +100 — overbought, bearish reversal candidate."
-
-works_best_on: [5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+formula: CCI({window}) > {threshold}
+roles:
+- entry_trigger
+- entry_filter
+description: Commodity Channel Index above +100 — overbought, bearish reversal candidate.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bullish
-
-pairs_well_with: [vwap_reclaim_bearish, bearish_rejection_candle, price_above_bb_upper]
-contradicts: [cci_oversold]
-
+- sentiment: bullish
+pairs_well_with:
+- vwap_reclaim_bearish
+- bearish_rejection_candle
+- price_above_bb_upper
+contradicts:
+- cci_oversold
 params_by_timeframe:
-  1m:   {window: 20, threshold: 100.0}
-  3m:   {window: 20, threshold: 100.0}
-  5m:   {window: 20, threshold: 100.0}
-  10m:  {window: 20, threshold: 100.0}
-  15m:  {window: 20, threshold: 100.0}
-  30m:  {window: 20, threshold: 100.0}
-  1h:   {window: 20, threshold: 100.0}
-  1d:   {window: 20, threshold: 100.0}
-
+  1m:
+    window: 20
+    threshold: 100.0
+  3m:
+    window: 20
+    threshold: 100.0
+  5m:
+    window: 20
+    threshold: 100.0
+  10m:
+    window: 20
+    threshold: 100.0
+  15m:
+    window: 20
+    threshold: 100.0
+  30m:
+    window: 20
+    threshold: 100.0
+  1h:
+    window: 20
+    threshold: 100.0
+  1d:
+    window: 20
+    threshold: 100.0
 experience_fit:
   beginner: 0.7
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.2
   momentum: 0.7
@@ -38,3 +63,14 @@ intent_fit:
   scalping: 0.5
   mean_reversion: 1.0
   confirmation: 0.6
+match_when:
+  phrases:
+  - cci\s+(?:is\s+|crosses?\s+|reaches?\s+)?(?:above|over|>=|>)\s*(\d+)
+  - cci\s+overbought
+  acts_as: exit_trigger
+  mirrors_to: cci_oversold
+  extract_params:
+    threshold:
+      from_group: 1
+      default: 100
+      kind: int

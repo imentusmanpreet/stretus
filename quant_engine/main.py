@@ -130,6 +130,10 @@ class RunConfig(BaseModel):
     # Delivery equity: 0.1% on both buy and sell
     stt_intraday_sell_pct: float = 0.025
     stt_delivery_pct: float = 0.1
+    # Phase 11 — 1-minute execution. When true, `ohlcv_data` is the 1-minute
+    # series; the engine resamples it to the strategy timeframe for signals and
+    # walks the minute bars to resolve fills / SL / TP. See engine.runner.
+    intrabar_execution: bool = False
 
 
 class MarketDataRequestPayload(BaseModel):

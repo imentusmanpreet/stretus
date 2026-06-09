@@ -34,6 +34,13 @@ def build_strategy_object(builder: Any) -> dict:
 
     entry_condition = builder.entry_condition or plan.get("entry_condition")
     exit_condition  = builder.exit_condition  or plan.get("exit_condition")
+    # Phase 12 — short leg (two-sided strategies only).
+    short_entry_condition = (
+        getattr(builder, "short_entry_condition", None) or plan.get("short_entry_condition") or ""
+    )
+    short_exit_condition = (
+        getattr(builder, "short_exit_condition", None) or plan.get("short_exit_condition") or ""
+    )
 
     reward_factor = None
     if builder.stop_loss and builder.take_profit and builder.stop_loss > 0:
@@ -68,8 +75,10 @@ def build_strategy_object(builder: Any) -> dict:
         "name":            strategy_name,
         "status":          "draft",
         "asset":           asset,
+        "asset_class":     builder.asset_class,
         "meta": {
             "market":               builder.market,
+            "asset_class":          builder.asset_class,
             "objective":            builder.objective,
             "goal":                 getattr(builder, "goal", None),
             "sentiment":            builder.sentiment,
@@ -82,6 +91,9 @@ def build_strategy_object(builder: Any) -> dict:
         },
         "entry_condition":     entry_condition,
         "exit_condition":      exit_condition,
+        "short_entry_condition": short_entry_condition,
+        "short_exit_condition":  short_exit_condition,
+        "direction":           getattr(builder, "direction", None) or "both",
         "entry":               copy.deepcopy(plan.get("entry", [])),
         "exit":                copy.deepcopy(plan.get("exit", [])),
         "risk_and_execution":  risk_and_execution,
@@ -95,6 +107,38 @@ def build_strategy_object(builder: Any) -> dict:
     return {"strategy_object": strategy_object}
 
 
+def _build_gates_config(builder: Any) -> dict:
+    """
+    Collect the Phase 10 entry-gate fields off the builder into a flat dict.
+
+    The shape matches `app.schemas.execution.GatesConfig` field-for-field, so
+    the live execution path (StrategyEvaluator) can rehydrate it directly when
+    a strategy is loaded from the DB (Mode 1). Persisting these here is what
+    gives live signal generation parity with the backtest simulator's gates.
+    """
+    g = lambda name: getattr(builder, name, None)  # noqa: E731
+
+    def _gthr() -> float:
+        v = g("gap_threshold_pct")
+        return float(v) if v is not None else 0.5
+
+    return {
+        "direction":                  g("direction") or "both",
+        "entry_window_start":         g("entry_window_start"),
+        "entry_window_end":           g("entry_window_end"),
+        "max_consecutive_losses":     int(g("max_consecutive_losses") or 0),
+        "cooldown_bars_after_loss":   int(g("cooldown_bars_after_loss") or 0),
+        "cooldown_bars_after_profit": int(g("cooldown_bars_after_profit") or 0),
+        "max_spread_bps":             float(g("max_spread_bps") or 0.0),
+        "gap_filter":                 g("gap_filter") or "none",
+        "gap_threshold_pct":          _gthr(),
+        "entry_confirmation_bars":    int(g("entry_confirmation_bars") or 1),
+        "rsi_entry_band_min":         g("rsi_entry_band_min"),
+        "rsi_entry_band_max":         g("rsi_entry_band_max"),
+        "volume_ratio_threshold":     g("volume_ratio_threshold"),
+    }
+
+
 def build_strategy_config(builder: Any, strategy_payload: dict) -> dict:
     """Build the strategy_config dict (used by the YAML generator + UI)."""
     strategy_object = strategy_payload.get("strategy_object", {})
@@ -102,10 +146,13 @@ def build_strategy_config(builder: Any, strategy_payload: dict) -> dict:
         "exit":          copy.deepcopy(strategy_object.get("exit", [])),
         "name":          strategy_object.get("name", "strategy"),
         "asset":         strategy_object.get("asset", builder.format_symbol()),
+        "asset_class":   builder.asset_class,
         "entry":         copy.deepcopy(strategy_object.get("entry", [])),
         "goal":          getattr(builder, "goal", None),
         "created_at":    datetime.now(timezone.utc).isoformat(),
         "reward_factor": strategy_object.get("reward_factor"),
+        # Phase 10 — entry gates, consumed by the live execution evaluator.
+        "gates":         _build_gates_config(builder),
     }
 
 

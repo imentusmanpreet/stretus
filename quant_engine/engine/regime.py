@@ -147,6 +147,31 @@ def _atr_expansion(df: pd.DataFrame, period: int = 14) -> float | None:
     return current_atr / baseline
 
 
+def classify_regime_series(
+    ohlcv: pd.DataFrame,
+    lookback: int = _LOOKBACK_BARS,
+) -> pd.Series:
+    """Per-bar regime label, computed CAUSALLY.
+
+    Bar i is classified using ONLY its trailing `lookback` window (bars ≤ i) via
+    the exact same `classify_regime` logic — so the per-bar label never leaks
+    future data and always matches the snapshot classifier on that window. This
+    is the single source of truth for both the Phase-2 regime entry gate and the
+    Phase-3 per-regime performance breakdown.
+
+    Returns a Series of regime-type strings ("trending_up" | "trending_down" |
+    "ranging" | "volatile") aligned to ohlcv.index. Early bars (insufficient
+    history) fall back to "ranging", matching classify_regime's default.
+    """
+    n = len(ohlcv)
+    labels: list[str] = []
+    for i in range(n):
+        start = max(0, i - lookback + 1)
+        window = ohlcv.iloc[start : i + 1]
+        labels.append(classify_regime(window, lookback)["type"])
+    return pd.Series(labels, index=ohlcv.index, name="REGIME")
+
+
 def classify_regime(
     ohlcv: pd.DataFrame,
     lookback: int = _LOOKBACK_BARS,

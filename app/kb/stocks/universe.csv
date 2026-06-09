@@ -1,107 +1,207 @@
-symbol,display_name,exchange,upstox_key,sector,enabled
-ABB.NS,ABB India,NSE,NSE_EQ|INE117A01022,industrials,true
-ADANIENT.NS,Adani Enterprises,NSE,NSE_EQ|INE423A01024,conglomerate,true
-ADANIGREEN.NS,Adani Green Energy,NSE,NSE_EQ|INE364U01010,energy,true
-ADANIPORTS.NS,Adani Ports,NSE,NSE_EQ|INE742F01042,infrastructure,true
-ADANIPOWER.NS,Adani Power,NSE,NSE_EQ|INE814H01029,power,true
-AMBUJACEM.NS,Ambuja Cements,NSE,NSE_EQ|INE079A01024,cement,true
-APOLLOHOSP.NS,Apollo Hospitals,NSE,NSE_EQ|INE437A01024,healthcare,true
-ASIANPAINT.NS,Asian Paints,NSE,NSE_EQ|INE021A01026,paints,true
-AUBANK.NS,AU Small Finance Bank,NSE,NSE_EQ|INE949L01017,banking,true
-AXISBANK.NS,Axis Bank,NSE,NSE_EQ|INE238A01034,banking,true
-BAJAJ-AUTO.NS,Bajaj Auto,NSE,NSE_EQ|INE917I01010,auto,true
-BAJAJFINSV.NS,Bajaj Finserv,NSE,NSE_EQ|INE918I01026,financial_services,true
-BAJFINANCE.NS,Bajaj Finance,NSE,NSE_EQ|INE296A01032,financial_services,true
-BEL.NS,Bharat Electronics,NSE,NSE_EQ|INE263A01024,defense,true
-BHARTIARTL.NS,Bharti Airtel,NSE,NSE_EQ|INE397D01024,telecom,true
-BHEL.NS,BHEL,NSE,NSE_EQ|INE257A01026,power,true
-BOSCHLTD.NS,Bosch,NSE,NSE_EQ|INE323A01026,auto,true
-BPCL.NS,BPCL,NSE,NSE_EQ|INE029A01011,energy,true
-BRITANNIA.NS,Britannia Industries,NSE,NSE_EQ|INE216A01030,fmcg,true
-CANBK.NS,Canara Bank,NSE,NSE_EQ|INE476A01022,banking,true
-CGPOWER.NS,CG Power,NSE,NSE_EQ|INE067A01029,industrials,true
-CHOLAFIN.NS,Cholamandalam Investment,NSE,NSE_EQ|INE121A01024,financial_services,true
-CIPLA.NS,Cipla,NSE,NSE_EQ|INE059A01026,pharma,true
-COALINDIA.NS,Coal India,NSE,NSE_EQ|INE522F01014,mining,true
-COLPAL.NS,Colgate Palmolive,NSE,NSE_EQ|INE259A01022,fmcg,true
-DABUR.NS,Dabur India,NSE,NSE_EQ|INE016A01026,fmcg,true
-DIVISLAB.NS,Divi's Laboratories,NSE,NSE_EQ|INE361B01024,pharma,true
-DLF.NS,DLF,NSE,NSE_EQ|INE271C01023,realty,true
-DRREDDY.NS,Dr Reddy's Laboratories,NSE,NSE_EQ|INE089A01031,pharma,true
-EICHERMOT.NS,Eicher Motors,NSE,NSE_EQ|INE066A01021,auto,true
-ETERNAL.NS,Eternity Laminates,NSE,NSE_EQ|INE758T01015,materials,true
-GAIL.NS,GAIL India,NSE,NSE_EQ|INE129A01019,energy,true
-GMRAIRPORT.NS,GMR Airports,NSE,NSE_EQ|INE776C01039,infrastructure,true
-GODREJCP.NS,Godrej Consumer Products,NSE,NSE_EQ|INE102D01028,fmcg,true
-GRASIM.NS,Grasim Industries,NSE,NSE_EQ|INE047A01021,cement,true
-HAL.NS,Hindustan Aeronautics,NSE,NSE_EQ|INE066F01020,defense,true
-HAVELLS.NS,Havells India,NSE,NSE_EQ|INE176B01034,electricals,true
-HCLTECH.NS,HCL Technologies,NSE,NSE_EQ|INE860A01027,it,true
-HDFCAMC.NS,HDFC AMC,NSE,NSE_EQ|INE127D01025,financial_services,true
-HDFCBANK.NS,HDFC Bank,NSE,NSE_EQ|INE040A01034,banking,true
-HDFCLIFE.NS,HDFC Life Insurance,NSE,NSE_EQ|INE795G01014,insurance,true
-HEROMOTOCO.NS,Hero MotoCorp,NSE,NSE_EQ|INE158A01026,auto,true
-HINDALCO.NS,Hindalco Industries,NSE,NSE_EQ|INE038A01020,metals,true
-HINDPETRO.NS,Hindustan Petroleum,NSE,NSE_EQ|INE094A01015,energy,true
-HINDUNILVR.NS,Hindustan Unilever,NSE,NSE_EQ|INE030A01027,fmcg,true
-ICICIBANK.NS,ICICI Bank,NSE,NSE_EQ|INE090A01021,banking,true
-ICICIGI.NS,ICICI Lombard,NSE,NSE_EQ|INE765G01017,insurance,true
-ICICIPRULI.NS,ICICI Prudential Life,NSE,NSE_EQ|INE726G01019,insurance,true
-IDEA.NS,Vodafone Idea,NSE,NSE_EQ|INE669E01016,telecom,true
-IDFCFIRSTB.NS,IDFC First Bank,NSE,NSE_EQ|INE092T01019,banking,true
-INDHOTEL.NS,Indian Hotels,NSE,NSE_EQ|INE053A01029,hospitality,true
-INDIGO.NS,IndiGo,NSE,NSE_EQ|INE646L01027,aviation,true
-INDUSINDBK.NS,IndusInd Bank,NSE,NSE_EQ|INE095A01012,banking,true
-INFY.NS,Infosys,NSE,NSE_EQ|INE009A01021,it,true
-IOC.NS,Indian Oil Corporation,NSE,NSE_EQ|INE242A01010,energy,true
-IRCTC.NS,IRCTC,NSE,NSE_EQ|INE335Y01020,travel,true
-ITC.NS,ITC,NSE,NSE_EQ|INE154A01025,fmcg,true
-JINDALSTEL.NS,Jindal Steel,NSE,NSE_EQ|INE749A01030,metals,true
-JIOFIN.NS,Jio Financial Services,NSE,NSE_EQ|INE758E01017,financial_services,true
-JSWENERGY.NS,JSW Energy,NSE,NSE_EQ|INE121E01018,power,true
-JSWSTEEL.NS,JSW Steel,NSE,NSE_EQ|INE019A01038,metals,true
-KOTAKBANK.NS,Kotak Mahindra Bank,NSE,NSE_EQ|INE237A01036,banking,true
-LICI.NS,LIC India,NSE,NSE_EQ|INE0J1Y01017,insurance,true
-LODHA.NS,Macrotech Developers,NSE,NSE_EQ|INE670K01029,realty,true
-LT.NS,Larsen & Toubro,NSE,NSE_EQ|INE018A01030,infrastructure,true
-M&M.NS,Mahindra & Mahindra,NSE,NSE_EQ|INE101A01026,auto,true
-MARUTI.NS,Maruti Suzuki,NSE,NSE_EQ|INE585B01010,auto,true
-MOTHERSON.NS,Motherson Sumi,NSE,NSE_EQ|INE775A01035,auto,true
-MUTHOOTFIN.NS,Muthoot Finance,NSE,NSE_EQ|INE414G01012,financial_services,true
-NAUKRI.NS,Naukri.com,NSE,NSE_EQ|INE663F01032,internet,true
-NESTLEIND.NS,Nestle India,NSE,NSE_EQ|INE239A01024,fmcg,true
-NHPC.NS,NHPC,NSE,NSE_EQ|INE848E01016,power,true
-NTPC.NS,NTPC,NSE,NSE_EQ|INE733E01010,power,true
-OIL.NS,Oil India,NSE,NSE_EQ|INE274J01014,energy,true
-ONGC.NS,ONGC,NSE,NSE_EQ|INE213A01029,energy,true
-PAGEIND.NS,Page Industries,NSE,NSE_EQ|INE761H01022,apparel,true
-PFC.NS,Power Finance Corporation,NSE,NSE_EQ|INE134E01011,financial_services,true
-PIDILITIND.NS,Pidilite Industries,NSE,NSE_EQ|INE318A01026,chemicals,true
-PIIND.NS,PI Industries,NSE,NSE_EQ|INE603J01030,chemicals,true
-PNB.NS,Punjab National Bank,NSE,NSE_EQ|INE160A01022,banking,true
-POWERGRID.NS,Power Grid Corporation,NSE,NSE_EQ|INE752E01010,power,true
-RECLTD.NS,REC Limited,NSE,NSE_EQ|INE020B01018,financial_services,true
-RELIANCE.NS,Reliance Industries,NSE,NSE_EQ|INE002A01018,energy,true
-SAIL.NS,SAIL,NSE,NSE_EQ|INE114A01011,metals,true
-SBICARD.NS,SBI Card,NSE,NSE_EQ|INE018E01016,financial_services,true
-SBILIFE.NS,SBI Life Insurance,NSE,NSE_EQ|INE123W01016,insurance,true
-SBIN.NS,State Bank of India,NSE,NSE_EQ|INE062A01020,banking,true
-SHRIRAMFIN.NS,Shriram Finance,NSE,NSE_EQ|INE721A01047,financial_services,true
-SIEMENS.NS,Siemens,NSE,NSE_EQ|INE003A01024,industrials,true
-SRF.NS,SRF,NSE,NSE_EQ|INE647A01010,chemicals,true
-SUNPHARMA.NS,Sun Pharma,NSE,NSE_EQ|INE044A01036,pharma,true
-SUZLON.NS,Suzlon Energy,NSE,NSE_EQ|INE040H01021,energy,true
-TATACONSUM.NS,Tata Consumer Products,NSE,NSE_EQ|INE192A01025,fmcg,true
-TATASTEEL.NS,Tata Steel,NSE,NSE_EQ|INE081A01020,metals,true
-TCS.NS,Tata Consultancy Services,NSE,NSE_EQ|INE467B01029,it,true
-TECHM.NS,Tech Mahindra,NSE,NSE_EQ|INE669C01036,it,true
-TITAN.NS,Titan Company,NSE,NSE_EQ|INE280A01028,consumer_durables,true
-TORNTPHARM.NS,Torrent Pharma,NSE,NSE_EQ|INE685A01028,pharma,true
-TRENT.NS,Trent,NSE,NSE_EQ|INE849A01020,retail,true
-TVSMOTOR.NS,TVS Motor,NSE,NSE_EQ|INE494B01023,auto,true
-ULTRACEMCO.NS,UltraTech Cement,NSE,NSE_EQ|INE481G01011,cement,true
-UNIONBANK.NS,Union Bank of India,NSE,NSE_EQ|INE692A01016,banking,true
-VBL.NS,Varun Beverages,NSE,NSE_EQ|INE200M01039,beverages,true
-VEDL.NS,Vedanta,NSE,NSE_EQ|INE205A01025,metals,true
-VOLTAS.NS,Voltas,NSE,NSE_EQ|INE226A01021,consumer_durables,true
-WIPRO.NS,Wipro,NSE,NSE_EQ|INE075A01022,it,true
+symbol,display_name,exchange,asset_class,quote_asset,sector,enabled
+ABB.NS,ABB India,NSE,equity_cash,INR,industrials,true
+ADANIENT.NS,Adani Enterprises,NSE,equity_cash,INR,conglomerate,true
+ADANIGREEN.NS,Adani Green Energy,NSE,equity_cash,INR,energy,true
+ADANIPORTS.NS,Adani Ports,NSE,equity_cash,INR,infrastructure,true
+ADANIPOWER.NS,Adani Power,NSE,equity_cash,INR,power,true
+AMBUJACEM.NS,Ambuja Cements,NSE,equity_cash,INR,cement,true
+APOLLOHOSP.NS,Apollo Hospitals,NSE,equity_cash,INR,healthcare,true
+ASIANPAINT.NS,Asian Paints,NSE,equity_cash,INR,paints,true
+AUBANK.NS,AU Small Finance Bank,NSE,equity_cash,INR,banking,true
+AXISBANK.NS,Axis Bank,NSE,equity_cash,INR,banking,true
+BAJAJ-AUTO.NS,Bajaj Auto,NSE,equity_cash,INR,auto,true
+BAJAJFINSV.NS,Bajaj Finserv,NSE,equity_cash,INR,financial_services,true
+BAJFINANCE.NS,Bajaj Finance,NSE,equity_cash,INR,financial_services,true
+BEL.NS,Bharat Electronics,NSE,equity_cash,INR,defense,true
+BHARTIARTL.NS,Bharti Airtel,NSE,equity_cash,INR,telecom,true
+BHEL.NS,BHEL,NSE,equity_cash,INR,power,true
+BOSCHLTD.NS,Bosch,NSE,equity_cash,INR,auto,true
+BPCL.NS,BPCL,NSE,equity_cash,INR,energy,true
+BRITANNIA.NS,Britannia Industries,NSE,equity_cash,INR,fmcg,true
+CANBK.NS,Canara Bank,NSE,equity_cash,INR,banking,true
+CGPOWER.NS,CG Power,NSE,equity_cash,INR,industrials,true
+CHOLAFIN.NS,Cholamandalam Investment,NSE,equity_cash,INR,financial_services,true
+CIPLA.NS,Cipla,NSE,equity_cash,INR,pharma,true
+COALINDIA.NS,Coal India,NSE,equity_cash,INR,mining,true
+COLPAL.NS,Colgate Palmolive,NSE,equity_cash,INR,fmcg,true
+DABUR.NS,Dabur India,NSE,equity_cash,INR,fmcg,true
+DIVISLAB.NS,Divi's Laboratories,NSE,equity_cash,INR,pharma,true
+DLF.NS,DLF,NSE,equity_cash,INR,realty,true
+DRREDDY.NS,Dr Reddy's Laboratories,NSE,equity_cash,INR,pharma,true
+EICHERMOT.NS,Eicher Motors,NSE,equity_cash,INR,auto,true
+ETERNAL.NS,Eternity Laminates,NSE,equity_cash,INR,materials,true
+GAIL.NS,GAIL India,NSE,equity_cash,INR,energy,true
+GMRAIRPORT.NS,GMR Airports,NSE,equity_cash,INR,infrastructure,true
+GODREJCP.NS,Godrej Consumer Products,NSE,equity_cash,INR,fmcg,true
+GRASIM.NS,Grasim Industries,NSE,equity_cash,INR,cement,true
+HAL.NS,Hindustan Aeronautics,NSE,equity_cash,INR,defense,true
+HAVELLS.NS,Havells India,NSE,equity_cash,INR,electricals,true
+HCLTECH.NS,HCL Technologies,NSE,equity_cash,INR,it,true
+HDFCAMC.NS,HDFC AMC,NSE,equity_cash,INR,financial_services,true
+HDFCBANK.NS,HDFC Bank,NSE,equity_cash,INR,banking,true
+HDFCLIFE.NS,HDFC Life Insurance,NSE,equity_cash,INR,insurance,true
+HEROMOTOCO.NS,Hero MotoCorp,NSE,equity_cash,INR,auto,true
+HINDALCO.NS,Hindalco Industries,NSE,equity_cash,INR,metals,true
+HINDPETRO.NS,Hindustan Petroleum,NSE,equity_cash,INR,energy,true
+HINDUNILVR.NS,Hindustan Unilever,NSE,equity_cash,INR,fmcg,true
+ICICIBANK.NS,ICICI Bank,NSE,equity_cash,INR,banking,true
+ICICIGI.NS,ICICI Lombard,NSE,equity_cash,INR,insurance,true
+ICICIPRULI.NS,ICICI Prudential Life,NSE,equity_cash,INR,insurance,true
+IDEA.NS,Vodafone Idea,NSE,equity_cash,INR,telecom,true
+IDFCFIRSTB.NS,IDFC First Bank,NSE,equity_cash,INR,banking,true
+INDHOTEL.NS,Indian Hotels,NSE,equity_cash,INR,hospitality,true
+INDIGO.NS,IndiGo,NSE,equity_cash,INR,aviation,true
+INDUSINDBK.NS,IndusInd Bank,NSE,equity_cash,INR,banking,true
+INFY.NS,Infosys,NSE,equity_cash,INR,it,true
+IOC.NS,Indian Oil Corporation,NSE,equity_cash,INR,energy,true
+IRCTC.NS,IRCTC,NSE,equity_cash,INR,travel,true
+ITC.NS,ITC,NSE,equity_cash,INR,fmcg,true
+JINDALSTEL.NS,Jindal Steel,NSE,equity_cash,INR,metals,true
+JIOFIN.NS,Jio Financial Services,NSE,equity_cash,INR,financial_services,true
+JSWENERGY.NS,JSW Energy,NSE,equity_cash,INR,power,true
+JSWSTEEL.NS,JSW Steel,NSE,equity_cash,INR,metals,true
+KOTAKBANK.NS,Kotak Mahindra Bank,NSE,equity_cash,INR,banking,true
+LICI.NS,LIC India,NSE,equity_cash,INR,insurance,true
+LODHA.NS,Macrotech Developers,NSE,equity_cash,INR,realty,true
+LT.NS,Larsen & Toubro,NSE,equity_cash,INR,infrastructure,true
+M&M.NS,Mahindra & Mahindra,NSE,equity_cash,INR,auto,true
+MARUTI.NS,Maruti Suzuki,NSE,equity_cash,INR,auto,true
+MOTHERSON.NS,Motherson Sumi,NSE,equity_cash,INR,auto,true
+MUTHOOTFIN.NS,Muthoot Finance,NSE,equity_cash,INR,financial_services,true
+NAUKRI.NS,Naukri.com,NSE,equity_cash,INR,internet,true
+NESTLEIND.NS,Nestle India,NSE,equity_cash,INR,fmcg,true
+NHPC.NS,NHPC,NSE,equity_cash,INR,power,true
+NTPC.NS,NTPC,NSE,equity_cash,INR,power,true
+OIL.NS,Oil India,NSE,equity_cash,INR,energy,true
+ONGC.NS,ONGC,NSE,equity_cash,INR,energy,true
+PAGEIND.NS,Page Industries,NSE,equity_cash,INR,apparel,true
+PFC.NS,Power Finance Corporation,NSE,equity_cash,INR,financial_services,true
+PIDILITIND.NS,Pidilite Industries,NSE,equity_cash,INR,chemicals,true
+PIIND.NS,PI Industries,NSE,equity_cash,INR,chemicals,true
+PNB.NS,Punjab National Bank,NSE,equity_cash,INR,banking,true
+POWERGRID.NS,Power Grid Corporation,NSE,equity_cash,INR,power,true
+RECLTD.NS,REC Limited,NSE,equity_cash,INR,financial_services,true
+RELIANCE.NS,Reliance Industries,NSE,equity_cash,INR,energy,true
+SAIL.NS,SAIL,NSE,equity_cash,INR,metals,true
+SBICARD.NS,SBI Card,NSE,equity_cash,INR,financial_services,true
+SBILIFE.NS,SBI Life Insurance,NSE,equity_cash,INR,insurance,true
+SBIN.NS,State Bank of India,NSE,equity_cash,INR,banking,true
+SHRIRAMFIN.NS,Shriram Finance,NSE,equity_cash,INR,financial_services,true
+SIEMENS.NS,Siemens,NSE,equity_cash,INR,industrials,true
+SRF.NS,SRF,NSE,equity_cash,INR,chemicals,true
+SUNPHARMA.NS,Sun Pharma,NSE,equity_cash,INR,pharma,true
+SUZLON.NS,Suzlon Energy,NSE,equity_cash,INR,energy,true
+TATACONSUM.NS,Tata Consumer Products,NSE,equity_cash,INR,fmcg,true
+TATASTEEL.NS,Tata Steel,NSE,equity_cash,INR,metals,true
+TCS.NS,Tata Consultancy Services,NSE,equity_cash,INR,it,true
+TECHM.NS,Tech Mahindra,NSE,equity_cash,INR,it,true
+TITAN.NS,Titan Company,NSE,equity_cash,INR,consumer_durables,true
+TORNTPHARM.NS,Torrent Pharma,NSE,equity_cash,INR,pharma,true
+TRENT.NS,Trent,NSE,equity_cash,INR,retail,true
+TVSMOTOR.NS,TVS Motor,NSE,equity_cash,INR,auto,true
+ULTRACEMCO.NS,UltraTech Cement,NSE,equity_cash,INR,cement,true
+UNIONBANK.NS,Union Bank of India,NSE,equity_cash,INR,banking,true
+VBL.NS,Varun Beverages,NSE,equity_cash,INR,beverages,true
+VEDL.NS,Vedanta,NSE,equity_cash,INR,metals,true
+VOLTAS.NS,Voltas,NSE,equity_cash,INR,consumer_durables,true
+WIPRO.NS,Wipro,NSE,equity_cash,INR,it,true
+AAVE_USDC,Aave USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ADA_USDC,Cardano USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ASTER_USDC,Aster USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ATOM_USDC,Cosmos USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+AVAX_USDC,Avalanche USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+BCH_USDC,Bitcoin Cash USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+BERA_USDC,Berachain USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+BNB_USDC,BNB USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+BTC_USDC,Bitcoin USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+CHIP_USDC,Chip USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+DASH_USDC,Dash USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+DOGE_USDC,Dogecoin USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+EDEN_USDC,Eden USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ENA_USDC,Ethena USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ERA_USDC,Era USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ETH_USDC,Ethereum USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+FET_USDC,Fetch.ai USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+GENIUS_USDC,Genius USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+HBAR_USDC,Hedera USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ICP_USDC,Internet Computer USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+INJ_USDC,Injective USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+LINK_USDC,Chainlink USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+LTC_USDC,Litecoin USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+LUNC_USDC,Terra Classic USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+MITO_USDC,Mitosis USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+MORPHO_USDC,Morpho USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+NEAR_USDC,NEAR Protocol USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+NIL_USDC,Nillion USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ONDO_USDC,Ondo USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+PAXG_USDC,PAX Gold USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+PENDLE_USDC,Pendle USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+PENGU_USDC,Pudgy Penguins USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+PEPE_USDC,Pepe USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+PLUME_USDC,Plume USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+RENDER_USDC,Render USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+SAGA_USDC,Saga USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+SEI_USDC,Sei USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+SOL_USDC,Solana USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+SOMI_USDC,Somnia USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+SUI_USDC,Sui USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+TAO_USDC,Bittensor USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+TIA_USDC,Celestia USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+TON_USDC,Toncoin USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+TRX_USDC,TRON USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+UNI_USDC,Uniswap USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+VIRTUAL_USDC,Virtuals Protocol USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+WLD_USDC,Worldcoin USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+XLM_USDC,Stellar USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+XRP_USDC,XRP USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+ZEC_USDC,Zcash USDC,BINANCE_SPOT,crypto_spot,USDC,crypto,true
+AAVE_USDT,Aave USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ADA_USDT,Cardano USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ALLO_USDT,Allora USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ASTER_USDT,Aster USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+AVAX_USDT,Avalanche USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+BCH_USDT,Bitcoin Cash USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+BNB_USDT,BNB USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+BTC_USDT,Bitcoin USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+CHZ_USDT,Chiliz USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+DASH_USDT,Dash USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+DEXE_USDT,DeXe USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+DOGE_USDT,Dogecoin USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+DOT_USDT,Polkadot USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+EDEN_USDT,Eden USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ENA_USDT,Ethena USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ERA_USDT,Era USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ETH_USDT,Ethereum USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+FET_USDT,Fetch.ai USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+FIDA_USDT,Bonfida USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+GENIUS_USDT,Genius USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+HBAR_USDT,Hedera USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+INJ_USDT,Injective USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+LINK_USDT,Chainlink USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+LTC_USDT,Litecoin USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+LUNC_USDT,Terra Classic USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+MEGA_USDT,MegaETH USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+MITO_USDT,Mitosis USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+NEAR_USDT,NEAR Protocol USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+NIL_USDT,Nillion USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ONDO_USDT,Ondo USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+PAXG_USDT,PAX Gold USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+PENGU_USDT,Pudgy Penguins USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+PEPE_USDT,Pepe USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+PLUME_USDT,Plume USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+RENDER_USDT,Render USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+SAGA_USDT,Saga USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+SAHARA_USDT,Sahara AI USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+SOL_USDT,Solana USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+SUI_USDT,Sui USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+SUPER_USDT,SuperVerse USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+TAO_USDT,Bittensor USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+TON_USDT,Toncoin USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+TRX_USDT,TRON USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+UNI_USDT,Uniswap USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+VIRTUAL_USDT,Virtuals Protocol USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+WLD_USDT,Worldcoin USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+XAUT_USDT,Tether Gold USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+XLM_USDT,Stellar USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+XRP_USDT,XRP USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true
+ZEC_USDT,Zcash USDT,BINANCE_SPOT,crypto_spot,USDT,crypto,true

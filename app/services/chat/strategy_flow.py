@@ -28,8 +28,14 @@ _INPUT_MODIFICATION_OPTIONS_TEXT = (
 )
 
 
-def build_welcome_message() -> str:
-    return compose_response("collect_input.welcome")
+def build_welcome_message(asset_classes: list[str] | None = None) -> str:
+    """Welcome message scoped to the asset classes enabled for this chat.
+
+    Pass the asset_class_id strings of *enabled* capabilities (e.g.
+    ["equity_cash", "crypto_spot"]). When omitted, defaults to the legacy
+    equity-only copy.
+    """
+    return compose_response("collect_input.welcome", asset_classes=asset_classes or [])
 
 
 def _asset_label(builder: StrategyBuilder) -> str:
@@ -259,6 +265,8 @@ def build_plan_signals_reply(builder: StrategyBuilder, plan: dict) -> str:
     return compose_response(
         "workflow.signal_plan_ready",
         asset=_asset_label(builder),
+        experience=builder.experience,
+        trade_type=builder.objective,
     )
 
 
@@ -266,6 +274,8 @@ def build_plan_signals_reminder(builder: StrategyBuilder) -> str:
     return compose_response(
         "workflow.signal_plan_ready",
         asset=_asset_label(builder),
+        experience=builder.experience,
+        trade_type=builder.objective,
         reminder=True,
     )
 
@@ -309,6 +319,13 @@ def build_backtest_error_reply(reason: str) -> str:
     return compose_response(
         "workflow.backtest_failed",
         reason=reason,
+    )
+
+
+def build_backtest_earliest_date_reply(earliest_date: str) -> str:
+    return compose_response(
+        "workflow.backtest_earliest_date_unsupported",
+        earliest_date=earliest_date,
     )
 
 
@@ -416,6 +433,7 @@ def build_final_strategy_payload(
     yaml_path: str | None = None,
     current_mode: str = "assemble_strategy",
     next_state: str = "backtest_confirmation",
+    asset_class: str | None = None,
 ) -> dict:
     resolved_user_id = user_id or DEFAULT_USER_ID
 
@@ -427,6 +445,7 @@ def build_final_strategy_payload(
             "processing_status": "complete",
             "current_mode": current_mode,
             "next_state": next_state,
+            "asset_class": asset_class,
             "strategy_object": strategy_object,
             "strategy_config": strategy_config,
             "strategy_id": strategy_id,

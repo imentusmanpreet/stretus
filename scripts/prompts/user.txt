@@ -1,0 +1,20 @@
+Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.

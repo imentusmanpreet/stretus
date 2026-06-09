@@ -9,14 +9,34 @@ CHANGES:
   - ChatMessageItem & MessageResponse extended with async status metadata.
 """
 from __future__ import annotations
-from typing import Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
 
+class AssetClassCapability(BaseModel):
+    """One asset class entry in a tenant's capabilities block."""
+
+    asset_class_id: Literal["equity_cash", "crypto_spot"]
+    enabled: bool = True
+
+
+class ChatCapabilities(BaseModel):
+    """Tenant-supplied capabilities scoped to this chat session."""
+
+    asset_classes: List[AssetClassCapability] = Field(default_factory=list)
+
+
 class ChatCreateRequest(BaseModel):
     title: Optional[str] = Field(None, example="My NIFTY Strategy")
+    capabilities: Optional[ChatCapabilities] = Field(
+        None,
+        description=(
+            "Asset classes the tenant has enabled for this chat. When omitted, "
+            "defaults to equity_cash (Indian equities)."
+        ),
+    )
 
 
 class MessageRequest(BaseModel):

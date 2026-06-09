@@ -21,12 +21,15 @@ from app.schemas.backtest import (
 )
 from app.core.timing import BacktestTimer
 from app.services.backtest import (
+    INTRABAR_EXECUTION_INTERVAL,
     apply_sanitized_result_to_row,
+    build_main_fetch_request,
     extract_strategy_market_data_request,
     fetch_auxiliary_ohlcv,
     fetch_ohlcv_records,
     normalize_backtest_metric_aliases,
     queue_quant_backtest,
+    resolve_intrabar_execution,
     summarize_backtest_for_db,
 )
 
@@ -64,7 +67,7 @@ async def _mark_backtest_failed(backtest_id: str, exc: Exception) -> None:
         except Exception:
             await db.rollback()
             logger.exception(
-                "backtest_persist|source=orch_failure|outcome=db_update_failed|backtest_id=%s",
+                "💥 backtest_persist|source=orch_failure|outcome=db_update_failed|backtest_id=%s",
                 backtest_id,
             )
 
@@ -74,7 +77,7 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
     
     try:
         logger.info(
-            "backtest_orch|stage=prep|backtest_id=%s|strategy_id=%s",
+            "🚀 backtest_orch|stage=prep|backtest_id=%s|strategy_id=%s",
             backtest_id,
             strategy_id,
         )
@@ -82,21 +85,39 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
         # Step 1: Extract market data request from strategy YAML
         with timer.step("extract_market_data_request", {"strategy_id": strategy_id}):
             market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
-        
+
+        # Phase 11: 1-minute execution. AUTO-on for any non-1m strategy (the
+        # request flag can force it on/off). When on, the main (and reference)
+        # series is fetched at 1m; the engine resamples to the strategy timeframe
+        # for signals and walks the minute bars for fills/SL/TP. The resolved
+        # concrete decision is written back onto run_request so the engine's
+        # run_config receives a definite bool (never the AUTO sentinel).
+        intrabar_execution = resolve_intrabar_execution(
+            run_request, signal_interval=market_data_request.interval,
+        )
+        run_request = run_request.model_copy(update={"intrabar_execution": intrabar_execution})
+        main_fetch_request = build_main_fetch_request(
+            market_data_request, intrabar_execution=intrabar_execution,
+        )
+
         # Step 2: Fetch main OHLCV data (chunked)
         with timer.step("fetch_main_ohlcv", {
-            "symbol": market_data_request.symbol,
-            "interval": market_data_request.interval,
-            "from_utc": market_data_request.from_utc,
-            "to_utc": market_data_request.to_utc,
+            "symbol": main_fetch_request.symbol,
+            "interval": main_fetch_request.interval,
+            "from_utc": main_fetch_request.from_utc,
+            "to_utc": main_fetch_request.to_utc,
+            "intrabar_execution": intrabar_execution,
         }):
-            ohlcv_data = await fetch_ohlcv_records(market_data_request)
-        
+            ohlcv_data = await fetch_ohlcv_records(main_fetch_request)
+
         # Step 3: Fetch auxiliary OHLCV (reference + HTF) in parallel
         with timer.step("fetch_auxiliary_ohlcv", {
             "symbol": market_data_request.symbol,
         }):
-            reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(market_data_request)
+            reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(
+                market_data_request,
+                main_fetch_interval=INTRABAR_EXECUTION_INTERVAL if intrabar_execution else None,
+            )
         
         # Step 4: Queue quant engine execution
         with timer.step("queue_quant_engine", {
@@ -127,16 +148,16 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
         logger.info("=" * 100)
         logger.info("🎯 API LAYER TIMING SUMMARY - Backtest ID: %s", backtest_id)
         logger.info("=" * 100)
-        logger.info("Total Duration: %s", summary["overall_duration_formatted"])
-        logger.info("Steps Completed: %d", summary["step_count"])
+        logger.info("⏱️  Total Duration: %s", summary["overall_duration_formatted"])
+        logger.info("🔢 Steps Completed: %d", summary["step_count"])
         logger.info("-" * 100)
         for step in summary["steps"]:
             percentage = (step["duration_seconds"] / summary["overall_duration_seconds"] * 100) if summary["overall_duration_seconds"] > 0 else 0
-            logger.info("  %-35s : %12s (%6.2f%%)", step["step"], step["duration_formatted"], percentage)
+            logger.info("  ⏳ %-32s : %12s (%6.2f%%)", step["step"], step["duration_formatted"], percentage)
         logger.info("=" * 100)
-        
+
         logger.info(
-            "backtest_orch|stage=quant_queued|backtest_id=%s|symbol=%s|interval=%s|candles=%s"
+            "✅ backtest_orch|stage=quant_queued|backtest_id=%s|symbol=%s|interval=%s|candles=%s"
             "|aux_reference=%s|aux_htf=%s|total_duration=%s",
             backtest_id,
             market_data_request.symbol,
@@ -153,8 +174,8 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
             logger.info("=" * 100)
             logger.info("❌ API LAYER TIMING SUMMARY (FAILED) - Backtest ID: %s", backtest_id)
             logger.info("=" * 100)
-            logger.info("Total Duration: %s", summary["overall_duration_formatted"])
-            logger.info("Steps Completed: %d", summary["step_count"])
+            logger.info("⏱️  Total Duration: %s", summary["overall_duration_formatted"])
+            logger.info("🔢 Steps Completed: %d", summary["step_count"])
             logger.info("-" * 100)
             for step in summary["steps"]:
                 percentage = (step["duration_seconds"] / summary["overall_duration_seconds"] * 100) if summary["overall_duration_seconds"] > 0 else 0
@@ -165,7 +186,7 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
             pass  # Don't let summary generation hide the real error
         
         logger.exception(
-            "backtest_orch|stage=failed|backtest_id=%s|error_type=%s",
+            "💥 backtest_orch|stage=failed|backtest_id=%s|error_type=%s",
             backtest_id,
             type(exc).__name__,
         )
@@ -219,7 +240,7 @@ async def trigger_backtest(
     )
 
     logger.info(
-        "backtest_persist|source=trigger|outcome=queued|backtest_id=%s|strategy_id=%s|"
+        "🆕 backtest_persist|source=trigger|outcome=queued|backtest_id=%s|strategy_id=%s|"
         "symbol=%s|timeframe=%s|db=committed",
         backtest.id,
         strategy.id,
@@ -284,7 +305,7 @@ async def receive_backtest_result(
         raise HTTPException(status_code=404, detail="Backtest not found.")
 
     logger.info(
-        "backtest_persist|source=http_callback|stage=recv|backtest_id=%s|payload_keys=%s",
+        "📥 backtest_persist|source=http_callback|stage=recv|backtest_id=%s|payload_keys=%s",
         backtest_id,
         list(result.keys()) if isinstance(result, dict) else "non-dict",
     )
@@ -308,7 +329,7 @@ async def receive_backtest_result(
     try:
         await db.commit()
         logger.info(
-            "backtest_persist|source=http_callback|outcome=db_committed|backtest_id=%s|row_status=%s|"
+            "💾 backtest_persist|source=http_callback|outcome=db_committed|backtest_id=%s|row_status=%s|"
             "strategy_id=%s",
             backtest_id,
             backtest.status.value,
@@ -316,7 +337,7 @@ async def receive_backtest_result(
         )
     except Exception:
         logger.exception(
-            "backtest_persist|source=http_callback|outcome=db_commit_failed|backtest_id=%s",
+            "❌ backtest_persist|source=http_callback|outcome=db_commit_failed|backtest_id=%s",
             backtest_id,
         )
         raise
@@ -324,7 +345,7 @@ async def receive_backtest_result(
     m = stored.get("metrics", {}) if isinstance(stored, dict) else {}
     total_trades = m.get("total_trades") if isinstance(m, dict) else None
     logger.info(
-        "backtest_persist|source=http_callback|metrics|backtest_id=%s|total_trades=%s|engine_ref=%s",
+        "📊 backtest_persist|source=http_callback|metrics|backtest_id=%s|total_trades=%s|engine_ref=%s",
         backtest_id,
         total_trades,
         stored.get("backtest_ref_id") if isinstance(stored, dict) else None,

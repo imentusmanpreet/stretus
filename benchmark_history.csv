@@ -1,0 +1,260 @@
+run_id,batch_id,timestamp_utc,model,case_id,case_name,category,status,latency_ms,prompt_tokens,completion_tokens,total_tokens,tool_name,tool_source,tool_parameters_json,response_content,response_raw_json,expected_tool,expected_tool_match,must_not_violations,expected_fields_match,score,error_message,system_prompt,system_prompt_chars,state_json,user_message
+470dbea4-e201-4af1-97e7-cfbd8092f3d6,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:19:47Z,meta-llama/llama-3.3-70b-instruct,adhoc-001,Ad-hoc user prompt,adhoc,success,7488,,,,,empty,{},,"{""id"": ""gen-1780654789-V5aQWjCJ3J0g2SXRwT1s"", ""model"": ""meta-llama/llama-3.3-70b-instruct"", ""content"": """", ""tool_calls"": []}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+27a9000f-9128-4cd3-9420-773a7c914d88,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:19:56Z,google/gemini-3.5-flash,adhoc-001,Ad-hoc user prompt,adhoc,success,8361,3183,1466,4649,respond_text,assistant_text,"{""message"": ""{ \""tool_name\"": \""default_api:modify_strategy_inputs\"", \""parameters\"": { \""session_id\"": \""adhoc-session\"", \""symbol\"": \""HDFCBANK\"", \""timeframe\"": \""5m\"", \""objective\"": \""intraday\"", \""sentiment\"": \""bullish\"", \""experience\"": \""intermediate\"", \""goal\"": \""Opening Range Breakout (ORB) on HDFC Bank\"", \""strategy_preset\"": \""orb\"", \""entry_window_start\"": \""09:15\"", \""entry_window_end\"": \""09:30\"" }, \""reasoning_trace\"": { \""user_intent\"": \""Create an Opening Range Breakout (ORB) strategy for HDFC Bank on a 5-minute timeframe.\"", \""experience_level_detected\"": \""intermediate\"", \""extracted_fields\"": { \""symbol\"": \""HDFCBANK\"", \""timeframe\"": \""5m\"", \""objective\"": \""intraday\"", \""sentiment\"": \""bullish\"", \""experience\"": \""intermediate\"", \""goal\"": \""Opening Range Breakout (ORB) on HDFC Bank\"", \""strategy_preset\"": \""orb\"", \""entry_window_start\"": \""09:15\"", \""entry_window_end\"": \""09:30\"" }, \""missing_fields\"": [], \""preset_detected\"": \""orb\"", \""why_this_tool\"": \""The user provided all 6 core strategy inputs along with specific risk/execution parameters (ORB range, R:R 1:2) in their initial message, so we use modify_strategy_inputs to register them in one go.\"", \""risk_flags\"": [] } }""}","{ ""tool_name"": ""default_api:modify_strategy_inputs"", ""parameters"": { ""session_id"": ""adhoc-session"", ""symbol"": ""HDFCBANK"", ""timeframe"": ""5m"", ""objective"": ""intraday"", ""sentiment"": ""bullish"", ""experience"": ""intermediate"", ""goal"": ""Opening Range Breakout (ORB) on HDFC Bank"", ""strategy_preset"": ""orb"", ""entry_window_start"": ""09:15"", ""entry_window_end"": ""09:30"" }, ""reasoning_trace"": { ""user_intent"": ""Create an Opening Range Breakout (ORB) strategy for HDFC Bank on a 5-minute timeframe."", ""experience_level_detected"": ""intermediate"", ""extracted_fields"": { ""symbol"": ""HDFCBANK"", ""timeframe"": ""5m"", ""objective"": ""intraday"", ""sentiment"": ""bullish"", ""experience"": ""intermediate"", ""goal"": ""Opening Range Breakout (ORB) on HDFC Bank"", ""strategy_preset"": ""orb"", ""entry_window_start"": ""09:15"", ""entry_window_end"": ""09:30"" }, ""missing_fields"": [], ""preset_detected"": ""orb"", ""why_this_tool"": ""The user provided all 6 core strategy inputs along with specific risk/execution parameters (ORB range, R:R 1:2) in their initial message, so we use modify_strategy_inputs to register them in one go."", ""risk_flags"": [] } }","{""id"": ""gen-1780654797-6UCSHt4OYGfO5YioZEII"", ""model"": ""google/gemini-3.5-flash-20260519"", ""content"": ""{\n  \""tool_name\"": \""default_api:modify_strategy_inputs\"",\n  \""parameters\"": {\n    \""session_id\"": \""adhoc-session\"",\n    \""symbol\"": \""HDFCBANK\"",\n    \""timeframe\"": \""5m\"",\n    \""objective\"": \""intraday\"",\n    \""sentiment\"": \""bullish\"",\n    \""experience\"": \""intermediate\"",\n    \""goal\"": \""Opening Range Breakout (ORB) on HDFC Bank\"",\n    \""strategy_preset\"": \""orb\"",\n    \""entry_window_start\"": \""09:15\"",\n    \""entry_window_end\"": \""09:30\""\n  },\n  \""reasoning_trace\"": {\n    \""user_intent\"": \""Create an Opening Range Breakout (ORB) strategy for HDFC Bank on a 5-minute timeframe.\"",\n    \""experience_level_detected\"": \""intermediate\"",\n    \""extracted_fields\"": {\n      \""symbol\"": \""HDFCBANK\"",\n      \""timeframe\"": \""5m\"",\n      \""objective\"": \""intraday\"",\n      \""sentiment\"": \""bullish\"",\n      \""experience\"": \""intermediate\"",\n      \""goal\"": \""Opening Range Breakout (ORB) on HDFC Bank\"",\n      \""strategy_preset\"": \""orb\"",\n      \""entry_window_start\"": \""09:15\"",\n      \""entry_window_end\"": \""09:30\""\n    },\n    \""missing_fields\"": [],\n    \""preset_detected\"": \""orb\"",\n    \""why_this_tool\"": \""The user provided all 6 core strategy inputs along with specific risk/execution parameters (ORB range, R:R 1:2) in their initial message, so we use modify_strategy_inputs to register them in one go.\"",\n    \""risk_flags\"": []\n  }\n}"", ""tool_calls"": []}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+d35a4308-ea85-4f70-af47-708b0ca89e0d,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:20:05Z,openai/gpt-oss-safeguard-20b,adhoc-001,Ad-hoc user prompt,adhoc,error,,,,,,,,,,,,,,,"Error code: 429 - {'error': {'message': 'Provider returned error', 'code': 429, 'metadata': {'raw': 'openai/gpt-oss-safeguard-20b is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations', 'provider_name': 'Groq'}}, 'user_id': 'user_3E2Eb17IcduCj9FlLXTJ4td8TRa'}","You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+fb298c8b-91a2-4f08-8b9e-a7cb773e338b,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:20:08Z,openai/gpt-5.3-chat,adhoc-001,Ad-hoc user prompt,adhoc,success,7335,3060,234,3294,ask_user_for_clarification,native_tool_call,"{""question"": ""Got it \u2014 ORB on HDFC Bank, 5-min intraday, long breakout after 9:30 with volume and 1:2 RR. Before I lock this in, what\u2019s your trading experience level (beginner, intermediate, expert)?"", ""reason"": ""Experience level is required to tune signal complexity and risk handling."", ""field"": ""experience""}",,"{""id"": ""gen-1780654809-Ceq7LfGqvGRXtIAcUBYQ"", ""model"": ""openai/gpt-5.3-chat-20260303"", ""content"": """", ""tool_calls"": [{""id"": ""call_e9jobwuyi41W6dNeTEMrszfm"", ""name"": ""ask_user_for_clarification"", ""arguments"": {""question"": ""Got it \u2014 ORB on HDFC Bank, 5-min intraday, long breakout after 9:30 with volume and 1:2 RR. Before I lock this in, what\u2019s your trading experience level (beginner, intermediate, expert)?"", ""reason"": ""Experience level is required to tune signal complexity and risk handling."", ""field"": ""experience""}}]}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+87ba46c4-55cf-487e-b1cf-ad825981a1a1,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:20:16Z,qwen/qwen3.6-27b,adhoc-001,Ad-hoc user prompt,adhoc,success,29268,4508,2048,6556,,empty,{},,"{""id"": ""gen-1780654817-lQO5uUlCCiTgUv1ZvWcM"", ""model"": ""qwen/qwen3.6-27b-20260422"", ""content"": """", ""tool_calls"": []}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+bce66033-c063-4372-8dab-f5761c4b3714,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:20:46Z,qwen/qwen3.7-max,adhoc-001,Ad-hoc user prompt,adhoc,success,30090,4508,1565,6073,modify_strategy_inputs,json_tool_call,"{""session_id"": ""adhoc-session"", ""symbol"": ""HDFCBANK.NS"", ""timeframe"": ""5m"", ""objective"": ""intraday"", ""sentiment"": ""bullish"", ""experience"": ""intermediate"", ""goal"": ""ORB breakout on HDFC Bank \u2014 trade breakout of first 15-min candle range with volume confirmation and 1:2 R:R"", ""strategy_preset"": ""orb"", ""direction"": ""long_only"", ""entry_window_start"": ""09:30"", ""volume_ratio_threshold"": 1.5}","{""tool_name"":""modify_strategy_inputs"",""parameters"":{""session_id"":""adhoc-session"",""symbol"":""HDFCBANK.NS"",""timeframe"":""5m"",""objective"":""intraday"",""sentiment"":""bullish"",""experience"":""intermediate"",""goal"":""ORB breakout on HDFC Bank — trade breakout of first 15-min candle range with volume confirmation and 1:2 R:R"",""strategy_preset"":""orb"",""direction"":""long_only"",""entry_window_start"":""09:30"",""volume_ratio_threshold"":1.5},""reasoning_trace"":{""user_intent"":""Create an Opening Range Breakout (ORB) intraday strategy for HDFC Bank on 5-min chart, buying breakouts above the first 15-min high with volume confirmation, SL at opposite side of ORB candle, target 1:2 R:R."",""experience_level_detected"":""intermediate"",""extracted_fields"":{""symbol"":""HDFCBANK.NS"",""timeframe"":""5m"",""objective"":""intraday"",""sentiment"":""bullish"",""direction"":""long_only"",""strategy_preset"":""orb"",""entry_window_start"":""09:30"",""risk_reward"":""1:2"",""stop_loss"":""opposite side of ORB candle"",""volume_condition"":""volume should increase""},""missing_fields"":[""experience (inferred as intermediate from detailed description)"",""explicit entry_window_end"",""per_trade_risk"",""daily_loss_cap"",""position_sizing_mode""],""preset_detected"":""orb"",""why_this_tool"":""User provided comprehensive strategy details including symbol, timeframe, objective, preset (ORB), direction, trading window, and risk settings — capturing all inputs in one pass as required."",""risk_flags"":[""Stop loss is dynamic (opposite side of ORB candle) rather than fixed % — backend must handle this via ORB preset logic"",""No explicit entry window end time specified — ORB typically fades after 10:30-11:00 IST"",""No per-trade risk or daily loss cap mentioned — will need to confirm before assembly""]}}","{""id"": ""gen-1780654847-RkzPmWDOfjj6qIAIaJ9o"", ""model"": ""qwen/qwen3.7-max-20260520"", ""content"": ""{\""tool_name\"":\""modify_strategy_inputs\"",\""parameters\"":{\""session_id\"":\""adhoc-session\"",\""symbol\"":\""HDFCBANK.NS\"",\""timeframe\"":\""5m\"",\""objective\"":\""intraday\"",\""sentiment\"":\""bullish\"",\""experience\"":\""intermediate\"",\""goal\"":\""ORB breakout on HDFC Bank \u2014 trade breakout of first 15-min candle range with volume confirmation and 1:2 R:R\"",\""strategy_preset\"":\""orb\"",\""direction\"":\""long_only\"",\""entry_window_start\"":\""09:30\"",\""volume_ratio_threshold\"":1.5},\""reasoning_trace\"":{\""user_intent\"":\""Create an Opening Range Breakout (ORB) intraday strategy for HDFC Bank on 5-min chart, buying breakouts above the first 15-min high with volume confirmation, SL at opposite side of ORB candle, target 1:2 R:R.\"",\""experience_level_detected\"":\""intermediate\"",\""extracted_fields\"":{\""symbol\"":\""HDFCBANK.NS\"",\""timeframe\"":\""5m\"",\""objective\"":\""intraday\"",\""sentiment\"":\""bullish\"",\""direction\"":\""long_only\"",\""strategy_preset\"":\""orb\"",\""entry_window_start\"":\""09:30\"",\""risk_reward\"":\""1:2\"",\""stop_loss\"":\""opposite side of ORB candle\"",\""volume_condition\"":\""volume should increase\""},\""missing_fields\"":[\""experience (inferred as intermediate from detailed description)\"",\""explicit entry_window_end\"",\""per_trade_risk\"",\""daily_loss_cap\"",\""position_sizing_mode\""],\""preset_detected\"":\""orb\"",\""why_this_tool\"":\""User provided comprehensive strategy details including symbol, timeframe, objective, preset (ORB), direction, trading window, and risk settings \u2014 capturing all inputs in one pass as required.\"",\""risk_flags\"":[\""Stop loss is dynamic (opposite side of ORB candle) rather than fixed % \u2014 backend must handle this via ORB preset logic\"",\""No explicit entry window end time specified \u2014 ORB typically fades after 10:30-11:00 IST\"",\""No per-trade risk or daily loss cap mentioned \u2014 will need to confirm before assembly\""]}}"", ""tool_calls"": []}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."
+6168af23-1478-4a60-b3fc-becde292fe3c,8fd66ac0-cb5e-4b69-86a4-9b299a842a5c,2026-06-05T10:21:17Z,anthropic/claude-sonnet-4.6,adhoc-001,Ad-hoc user prompt,adhoc,success,7384,5167,306,5473,modify_strategy_inputs,native_tool_call,"{""session_id"": ""adhoc-session"", ""symbol"": ""HDFCBANK.NS"", ""timeframe"": ""5m"", ""objective"": ""intraday"", ""sentiment"": ""bullish"", ""strategy_preset"": ""orb"", ""goal"": ""Opening Range Breakout on HDFC Bank \u2014 buy breakout above first 15-min high with volume confirmation, SL at ORB low, minimum 1:2 R:R"", ""entry_window_start"": ""09:15"", ""entry_window_end"": ""09:30"", ""direction"": ""long_only"", ""volume_ratio_threshold"": 1.5}",,"{""id"": ""gen-1780654877-mUMQvYjfUx3RtbPAFvpu"", ""model"": ""anthropic/claude-4.6-sonnet-20260217"", ""content"": """", ""tool_calls"": [{""id"": ""toolu_01JZprVyd7a8CzreiaScL92W"", ""name"": ""modify_strategy_inputs"", ""arguments"": {""session_id"": ""adhoc-session"", ""symbol"": ""HDFCBANK.NS"", ""timeframe"": ""5m"", ""objective"": ""intraday"", ""sentiment"": ""bullish"", ""strategy_preset"": ""orb"", ""goal"": ""Opening Range Breakout on HDFC Bank \u2014 buy breakout above first 15-min high with volume confirmation, SL at ORB low, minimum 1:2 R:R"", ""entry_window_start"": ""09:15"", ""entry_window_end"": ""09:30"", ""direction"": ""long_only"", ""volume_ratio_threshold"": 1.5}}]}",,,[],{},6/8,,"You are Stretus — an algo-trading strategy coach for Indian equities (NSE/BSE) and crypto spot.
+
+You operate in a tool-calling loop. Every action = exactly ONE tool call.
+Prose without a tool is only allowed via respond_text or after a backend tool result.
+
+CORE BEHAVIOR:
+- Co-build strategies WITH the user; adapt tone to beginner / intermediate / expert.
+- Parse ALL fields from free-form text in one pass — never re-ask for what the user already gave.
+- Never silently default RMS fields (stop_loss, take_profit, risk_reward, per_trade_risk, daily_loss_cap, position_sizing, trailing_stop, trading_window). Ask before defaulting.
+- Detect strategy presets by name OR mechanics: orb, orb_structural, trend_following, mean_reversion, smart_money, vwap_reversal, relative_strength, volatility_squeeze, opening_drive, mtf_confluence, options_flow_gamma, ema_pullback, range_breakout, volume_breakout_52w.
+- Supported timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- ""No changes"", ""all good"", ""proceed"" = APPROVAL when confirmation is pending. ""No"" alone = refusal.
+- Rejection/doubt (""this is trash"", ""won't work"") → mark_strategy_rejected, not assemble.
+- Targeted signal edits on existing plan → modify_signal_selection. Fresh planning → plan_strategy_signals.
+- Backtest ONLY when user explicitly asks. ""Assemble"" does NOT mean backtest.
+- Stock tips / buy-sell calls → respond_with_safety_boundary.
+- New users (""i am new"", ""kuch nahi pata"") → ask_user_for_clarification with onboarding, NOT start collecting symbol.
+
+AVAILABLE TOOLS:
+modify_strategy_inputs, ask_user_for_clarification, plan_strategy_signals,
+modify_signal_selection, assemble_strategy, run_backtest, mark_strategy_rejected,
+start_new_strategy, pause_workflow, respond_with_safety_boundary, respond_text
+
+OUTPUT FORMAT:
+Return exactly ONE tool call as JSON (no markdown, no prose before/after):
+{""tool_name"":""<name>"",""parameters"":{...},""reasoning_trace"":{...}}
+
+reasoning_trace is REQUIRED and must include:
+{
+  ""user_intent"": ""<one sentence>"",
+  ""experience_level_detected"": ""beginner|intermediate|expert|unknown"",
+  ""extracted_fields"": { ... all fields parsed from user message ... },
+  ""missing_fields"": [ ... ],
+  ""preset_detected"": ""<preset_name|null>"",
+  ""why_this_tool"": ""<one sentence>"",
+  ""risk_flags"": [ ... any concerns ... ]
+}",2332,"{""session_id"": ""adhoc-session"", ""mode"": ""collect_user_input"", ""market"": ""indian_stocks"", ""inputs"": {}, ""missing_inputs"": [], ""user_input_confirmed"": false, ""has_signal_plan"": false}","please help me create following strategy: Opening Range Breakout (ORB) — best for intraday momentum. Works extremely well on HDFC Bank. Logic: first 15 minutes of market open often decides institutional direction. You trade the breakout of the first 15-min candle range. Setup: 5-min chart. Market timing: observe from 9:15 → 9:30. Entry: BUY when price breaks above first 15-min high, volume should increase. Stop Loss: opposite side of ORB candle. Target: R:R 1:2 minimum."

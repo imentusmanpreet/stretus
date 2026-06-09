@@ -1,0 +1,58 @@
+name: stoch_bearish_cross
+category: momentum
+direction: bearish
+kind: crossover
+roles:
+- entry_trigger
+formula: STOCH_K < STOCH_D
+description: Stochastic %K crosses below %D — bearish momentum trigger.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bullish
+pairs_well_with: []
+contradicts:
+- stoch_bullish_cross
+params_by_timeframe:
+  1m:
+    fastk: 14
+  3m:
+    fastk: 14
+  5m:
+    fastk: 14
+  10m:
+    fastk: 14
+  15m:
+    fastk: 14
+  30m:
+    fastk: 14
+  1h:
+    fastk: 14
+  1d:
+    fastk: 14
+experience_fit:
+  beginner: 0.6
+  intermediate: 1.0
+  expert: 1.0
+intent_fit:
+  trend: 0.7
+  momentum: 1.0
+  breakout: 0.4
+  reversal: 0.2
+  scalping: 0.6
+  mean_reversion: 0.0
+  confirmation: 0.6
+match_when:
+  phrases:
+  - stoch(?:astic)?\s+bearish\s+cross
+  - '%k\s+crosses?\s+below\s+%d'
+  acts_as: entry_trigger
+  mirrors_to: stoch_bullish_cross

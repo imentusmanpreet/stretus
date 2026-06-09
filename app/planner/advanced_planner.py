@@ -70,10 +70,23 @@ class AdvancedPlanner:
         logger.info("advanced_planner|step1_run_pipeline")
         strategy_plan = await self.pipeline.plan(builder, ohlcv)
 
-        # Step 2: Extract semantic instructions from user goal/prompt
-        user_goal = getattr(builder, "goal", "") or ""
-        logger.info("advanced_planner|step2_semantic_extraction|goal=%s", user_goal[:60])
-        semantic_instructions = self.semantic_extractor.extract(user_goal)
+        # Step 2: Extract semantic instructions from the user's ORIGINAL full
+        # prompt when available — falling back to the (often-summarized) goal
+        # only if the original was not captured. The agent router's `goal`
+        # field is a paraphrase ("beginner-friendly swing trading") and
+        # discards the user's literal phrasing about indicators, thresholds,
+        # and SL/TP anchors. Always prefer the raw text.
+        user_prompt = (
+            getattr(builder, "original_user_prompt", None)
+            or getattr(builder, "goal", "")
+            or ""
+        )
+        logger.info(
+            "advanced_planner|step2_semantic_extraction|source=%s|prompt=%s",
+            "original_user_prompt" if getattr(builder, "original_user_prompt", None) else "goal",
+            user_prompt[:80],
+        )
+        semantic_instructions = self.semantic_extractor.extract(user_prompt)
 
         # Step 3: Validate family signal fit
         if semantic_instructions.strategy_family:

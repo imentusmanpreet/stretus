@@ -41,16 +41,25 @@ def validate_plan(plan: StrategyPlan) -> None:
                 f"does not align with sentiment={plan.sentiment}"
             )
 
-    # 4. No signal may appear in two roles simultaneously.
+    # 4. Every exit filter must be opposite to sentiment (or neutral) — same rule as exit_trigger.
+    for picked in plan.exit_filters:
+        if picked.direction not in {expected_exit_dir, "neutral"}:
+            raise PlanInvariantViolation(
+                f"exit_filter '{picked.name}' direction={picked.direction} "
+                f"is not opposite of sentiment={plan.sentiment} (expected {expected_exit_dir})"
+            )
+
+    # 5. No signal may appear in two roles simultaneously.
     role_names = [plan.entry_trigger.name]
     role_names.extend(p.name for p in plan.entry_filters)
     role_names.append(plan.exit_trigger.name)
+    role_names.extend(p.name for p in plan.exit_filters)
     if len(set(role_names)) != len(role_names):
         raise PlanInvariantViolation(
             f"signal appears in multiple roles: {role_names}"
         )
 
-    # 5. SL/TP must be positive and TP > SL (otherwise risk:reward < 1).
+    # 6. SL/TP must be positive and TP > SL (otherwise risk:reward < 1).
     if plan.sl_pct <= 0 or plan.tp_pct <= 0:
         raise PlanInvariantViolation(f"sl_pct/tp_pct must be positive: sl={plan.sl_pct} tp={plan.tp_pct}")
     if plan.tp_pct < plan.sl_pct:

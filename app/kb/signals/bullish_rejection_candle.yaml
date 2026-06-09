@@ -2,35 +2,52 @@ name: bullish_rejection_candle
 category: pattern
 direction: bullish
 kind: pattern
-roles: [entry_trigger, entry_filter]
-formula: "(CLOSE - LOW) / (HIGH - LOW) > {wick_ratio} AND CLOSE > OPEN"
-description: "Hammer-style candle: long lower wick rejected by buyers, close in upper portion of range."
-
-works_best_on: [3m, 5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m]
+roles:
+- entry_trigger
+- entry_filter
+formula: (CLOSE - LOW) / (HIGH - LOW) > {wick_ratio} AND CLOSE > OPEN
+description: 'Hammer-style candle: long lower wick rejected by buyers, close in upper portion of range.'
+works_best_on:
+- 3m
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bearish
-
-pairs_well_with: [vwap_reclaim_bullish, ema_pullback_bullish, rsi_oversold, price_below_bb_lower]
-contradicts: [bearish_rejection_candle]
-
+- sentiment: bearish
+pairs_well_with:
+- vwap_reclaim_bullish
+- ema_pullback_bullish
+- rsi_oversold
+- price_below_bb_lower
+contradicts:
+- bearish_rejection_candle
 params_by_timeframe:
-  1m:   {wick_ratio: 0.66}
-  3m:   {wick_ratio: 0.66}
-  5m:   {wick_ratio: 0.66}
-  10m:  {wick_ratio: 0.66}
-  15m:  {wick_ratio: 0.66}
-  30m:  {wick_ratio: 0.66}
-  1h:   {wick_ratio: 0.66}
-  1d:   {wick_ratio: 0.66}
-
+  1m:
+    wick_ratio: 0.66
+  3m:
+    wick_ratio: 0.66
+  5m:
+    wick_ratio: 0.66
+  10m:
+    wick_ratio: 0.66
+  15m:
+    wick_ratio: 0.66
+  30m:
+    wick_ratio: 0.66
+  1h:
+    wick_ratio: 0.66
+  1d:
+    wick_ratio: 0.66
 experience_fit:
   beginner: 1.0
   intermediate: 1.0
   expert: 0.8
-
 intent_fit:
   trend: 0.5
   momentum: 0.7
@@ -39,3 +56,12 @@ intent_fit:
   scalping: 0.7
   mean_reversion: 1.0
   confirmation: 0.8
+match_when:
+  phrases:
+  - bullish\s+rejection\s+candle
+  - long[\s\-]*wick\s+down
+  - hammer\s+candle
+  - bullish\s+pin\s*bar
+  - rejection\s+candle\s+(?:at|near)\s+(?:support|low)
+  acts_as: entry_filter
+  mirrors_to: bearish_rejection_candle

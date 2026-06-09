@@ -1,0 +1,72 @@
+name: price_below_sma
+category: trend
+direction: bearish
+kind: regime
+roles:
+- entry_filter
+- exit_trigger
+- exit_filter
+formula: CLOSE < SMA({window})
+description: Current close is below the SMA(window) — bearish regime / long-exit signal.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bullish
+  role: entry_filter
+pairs_well_with:
+- sma_cross_down
+- price_cross_below_sma
+contradicts:
+- is_above_sma
+- price_cross_above_sma
+params_by_timeframe:
+  1m:
+    window: 20
+  3m:
+    window: 20
+  5m:
+    window: 20
+  10m:
+    window: 20
+  15m:
+    window: 20
+  30m:
+    window: 20
+  1h:
+    window: 50
+  1d:
+    window: 50
+experience_fit:
+  beginner: 1.0
+  intermediate: 0.9
+  expert: 0.6
+intent_fit:
+  trend: 1.0
+  momentum: 0.4
+  breakout: 0.0
+  reversal: 0.4
+  scalping: 0.3
+  mean_reversion: 0.4
+  confirmation: 0.6
+match_when:
+  phrases:
+  - (?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|are\s+)?(?:below|under|<)\s+(?:the\s+)?(\d+)\s*sma
+  - (?:price|close)s?\s+(?:below|under|<)\s+sma\s*\(?\s*(\d+)\s*\)?
+  - (\d+)[\s\-]*(?:day|period)?\s*sma\s+(?:as\s+)?(?:a\s+)?(?:dynamic\s+|key\s+|major\s+)?(?:resistance|ceiling|overhead)
+  - sma\s*\(?\s*(\d+)\s*\)?\s+(?:as\s+|acts?\s+as\s+)?(?:a\s+)?(?:dynamic\s+)?(?:resistance|ceiling)
+  acts_as: exit_trigger
+  mirrors_to: price_cross_above_sma
+  extract_params:
+    window:
+      from_group: 1
+      default: 20
+      kind: int

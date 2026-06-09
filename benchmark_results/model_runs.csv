@@ -1,0 +1,1589 @@
+id,batch_id,timestamp_utc,model,status,system_prompt,user_prompt,response,latency_ms,prompt_tokens,completion_tokens,total_tokens,temperature,max_tokens,openrouter_id,error_message
+f8ca6edc-6b3e-4d30-94a5-ee51acadc5ad,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:15:40Z,meta-llama/llama-3.3-70b-instruct,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","**Bullish MACD Trend Shift Strategy**
+
+Here are the key points of the strategy:
+
+* Enter a BUY trade when the MACD line crosses above the MACD signal line and the close price crosses above the 50-period SMA.
+* Exit the BUY trade when the MACD line crosses below the MACD signal line and the close price crosses below the 50-period SMA.
+* The strategy aims to capture early upward momentum with trend confirmation, using clean entry and exit confirmations to avoid false signals.
+
+```json
+{
+  ""strategy_name"": ""bullish_macd_trend_shift"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""AAPL"",
+  ""timeframe"": ""1d"",
+  ""direction"": ""long"",
+  ""objective"": ""swing_trading"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""macd_crossover"",
+      ""macd_fast"": 12,
+      ""macd_slow"": 26,
+      ""macd_signal"": 9,
+      ""condition"": ""macd_line_above_signal_line""
+    },
+    ""filters"": [
+      {
+        ""type"": ""sma_crossover"",
+        ""sma_period"": 50,
+        ""condition"": ""close_price_above_sma""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""percentage"",
+      ""percentage"": 10
+    },
+    ""take_profit"": {
+      ""type"": ""percentage"",
+      ""percentage"": 10
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""fixed_fraction"",
+      ""fraction"": 1
+    }
+  }
+}
+```
+
+**Assumptions and Substitutions:**
+
+* The strategy assumes that the MACD and SMA indicators are available and functional.
+* No substitutions were made, as the strategy logic is straightforward and uses standard indicators.
+* The strategy does not include any short selling, as per the problem statement.
+* The risk management parameters (stop loss and target profit) are set to 10% each, as specified in the problem statement.",13087,836,438,1274,0.2,2048,gen-1780658142-u2N9Nv1eq9VVpFqjo4ym,
+3e3038c0-c334-4241-b91c-988c4343aae8,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:15:54Z,google/gemini-3.5-flash,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","### Strategy Overview
+
+* **Trend & Momentum Convergence:** Combines a short-term momentum indicator (MACD crossover) with a medium-term trend filter (50-day SMA) to ensure trades are only taken in the direction of an emerging bullish trend.
+* **Dual-Confirmation Entry:** Requires both the MACD line to cross above the signal line and the price to close above the 50 SMA, reducing the probability of false breakout signals.
+* **Symmetrical Risk Profile:** Employs a strict 10% stop-loss and 10% take-profit target to maintain a 1:1 risk-to-reward ratio, suitable for medium-term swing trading.
+* **Multi-Layered Exit:** In addition to fixed percentage targets, the strategy exits early if either technical indicator reverses (MACD bearish cross or price closing below the 50 SMA) to preserve capital.
+
+### Strategy JSON
+
+```json
+{
+  ""strategy_name"": ""MACD Trend Shift"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""AAPL"",
+  ""timeframe"": ""1d"",
+  ""direction"": ""long"",
+  ""objective"": ""swing trend reversal"",
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""dual_confirmation"",
+      ""condition"": ""macd_cross_above_signal AND close_cross_above_sma_50""
+    },
+    ""filters"": [
+      {
+        ""type"": ""macd_settings"",
+        ""value"": ""fast_length=12, slow_length=26, signal_length=9""
+      },
+      {
+        ""type"": ""sma_settings"",
+        ""value"": ""length=50""
+      }
+    ]
+  },
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""percentage"",
+      ""value"": 10.0
+    },
+    ""take_profit"": {
+      ""type"": ""percentage"",
+      ""value"": 10.0
+    },
+    ""technical_exit"": {
+      ""type"": ""either_condition"",
+      ""conditions"": [
+        ""macd_cross_below_signal"",
+        ""close_cross_below_sma_50""
+      ]
+    }
+  },
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""fixed_fractional"",
+      ""risk_pct"": 2.0
+    }
+  }
+}
+```
+
+### Assumptions & Substitutions
+
+* **Symbol Selection:** `AAPL` is used as a representative liquid equity symbol for swing trading; however, this strategy can be applied to any highly liquid large-cap stock or index ETF.
+* **Execution Timing:** Since this is a daily swing trading strategy, entry and exit signals are assumed to be evaluated and executed at the daily market close.
+* **Technical Exit Priority:** The technical exit conditions (`macd_cross_below_signal` or `close_cross_below_sma_50`) act as an emergency stop/early profit-taking mechanism before the hard 10% stop-loss or take-profit levels are hit.",10584,923,1842,2765,0.2,2048,gen-1780658155-EQe9ahgOUf59dRuMnHRc,
+e53a65c9-14e1-4a9d-ad23-9cdcd3670e5d,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:16:06Z,openai/gpt-oss-safeguard-20b,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","**Strategy Overview**
+
+- Uses a bullish MACD crossover (12,26,9) combined with a close‑price crossover above the 50‑period SMA to confirm early upward momentum.  
+- Trades only long positions; no short selling.  
+- Stops at 10 % loss and takes 10 % profit, aiming for a 1:1 risk‑reward ratio.  
+- Designed for swing or positional timeframes (daily in this example).  
+
+```json
+{
+  ""strategy_name"": ""bullish_macd_trend_shift"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""SPY"",
+  ""timeframe"": ""daily"",
+  ""direction"": ""long"",
+  ""objective"": ""swing_positional_bullish_trend_shift"",
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""macd_cross_above_signal"",
+      ""fast_period"": 12,
+      ""slow_period"": 26,
+      ""signal_period"": 9
+    },
+    ""filters"": [
+      {
+        ""type"": ""sma_cross_above"",
+        ""period"": 50,
+        ""condition"": ""close > sma(close,50)""
+      }
+    ]
+  },
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""percentage"",
+      ""value"": 10
+    },
+    ""take_profit"": {
+      ""type"": ""percentage"",
+      ""value"": 10
+    }
+  },
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+**Assumptions / Substitutions**
+
+- The strategy is applied to the SPY ETF on a daily timeframe; replace `symbol` and `timeframe` as needed.  
+- The SMA cross condition is expressed as a simple filter; if your platform requires a separate trigger, adjust accordingly.  
+- Stop‑loss and take‑profit are set as fixed percentages; if your platform uses price levels, convert the percentages to actual price points.",3927,893,1421,2314,0.2,2048,gen-1780658166-LQJNpgwGIyDzgnYdCTSV,
+e08ecce5-3f5e-4d83-8963-7120bffddeef,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:16:10Z,openai/gpt-5.3-chat,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","- Combines MACD bullish crossover with price reclaiming the 50 SMA to confirm early trend reversal  
+- Dual confirmation helps filter weak signals and reduces false breakouts  
+- Exit uses the inverse signals to capture most of the trend while avoiding late exits  
+- Fixed 10% stop loss and take profit keep risk/reward simple and consistent  
+
+```json
+{
+  ""strategy_name"": ""MACD Trend Shift Bullish"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""SPY"",
+  ""timeframe"": ""1d"",
+  ""direction"": ""long"",
+  ""objective"": ""capture early bullish trend reversals"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""indicator_confluence"",
+      ""conditions"": [
+        {
+          ""type"": ""macd_crossover"",
+          ""fast"": 12,
+          ""slow"": 26,
+          ""signal"": 9,
+          ""condition"": ""macd_line_cross_above_signal""
+        },
+        {
+          ""type"": ""price_cross"",
+          ""indicator"": ""sma"",
+          ""period"": 50,
+          ""condition"": ""close_cross_above""
+        }
+      ]
+    }
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""percentage"",
+      ""value"": 10
+    },
+    ""take_profit"": {
+      ""type"": ""percentage"",
+      ""value"": 10
+    },
+    ""signal_exit"": {
+      ""type"": ""indicator_confluence"",
+      ""conditions"": [
+        {
+          ""type"": ""macd_crossover"",
+          ""fast"": 12,
+          ""slow"": 26,
+          ""signal"": 9,
+          ""condition"": ""macd_line_cross_below_signal""
+        },
+        {
+          ""type"": ""price_cross"",
+          ""indicator"": ""sma"",
+          ""period"": 50,
+          ""condition"": ""close_cross_below""
+        }
+      ]
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""fixed_fraction"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+Assumptions:
+- Exit is triggered if either stop/target is hit or bearish signal appears (not strictly requiring both exit conditions simultaneously).
+- Daily timeframe chosen for swing/positional context; can be adjusted to 4h or weekly depending on preference.",6706,829,560,1389,0.2,2048,gen-1780658171-c3S5053xpn00VIS3lQ1M,
+25a6a0d5-7171-47cd-b839-fd0bf8ba76c0,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:16:17Z,qwen/qwen3.6-27b,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.",,69038,912,2048,2960,0.2,2048,gen-1780658178-bzMz3nvH6QmgPz6Jggok,
+48792b23-81dd-49d2-b41f-e8532a820f1d,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:17:27Z,qwen/qwen3.7-max,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","* This strategy captures swing and positional trend reversals by combining MACD momentum shifts with a 50-period SMA trend filter.
+* Entry requires both the MACD line to cross above its signal line and the price to cross above the 50 SMA, ensuring strong bullish confirmation.
+* Exits are triggered by a hard 10% stop loss, a 10% take profit, or an early indicator-based exit if either the MACD turns bearish or the price drops below the 50 SMA.
+* The strategy is strictly long-only, focusing on capitalizing on early upward momentum while avoiding short-side volatility.
+
+```json
+{
+  ""strategy_name"": ""Bullish MACD Trend Shift"",
+  ""asset_class"": ""equity"",
+  ""symbol"": ""AAPL"",
+  ""timeframe"": ""1d"",
+  ""direction"": ""long"",
+  ""objective"": ""swing trend reversal and momentum capture"",
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""macd_bullish_cross"",
+      ""fast_period"": 12,
+      ""slow_period"": 26,
+      ""signal_period"": 9
+    },
+    ""filters"": [
+      {
+        ""type"": ""price_cross_above_sma"",
+        ""period"": 50
+      }
+    ]
+  },
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""percent"",
+      ""value"": 10
+    },
+    ""take_profit"": {
+      ""type"": ""percent"",
+      ""value"": 10
+    },
+    ""signal_exit"": {
+      ""type"": ""bearish_cross"",
+      ""conditions"": [
+        ""macd_line < macd_signal"",
+        ""close < sma(50)""
+      ],
+      ""logic"": ""OR""
+    }
+  },
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 2
+    }
+  }
+}
+```
+
+### Assumptions & Substitutions
+* **Timeframe:** Set to `1d` (Daily) as it is the standard timeframe for swing and positional trading.
+* **Symbol:** Used `AAPL` as a placeholder; this can be applied to any liquid equity or index.
+* **Exit Logic:** The indicator-based exit (`signal_exit`) uses an `OR` condition rather than `AND`. Exiting when *either* the MACD turns bearish *or* the price breaks the 50 SMA is standard practice to protect capital and lock in profits before a full trend reversal confirms. 
+* **Position Sizing:** Assigned a standard `2%` risk per trade for the risk-based sizing model, as specific portfolio risk parameters were not provided.",42102,912,3058,3970,0.2,2048,gen-1780658248-2RMjuK8r4btwalzFKevG,
+beb74e91-9075-41f7-a6b4-a419267654cb,b22b1b16-2f91-4eea-9af5-05ca2ba4ff90,2026-06-05T11:18:10Z,anthropic/claude-sonnet-4.6,success,"STRUCTURED RESPONSE CONTRACT
+
+When generating a strategy, ALWAYS return a compact structured JSON object.
+
+The JSON must:
+
+* be deterministic
+* contain only meaningful fields
+* avoid duplicated information
+* avoid verbose metadata
+* avoid internal diagnostics
+* avoid provenance/debug fields
+* avoid repeated nested mirrors of the same data
+* avoid explanatory text inside JSON
+* avoid null fields unless explicitly required
+
+DO NOT include:
+
+* created_at
+* provenance
+* content_hash
+* fidelity_summary
+* fidelity_findings
+* semantic_intent
+* inputs_snapshot
+* agent_decision
+* validation_codes
+* internal engine diagnostics
+* duplicate readbacks
+* duplicate flattened fields
+* processing_status
+* unsupported indicators list
+* internal scoring fields
+* unmapped_details
+* clarification metadata
+* duplicated stop loss / take profit mirrors
+* duplicate objective/sentiment fields
+* debugging information
+
+PREFERRED STRATEGY JSON FORMAT
+
+```json
+{
+  ""strategy_name"": ""ORB Momentum Breakout"",
+  ""asset_class"": ""equity_cash"",
+  ""symbol"": ""HDFCBANK.NS"",
+  ""timeframe"": ""5m"",
+  ""direction"": ""long"",
+  ""objective"": ""intraday momentum breakout"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""opening_range_breakout"",
+      ""range_minutes"": 15,
+      ""condition"": ""price_break_above_high""
+    },
+    ""filters"": [
+      {
+        ""type"": ""volume_confirmation"",
+        ""value"": ""volume > sma(volume, 20) * 1.5""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""stop_loss"": {
+      ""type"": ""range_low""
+    },
+    ""take_profit"": {
+      ""type"": ""risk_reward"",
+      ""ratio"": 2
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 1
+    }
+  }
+}
+```
+
+JSON RULES
+
+* Keep nesting shallow.
+* Prefer readable structures over deeply abstract DSLs.
+* Prefer explicit conditions over encoded expressions.
+* Use arrays only when multiple items genuinely exist.
+* Keep indicator params close to the indicator itself.
+* Use consistent naming conventions.
+* Use snake_case everywhere.
+* Keep output under 120 lines whenever possible.
+
+FIELD REQUIREMENTS
+
+Required top-level fields:
+
+* strategy_name
+* asset_class
+* symbol
+* timeframe
+* direction
+* objective
+* entry
+* exit
+* risk
+
+ENTRY RULES
+
+Entry must contain:
+
+* trigger
+* optional filters
+
+EXIT RULES
+
+Exit must contain at least one:
+
+* stop_loss
+* take_profit
+* trailing_stop
+
+RISK RULES
+
+Risk should only contain:
+
+* sizing
+* leverage (optional)
+* max_positions (optional)
+
+VALIDATION RULES
+
+If the strategy contains unsupported indicators/functions:
+
+* do NOT generate invalid expressions
+* replace unsupported logic with the closest supported equivalent
+* explicitly mention the substitution outside the JSON
+
+RESPONSE FORMAT
+
+When returning a strategy:
+
+1. Briefly explain the strategy in 2–5 bullet points.
+2. Return the compact JSON.
+3. Mention any assumptions or substitutions separately.
+
+Do NOT wrap explanations inside the JSON.","Create a bullish MACD Trend Shift strategy for swing or positional trading.
+
+Strategy Logic:
+
+Enter a BUY trade when:
+MACD(12,26,9) MACD line crosses above the MACD signal line
+Close price crosses above the 50-period SMA
+Both conditions should confirm bullish momentum and possible trend reversal before entry.
+Exit Logic:
+
+Exit the BUY trade when:
+MACD(12,26,9) MACD line crosses below the MACD signal line
+Close price crosses below the 50-period SMA
+Risk Management:
+
+Stop Loss: 10%
+Target Profit: 10%
+No short selling
+Focus on capturing early upward momentum with trend confirmation.
+Use clean entry and exit confirmations to avoid false signals and improve trend-following accuracy.","Here's a breakdown of the **Bullish MACD Trend Shift** strategy before the JSON:
+
+- **Entry** requires dual confirmation: MACD line crossing above the signal line **and** price crossing above the 50 SMA — reducing false breakout entries.
+- **Exit** is triggered when either condition reverses: MACD line drops below signal **or** price falls below 50 SMA — protecting gains early.
+- **Stop Loss** is fixed at 10% below entry to cap downside on failed breakouts.
+- **Take Profit** is fixed at 10% above entry for a symmetric 1:1 risk-reward on swing/positional holds.
+- No short trades are taken — purely directional long-only momentum strategy.
+
+---
+
+```json
+{
+  ""strategy_name"": ""Bullish MACD Trend Shift"",
+  ""asset_class"": ""equity"",
+  ""symbol"": ""any"",
+  ""timeframe"": ""1D"",
+  ""direction"": ""long_only"",
+  ""objective"": ""capture early upward momentum with dual trend confirmation on swing or positional trades"",
+
+  ""entry"": {
+    ""trigger"": {
+      ""type"": ""dual_confirmation"",
+      ""logic"": ""AND"",
+      ""conditions"": [
+        {
+          ""id"": ""macd_crossover"",
+          ""indicator"": ""MACD"",
+          ""params"": {
+            ""fast"": 12,
+            ""slow"": 26,
+            ""signal"": 9
+          },
+          ""condition"": ""macd_line crosses_above signal_line""
+        },
+        {
+          ""id"": ""price_above_sma"",
+          ""indicator"": ""SMA"",
+          ""params"": {
+            ""period"": 50,
+            ""source"": ""close""
+          },
+          ""condition"": ""close crosses_above sma_50""
+        }
+      ]
+    },
+    ""filters"": [
+      {
+        ""type"": ""direction_filter"",
+        ""value"": ""no_short_trades_allowed""
+      }
+    ]
+  },
+
+  ""exit"": {
+    ""take_profit"": {
+      ""type"": ""fixed_percent"",
+      ""value_pct"": 10
+    },
+    ""stop_loss"": {
+      ""type"": ""fixed_percent"",
+      ""value_pct"": 10
+    },
+    ""signal_exit"": {
+      ""type"": ""dual_exit"",
+      ""logic"": ""OR"",
+      ""conditions"": [
+        {
+          ""id"": ""macd_crossunder"",
+          ""indicator"": ""MACD"",
+          ""params"": {
+            ""fast"": 12,
+            ""slow"": 26,
+            ""signal"": 9
+          },
+          ""condition"": ""macd_line crosses_below signal_line""
+        },
+        {
+          ""id"": ""price_below_sma"",
+          ""indicator"": ""SMA"",
+          ""params"": {
+            ""period"": 50,
+            ""source"": ""close""
+          },
+          ""condition"": ""close crosses_below sma_50""
+        }
+      ]
+    }
+  },
+
+  ""risk"": {
+    ""position_sizing"": {
+      ""type"": ""risk_based"",
+      ""risk_pct"": 10
+    },
+    ""short_selling"": false,
+    ""max_positions"": 1
+  }
+}
+```
+
+---
+
+**Assumptions & Notes:**
+
+| Item | Detail |
+|---|---|
+| **Timeframe** | Set to `1D` (daily) for swing/positional trading; adjust to `1W` for positional-only |
+| **Exit Priority** | Fixed SL/TP at 10% takes precedence over signal-based exit if hit first |
+| **AND Logic on Entry** | Both MACD crossover and SMA crossover must occur on the **same candle** or within a configurable lookback window |
+| **OR Logic on Exit** | Either reversal condition alone is sufficient to close the trade — conservative approach |
+| **Symbol** | Set to `any` — strategy is symbol-agnostic; apply to liquid large-cap equities for best results |
+| **No Pyramiding** | `max_positions: 1` ensures no re-entry while a trade is active |",17420,993,1009,2002,0.2,2048,gen-1780658291-UV3yodjmTIr8NkPjKDEo,

@@ -1,0 +1,62 @@
+name: price_above_wma
+category: trend
+direction: bullish
+kind: regime
+roles:
+- entry_trigger
+- entry_filter
+formula: CLOSE > WMA({window})
+description: Close above Weighted MA — recency-weighted bullish trend filter.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bearish
+pairs_well_with: []
+contradicts: []
+params_by_timeframe:
+  1m:
+    window: 20
+  3m:
+    window: 20
+  5m:
+    window: 20
+  10m:
+    window: 20
+  15m:
+    window: 20
+  30m:
+    window: 20
+  1h:
+    window: 20
+  1d:
+    window: 20
+experience_fit:
+  beginner: 0.6
+  intermediate: 1.0
+  expert: 1.0
+intent_fit:
+  trend: 1.0
+  momentum: 0.6
+  breakout: 0.5
+  reversal: 0.0
+  scalping: 0.3
+  mean_reversion: 0.0
+  confirmation: 0.8
+match_when:
+  phrases:
+  - (?:price|close)\s+above\s+wma
+  - weighted\s+moving\s+average
+  acts_as: entry_trigger
+  extract_params:
+    window:
+      from_group: 1
+      default: 14
+      kind: int

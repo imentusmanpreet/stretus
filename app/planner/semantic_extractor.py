@@ -84,6 +84,12 @@ class SemanticExtractor:
         (r"swing\s+low\s+as\s+(?:(?:structural|the|a)\s+)?stop(?:\s+loss)?", "swing_low"),
         (r"vwap\s+(?:level\s+)?as\s+(?:the\s+)?stop(?:\s+loss)?", "vwap_deviation"),
         (r"opposite\s+(?:end|side)\s+of\s+(?:the\s+)?(?:orb|range|candle)\s+as\s+(?:the\s+)?stop", "opposite_side"),
+        # "Stop Loss: Opposite side of the range" — colon-delimited structural format
+        (r"stop(?:\s*loss)?\s*:\s*opposite\s+(?:side|end)\s+of\s+(?:the\s+)?range", "opposite_side"),
+        # "stop at/is the opposite side of the range"
+        (r"stop(?:\s+loss)?\s+(?:at|is|=)\s+(?:the\s+)?opposite\s+(?:side|end)", "opposite_side"),
+        # "opposite side of the range" alone (context: following "stop loss:")
+        (r"opposite\s+side\s+of\s+(?:the\s+)?(?:orb|range)", "opposite_side"),
         # ── Backward-order patterns: "stop at/below anchor" ──────────────────
         (r"below\s+(?:\w+\s+)*reclaim\s+candle\s+low", "candle_low"),
         (r"below\s+(?:the\s+)?(?:vwap\s+)?reclaim\s+candle", "candle_low"),
@@ -129,18 +135,30 @@ class SemanticExtractor:
         (r"dynamic\s+(?:trail|trailing)", "dynamic"),
     ]
 
-    # RR patterns
+    # RR patterns — CONVENTION: ratio is always reward/risk (2.0 means 2:1 reward:risk).
+    # "2:1 Risk Reward" means 2 reward for 1 risk → ratio = 2.0
+    # "1:2 Risk Reward" means 1 reward for 2 risk → ratio = 0.5 (rare, but possible)
     RR_PATTERNS = [
-        (r"(?:risk[:\s]+)?reward\s*[:\s=]+\s*1\s*:\s*(\d+\.?\d*)", "rr_ratio"),
-        (r"(\d+\.?\d*)\s*:\s*1\s+(?:risk|rr)", "rr_inverted"),
-        (r"minimum\s+(?:1\s*:\s*)?(\d+\.?\d*)\s+(?:rr|risk[:\s]+reward)", "minimum_rr"),
-        (r"rr\s+of\s+1:(\d+\.?\d*)", "rr_ratio"),
-        # Suffix patterns: "1:2 RR", "1:3 r:r", "1:2 risk reward"
-        (r"\b1\s*[:/]\s*(\d+\.?\d*)\s+(?:rr|r:r|risk[:\s]*reward|reward)", "rr_ratio"),
-        # "R:R 1:2", "risk reward 1:2"
-        (r"(?:r:r|rr|risk[\s:]+reward)\s+1\s*[:/]\s*(\d+\.?\d*)", "rr_ratio"),
-        # "minimum 1:2", "at least 1:2", "min RR 1:3"
-        (r"(?:minimum|min|at\s+least)\s+(?:rr\s+)?1\s*[:/]\s*(\d+\.?\d*)", "minimum_rr"),
+        # ── Reward-first notation (N:1) — "2:1 RR", "2:1 Risk Reward", "3:1 reward" ──
+        # The FIRST number is the REWARD, second is RISK (1). ratio = N
+        (r"(\d+\.?\d*)\s*:\s*1\s+(?:r(?:isk)?[\s:\-]*r(?:eward)?|reward|rr)\b",  "rr_reward_first"),
+        (r"(\d+\.?\d*)\s*:\s*1\s+(?:risk[\s\-]*reward|reward[\s\-]*risk)",        "rr_reward_first"),
+        (r"(\d+\.?\d*)\s*[x×]\s*(?:rr|risk[\s\-]*reward|reward)",                 "rr_reward_first"),
+        # "take profit: 2:1" with no trailing word — assume reward:risk
+        (r"(?:take[\s\-]*profit|tp|target)\s*:?\s*(\d+\.?\d*)\s*:\s*1",           "rr_reward_first"),
+        # ── Risk-first notation "1:N" — "1:2 RR", "risk:reward 1:2" ──────────────
+        # The first number is risk (1), second is reward (N). ratio = N
+        (r"(?:risk[:\s]+)?reward\s*[:\s=]+\s*1\s*:\s*(\d+\.?\d*)",               "rr_ratio"),
+        (r"rr\s+of\s+1:(\d+\.?\d*)",                                              "rr_ratio"),
+        (r"\b1\s*[:/]\s*(\d+\.?\d*)\s+(?:rr|r:r|risk[:\s]*reward|reward)",       "rr_ratio"),
+        (r"(?:r:r|rr|risk[\s:]+reward)\s+1\s*[:/]\s*(\d+\.?\d*)",                "rr_ratio"),
+        (r"(?:minimum|min|at\s+least)\s+(?:rr\s+)?1\s*[:/]\s*(\d+\.?\d*)",      "minimum_rr"),
+        (r"minimum\s+(?:1\s*:\s*)?(\d+\.?\d*)\s+(?:rr|risk[:\s]+reward)",        "minimum_rr"),
+        # ── R-multiple notation: "2R target", "1.5R profit" ──────────────────────
+        (r"\b(\d+(?:\.\d+)?)\s*r\b(?:\s+(?:target|profit|booking|exit))?",       "rr_ratio"),
+        # ── LEGACY (was causing the 2:1 → 0.5 inversion bug) ─────────────────────
+        # "N:1 risk" alone (no "reward" word) — ratio = 1/N (rarely written this way)
+        (r"(\d+\.?\d*)\s*:\s*1\s+risk\b(?!\s*[\-:]?\s*reward)",                  "rr_inverted"),
     ]
 
     # Reference symbol patterns
@@ -164,10 +182,23 @@ class SemanticExtractor:
         (r"(?:after|trade after|only after|from)\s+(\d{1,2}):?(\d{2})?\s*(?:am|a\.m\.|AM)", "start_time"),
         (r"(?:before|trade before|until)\s+(\d{1,2}):?(\d{2})?\s*(?:pm|p\.m\.|PM)", "end_time"),
         (r"(?:first|initial)\s+(\d+)\s+(?:minutes?|min)", "duration_from_open"),
+        # "first 1-hour range", "first 2-hour range", "initial 30-minute range" — ORB definition
+        (r"(?:first|initial|opening)\s+(\d+)[\s\-]*hour\s+(?:range|candle|session|period)", "orb_duration_hours"),
+        (r"(?:first|initial|opening)\s+(\d+)[\s\-]*(?:minute|min)\s+(?:range|candle|session)", "orb_duration_minutes"),
+        (r"first\s+hour\s+(?:range|candle|session|period)", "orb_duration_1h"),
         (r"(?:avoid|skip)\s+(?:market\s+)?open.*?(\d+)\s+(?:minutes?|min)", "blackout_from_open"),
-        (r"(?:during\s+)?(?:high\s+)?liquidity\s+(?:market\s+)?hours?", "session_type"),  # "high liquidity market hours"
+        (r"(?:during\s+)?(?:high\s+)?liquidity\s+(?:market\s+)?hours?", "session_type"),
         (r"(?:morning|afternoon)\s+session", "session_type"),
         (r"(?:market\s+)?timing.*?(?:high\s+)?liquidity", "session_type"),
+    ]
+
+    # ORB duration in minutes — for constraint_compiler to compute opening_bars
+    # Stored as a separate field on SemanticInstructions via _extract_orb_duration
+    ORB_DURATION_PATTERNS = [
+        (r"(?:first|initial|opening)\s+(\d+)[\s\-]*hour\s+(?:range|candle|session|period)", "hours"),
+        (r"(?:first|initial|opening)\s+(\d+)[\s\-]*(?:minute|min)\s+(?:range|candle|session)", "minutes"),
+        (r"first\s+hour\s+(?:range|candle|session|period)", "1h"),
+        (r"(?:first|initial)\s+(\d+)\s+(?:minutes?|min)\s+(?:range|candle|session|period)", "minutes"),
     ]
 
     # Volume patterns
@@ -193,15 +224,18 @@ class SemanticExtractor:
 
     # Direction patterns (Phase 10)
     DIRECTION_PATTERNS = [
-        (r"\blong[- ]only\b",                                             "long_only"),
-        (r"\bshort[- ]only\b",                                            "short_only"),
-        (r"\bbuy[- ]only\b",                                              "long_only"),
-        (r"\bsell[- ]only\b",                                             "short_only"),
-        (r"\bonly\s+(?:take|go)\s+long",                                  "long_only"),
-        (r"\bonly\s+(?:take|go)\s+short",                                 "short_only"),
-        (r"\b(?:both\s+)?longs?\s+and\s+shorts?\b",                       "both"),
-        (r"\bboth\s+(?:sides|directions)\b",                              "both"),
-        (r"\bdirectional\s+trade(?:s)?\s+(?:on\s+)?(?:both|either)\b",   "both"),
+        (r"\blong[- ]only\b",                                                  "long_only"),
+        (r"\bshort[- ]only\b",                                                 "short_only"),
+        (r"\bbuy[- ]only\b",                                                   "long_only"),
+        (r"\bsell[- ]only\b",                                                  "short_only"),
+        (r"\bonly\s+(?:take|go)\s+long",                                       "long_only"),
+        (r"\bonly\s+(?:take|go)\s+short",                                      "short_only"),
+        (r"\b(?:both\s+)?longs?\s+and\s+shorts?\b",                            "both"),
+        (r"\bboth\s+(?:sides|directions)\b",                                   "both"),
+        (r"\bdirectional\s+trade(?:s)?\s+(?:on\s+)?(?:both|either)\b",        "both"),
+        # Structured prompts: "Long Entry: ... Short Entry: ..." — two explicit legs
+        (r"long\s+entry\s*:.*short\s+entry\s*:",                               "both"),
+        (r"short\s+entry\s*:.*long\s+entry\s*:",                               "both"),
     ]
 
     # Gap filter patterns (Phase 10)
@@ -257,6 +291,80 @@ class SemanticExtractor:
         r"rsi\s+(?:between|from)\s+(\d+\.?\d*)\s+to\s+(\d+\.?\d*)",
     ]
 
+    # Single-sided RSI thresholds. Captures "RSI > 60", "RSI above 65",
+    # "RSI crosses above 30", "RSI below 30", "RSI reaches 65". Each pattern
+    # returns (op, value): op ∈ {"above", "below"} so the planner can decide
+    # whether it's an entry filter (e.g. above) or an exit trigger (e.g.
+    # reaches 65).
+    RSI_THRESHOLD_PATTERNS = [
+        (r"rsi\s+(?:crosses\s+)?(?:above|over|>|≥|greater\s+than|reaches?(?:\s+above)?)\s+(\d+\.?\d*)", "above"),
+        (r"rsi\s+(?:crosses\s+)?(?:below|under|<|≤|less\s+than)\s+(\d+\.?\d*)", "below"),
+        (r"rsi\s+is\s+(?:above|over|>|≥)\s+(\d+\.?\d*)", "above"),
+        (r"rsi\s+is\s+(?:below|under|<|≤)\s+(\d+\.?\d*)", "below"),
+    ]
+
+    # MACD-state patterns. We capture state (rather than periods, which are
+    # handled in indicator extraction). State drives signal selection
+    # (macd_bullish_cross, macd_positive, macd_histogram_positive, …).
+    # Each direction qualifier is REQUIRED — patterns that only see "macd
+    # histogram" without a direction would otherwise match both arms.
+    MACD_STATE_PATTERNS = [
+        (r"macd\s+(?:histogram\s+)?(?:turns?\s+positive|is\s+positive|>\s*0|above\s+(?:zero|0)|above\s+signal|bullish)", "histogram_positive"),
+        (r"macd\s+(?:histogram\s+)?(?:turns?\s+negative|is\s+negative|<\s*0|below\s+(?:zero|0)|below\s+signal|bearish)", "histogram_negative"),
+        (r"macd\s+(?:bullish|positive)\s+cross", "bullish_cross"),
+        (r"macd\s+(?:bearish|negative)\s+cross", "bearish_cross"),
+        (r"macd\s+(?:line\s+)?crosses?\s+above\s+signal", "bullish_cross"),
+        (r"macd\s+(?:line\s+)?crosses?\s+below\s+signal", "bearish_cross"),
+        (r"macd\s+divergence", "divergence"),
+    ]
+
+    # Exit-on-opposite phrases. When the user says "exit on opposite
+    # crossover" / "exit on opposite signal", the planner should mirror the
+    # entry trigger's direction.  Captured as a single boolean flag so the
+    # consumer can flip the entry trigger when emitting the exit.
+    OPPOSITE_EXIT_PATTERNS = [
+        r"\bexit\s+on\s+opposite\s+(?:cross(?:over)?|signal)",
+        r"\bopposite\s+cross(?:over)?\s+(?:as\s+)?exit",
+        r"\bexit\s+when\s+(?:it\s+|the\s+)?(?:reverses?|flips?)",
+        r"\bcross(?:over)?\s+reversal\s+(?:as\s+)?exit",
+    ]
+
+    # Price-vs-VWAP relation patterns. We capture the relation as an entry
+    # filter rule so the planner can use the appropriate KB signal
+    # (price_above_vwap, vwap_reclaim, etc).
+    VWAP_RELATION_PATTERNS = [
+        (r"(?:price|close|candle)s?\s+(?:closes?\s+|stays?\s+|are\s+|is\s+)?(?:above|over|>)\s+vwap", "price_above_vwap"),
+        (r"(?:price|close|candle)s?\s+(?:closes?\s+|stays?\s+|are\s+|is\s+)?(?:below|under|<)\s+vwap", "price_below_vwap"),
+        (r"vwap\s+reclaim", "vwap_reclaim"),
+        (r"vwap\s+(?:bounce|rejection)", "vwap_bounce"),
+    ]
+
+    # Price-vs-SMA / Price-vs-EMA relation patterns. These let the planner
+    # pick the dedicated price-cross-SMA/EMA KB signal instead of an
+    # unrelated preset trigger. Each pattern allows optional verb forms
+    # ("price is above", "price stays above", "price closes above").
+    # The optional verb section uses (?:...)? to cover all common phrasings.
+    MA_RELATION_PATTERNS = [
+        # ── SMA ──────────────────────────────────────────────────────────
+        # "price crosses above 20 SMA"
+        (r"(?:price|close)s?\s+crosses?\s+above\s+(?:the\s+)?(\d+)\s*sma", ("sma", "above", "cross")),
+        (r"(?:price|close)s?\s+crosses?\s+below\s+(?:the\s+)?(\d+)\s*sma", ("sma", "below", "cross")),
+        # "price (is|stays|closes|breaks) above N SMA"  →  regime
+        (r"(?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|breaks?\s+|are\s+)?(?:above|over|>)\s+(?:the\s+)?(\d+)\s*sma", ("sma", "above", "regime")),
+        (r"(?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|breaks?\s+|are\s+)?(?:below|under|<)\s+(?:the\s+)?(\d+)\s*sma", ("sma", "below", "regime")),
+        # SMA-leading forms
+        (r"sma\s*\(?(\d+)\)?\s+(?:above|>)\s+(?:price|close)", ("sma", "below", "regime")),
+        (r"sma\s*\(?(\d+)\)?\s+(?:below|<)\s+(?:price|close)", ("sma", "above", "regime")),
+
+        # ── EMA ──────────────────────────────────────────────────────────
+        (r"(?:price|close)s?\s+crosses?\s+above\s+(?:the\s+)?(\d+)\s*ema", ("ema", "above", "cross")),
+        (r"(?:price|close)s?\s+crosses?\s+below\s+(?:the\s+)?(\d+)\s*ema", ("ema", "below", "cross")),
+        (r"(?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|breaks?\s+|are\s+)?(?:above|over|>)\s+(?:the\s+)?(\d+)\s*ema", ("ema", "above", "regime")),
+        (r"(?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|breaks?\s+|are\s+)?(?:below|under|<)\s+(?:the\s+)?(\d+)\s*ema", ("ema", "below", "regime")),
+        (r"ema\s*\(?(\d+)\)?\s+(?:above|>)\s+(?:price|close)", ("ema", "below", "regime")),
+        (r"ema\s*\(?(\d+)\)?\s+(?:below|<)\s+(?:price|close)", ("ema", "above", "regime")),
+    ]
+
     # Volume ratio patterns (Phase 10)
     VOLUME_RATIO_PATTERNS = [
         r"volume\s+(?:at\s+least\s+|≥|>|above\s+)?(\d+\.?\d*)(?:x|×)\s+(?:the\s+)?(?:average|avg|mean)",
@@ -300,8 +408,13 @@ class SemanticExtractor:
     def __init__(self):
         pass
 
-    def extract(self, prompt: str) -> SemanticInstructions:
-        """Parse a user's strategy prompt into structured SemanticInstructions."""
+    def extract(self, prompt: str, *, session_id: str | None = None) -> SemanticInstructions:
+        """Parse a user's strategy prompt into structured SemanticInstructions.
+
+        When `session_id` is supplied, every captured field is written to the
+        extraction audit trail so the chat layer / UI can show provenance for
+        each value.
+        """
         if not prompt or not prompt.strip():
             return SemanticInstructions(original_prompt=prompt)
 
@@ -340,6 +453,17 @@ class SemanticExtractor:
         instructions.volume_ratio_threshold  = self._extract_volume_ratio(normalized)
         instructions.position_sizing_mode    = self._extract_position_sizing_mode(normalized)
 
+        # Phase 12 — fine-grained semantic captures the planner can act on
+        instructions.rsi_thresholds   = self._extract_rsi_thresholds(normalized)
+        instructions.macd_states      = self._extract_macd_states(normalized)
+        instructions.vwap_relations   = self._extract_vwap_relations(normalized)
+        instructions.regime_preference = self._extract_regime_preference(normalized)
+        instructions.sl_type_hint     = self._extract_sl_type_hint(normalized)
+        instructions.partial_exits    = self._extract_partial_exits(normalized)
+        instructions.ma_relations     = self._extract_ma_relations(normalized)
+        instructions.exit_on_opposite = self._extract_exit_on_opposite(normalized)
+        instructions.orb_opening_bars_minutes = self._extract_orb_duration_minutes(normalized)
+
         # Calculate extraction quality
         instructions.extraction_quality_score = self._calculate_quality_score(instructions)
 
@@ -353,7 +477,86 @@ class SemanticExtractor:
             instructions.extraction_quality_score,
         )
 
+        if session_id:
+            self._write_audit_trail(session_id, prompt, instructions)
+
         return instructions
+
+    def _write_audit_trail(
+        self,
+        session_id: str,
+        prompt: str,
+        instructions: SemanticInstructions,
+    ) -> None:
+        """Record every captured field to the per-session extraction audit."""
+        from app.core.extraction_audit import record_extraction
+        from app.planner.unsupported_indicators import detect_unsupported
+
+        confidence = float(instructions.extraction_quality_score or 0.0)
+        extractor_id = "semantic_extractor"
+
+        if instructions.stop_loss:
+            record_extraction(
+                session_id, "stop_loss", instructions.stop_loss.model_dump(),
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.risk_reward:
+            record_extraction(
+                session_id, "risk_reward", instructions.risk_reward.model_dump(),
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.trailing_stop and instructions.trailing_stop.enabled:
+            record_extraction(
+                session_id, "trailing_stop", instructions.trailing_stop.model_dump(),
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.direction:
+            record_extraction(
+                session_id, "direction", instructions.direction,
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.gap_filter:
+            record_extraction(
+                session_id, "gap_filter", instructions.gap_filter,
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.rsi_entry_band_min is not None or instructions.rsi_entry_band_max is not None:
+            record_extraction(
+                session_id, "rsi_entry_band",
+                {"min": instructions.rsi_entry_band_min, "max": instructions.rsi_entry_band_max},
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        if instructions.volume_ratio_threshold is not None:
+            record_extraction(
+                session_id, "volume_ratio_threshold", instructions.volume_ratio_threshold,
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        for ind_name, periods in (instructions.indicators or {}).items():
+            record_extraction(
+                session_id, f"indicator.{ind_name}", periods,
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+        for idx, rule in enumerate(instructions.htf_rules or []):
+            record_extraction(
+                session_id, f"htf_rule[{idx}]",
+                rule.model_dump() if hasattr(rule, "model_dump") else str(rule),
+                source="semantic", confidence=confidence, extractor=extractor_id,
+            )
+
+        unsupported = detect_unsupported(prompt)
+        for mention in unsupported:
+            record_extraction(
+                session_id, f"unsupported.{mention.canonical_name}",
+                {
+                    "matched_phrase": mention.matched_phrase,
+                    "category": mention.category,
+                    "suggested_alternative": mention.suggested_alternative,
+                },
+                source="semantic",
+                confidence=1.0,
+                extractor="unsupported_indicators",
+                note="user mentioned a concept the KB cannot model yet",
+            )
 
     # ── Strategy Family Detection (removed) ────────────────────────────────────
     # Framework detection has been moved to SemanticIntentNormalizer which uses
@@ -583,22 +786,37 @@ class SemanticExtractor:
         return None
 
     def _parse_rr_match(self, match: re.Match, rr_type: str, full_text: str) -> RiskRewardSpec:
-        """Convert RR pattern match into RiskRewardSpec."""
+        """Convert RR pattern match into RiskRewardSpec.
+
+        Convention: ratio = reward / risk.
+          "2:1 RR"       → ratio = 2.0  (reward-first, rr_reward_first)
+          "1:2 RR"       → ratio = 2.0  (risk-first, rr_ratio, group1=2)
+          "2R target"    → ratio = 2.0  (rr_ratio, group1=2)
+          "N:1 risk"     → ratio = 1/N  (rr_inverted — risk-first without reward word)
+        """
         text = match.group(0)
         ratio = None
 
         try:
-            if "rr_ratio" in rr_type:
+            if "rr_reward_first" in rr_type:
+                # "N:1 Risk Reward" — first number IS the reward multiple
+                ratio = float(match.group(1))
+            elif "rr_ratio" in rr_type:
                 ratio = float(match.group(1))
             elif "rr_inverted" in rr_type:
-                ratio = 1.0 / float(match.group(1))
+                # "N:1 risk" (no reward word) — first number is risk, invert
+                val = float(match.group(1))
+                ratio = 1.0 / val if val > 0 else None
             elif "minimum_rr" in rr_type:
                 ratio = float(match.group(1))
         except (ValueError, IndexError):
             ratio = None
 
         rr_type_enum: RiskRewardType = "minimum" if "minimum" in rr_type else "fixed"
-
+        logger.debug(
+            "semantic_extractor|rr_parsed|type=%s|ratio=%s|text=%r",
+            rr_type, ratio, text[:40],
+        )
         return RiskRewardSpec(
             type=rr_type_enum,
             ratio=ratio,
@@ -804,38 +1022,119 @@ class SemanticExtractor:
                     indicators["EMA"] = ema_windows
                     logger.debug("semantic_extractor|extracted_ema|windows=%s", ema_windows)
 
-        # SMA windows
-        sma_matches = re.findall(r"sma\s*\(?(\d+)\)?", text, re.IGNORECASE)
+        # SMA windows — accept "SMA(20)", "SMA 20", "20 SMA", "simple moving average 20"
+        sma_patterns = [
+            r"sma\s*\(?(\d+)\)?",                                       # SMA(20), SMA 20, SMA20
+            r"(\d+)\s*sma\b",                                           # 20 SMA
+            r"(?:simple)\s+moving\s+average\s+(?:of\s+)?(\d+)",         # simple moving average 20
+        ]
+        sma_matches: list[str] = []
+        for pattern in sma_patterns:
+            sma_matches.extend(re.findall(pattern, text, re.IGNORECASE))
         if sma_matches:
-            sma_windows = sorted(set(int(m) for m in sma_matches))
-            indicators["SMA"] = sma_windows
+            sma_windows = sorted({int(m) for m in sma_matches if str(m).isdigit()})
+            if sma_windows:
+                indicators["SMA"] = sma_windows
 
-        # ATR (usually period 14 by default, but record if mentioned)
-        if re.search(r"\batr\b", text, re.IGNORECASE):
-            atr_match = re.search(r"atr\s*\(?(\d+)\)?", text, re.IGNORECASE)
-            if atr_match:
-                indicators["ATR"] = [int(atr_match.group(1))]
-            else:
-                # Only include if explicitly mentioned
-                indicators["ATR"] = [14]  # Default ATR period
+        # ATR — explicit period if given, otherwise empty-list so downstream
+        # knows the user mentioned ATR (we never invent a period).
+        atr_match = (
+            re.search(r"atr\s*\(?(\d+)\)?", text, re.IGNORECASE)
+            or re.search(r"(\d+)\s*atr\b", text, re.IGNORECASE)
+        )
+        if atr_match:
+            indicators["ATR"] = [int(atr_match.group(1))]
+        elif re.search(r"\batr\b", text, re.IGNORECASE):
+            indicators["ATR"] = []
+            logger.info(
+                "semantic_extractor|indicator_period_missing|indicator=ATR"
+                "|action=capture_family|reason=user_mentioned_without_period"
+            )
 
-        # ADX (usually period 14 by default)
-        if re.search(r"\badx\b", text, re.IGNORECASE):
-            adx_match = re.search(r"adx\s*\(?(\d+)\)?", text, re.IGNORECASE)
-            if adx_match:
-                indicators["ADX"] = [int(adx_match.group(1))]
-            else:
-                indicators["ADX"] = [14]  # Default ADX period
+        # ADX — same treatment as ATR.
+        adx_match = (
+            re.search(r"adx\s*\(?(\d+)\)?", text, re.IGNORECASE)
+            or re.search(r"(\d+)\s*adx\b", text, re.IGNORECASE)
+        )
+        if adx_match:
+            indicators["ADX"] = [int(adx_match.group(1))]
+        elif re.search(r"\badx\b", text, re.IGNORECASE):
+            indicators["ADX"] = []
+            logger.info(
+                "semantic_extractor|indicator_period_missing|indicator=ADX"
+                "|action=capture_family|reason=user_mentioned_without_period"
+            )
 
-        # RSI
-        rsi_matches = re.findall(r"rsi\s*\(?(\d+)\)?", text, re.IGNORECASE)
+        # RSI — same treatment as ATR/ADX.
+        rsi_patterns = [
+            r"rsi\s*\(?(\d+)\)?",                                           # RSI(14), RSI 14, RSI14
+            r"(\d+)\s*rsi\b",                                               # 14 RSI
+            r"relative\s+strength(?:\s+index)?\s+(?:of\s+)?(\d+)",          # relative strength index 14
+        ]
+        rsi_matches: list[str] = []
+        for pattern in rsi_patterns:
+            rsi_matches.extend(re.findall(pattern, text, re.IGNORECASE))
         if rsi_matches:
-            rsi_windows = sorted(set(int(m) for m in rsi_matches))
-            indicators["RSI"] = rsi_windows
+            rsi_windows = sorted({int(m) for m in rsi_matches if str(m).isdigit()})
+            if rsi_windows:
+                indicators["RSI"] = rsi_windows
+        elif re.search(r"\brsi\b|\brelative\s+strength\b", text, re.IGNORECASE):
+            indicators["RSI"] = []
+            logger.info(
+                "semantic_extractor|indicator_period_missing|indicator=RSI"
+                "|action=capture_family|reason=user_mentioned_without_period"
+            )
 
-        # MACD
-        if re.search(r"\bmacd\b", text, re.IGNORECASE):
-            indicators["MACD"] = [12, 26, 9]  # Standard MACD periods
+        # MACD — same treatment. Capture the family even without periods so
+        # the planner can still select a MACD signal. Periods stay empty when
+        # the user didn't give all three.
+        macd_full = re.search(
+            r"macd\s*\(?\s*(\d+)\s*[,/]\s*(\d+)\s*[,/]\s*(\d+)\s*\)?",
+            text,
+            re.IGNORECASE,
+        )
+        if macd_full:
+            indicators["MACD"] = [
+                int(macd_full.group(1)),
+                int(macd_full.group(2)),
+                int(macd_full.group(3)),
+            ]
+        elif re.search(r"\bmacd\b", text, re.IGNORECASE):
+            indicators["MACD"] = []
+            logger.info(
+                "semantic_extractor|indicator_period_missing|indicator=MACD"
+                "|action=capture_family|reason=user_mentioned_without_period"
+            )
+
+        # VWAP — no period (it's session-anchored), so the presence/absence is
+        # all we need to capture. Always record when mentioned.
+        if re.search(r"\bvwap\b|volume[\s\-]+weighted\s+average\s+price", text, re.IGNORECASE):
+            indicators["VWAP"] = []
+
+        # Bollinger Bands — period if given, else empty.
+        bb_period = re.search(r"bollinger(?:\s+bands?)?\s*\(?\s*(\d+)", text, re.IGNORECASE)
+        if bb_period:
+            indicators["BB"] = [int(bb_period.group(1))]
+        elif re.search(r"\bbollinger(?:\s+bands?)?\b|\bbb\s+bands?\b", text, re.IGNORECASE):
+            indicators["BB"] = []
+
+        # Supertrend — capture family when mentioned (params are downstream).
+        if re.search(r"\bsuper\s*trend\b", text, re.IGNORECASE):
+            indicators["SUPERTREND"] = []
+
+        # Stochastic — capture family when mentioned.
+        if re.search(r"\bstoch(?:astic)?\b", text, re.IGNORECASE):
+            indicators["STOCHASTIC"] = []
+
+        # OBV — capture family when mentioned.
+        if re.search(r"\bobv\b|on[\s\-]+balance\s+volume", text, re.IGNORECASE):
+            indicators["OBV"] = []
+
+        # CCI / MFI — capture family when mentioned.
+        if re.search(r"\bcci\b", text, re.IGNORECASE):
+            indicators["CCI"] = []
+        if re.search(r"\bmfi\b|money[\s\-]+flow", text, re.IGNORECASE):
+            indicators["MFI"] = []
 
         return indicators
 
@@ -896,9 +1195,41 @@ class SemanticExtractor:
     # ── Phase 10 extractors ───────────────────────────────────────────────────
 
     def _extract_direction(self, text: str) -> str | None:
+        # 1. Explicit phrasings first (high precision)
         for pattern, direction in self.DIRECTION_PATTERNS:
             if re.search(pattern, text, re.IGNORECASE):
                 return direction
+        # 2. Implicit long signals: "buy when X", "enter long when Y",
+        #    "go long on Z", "long entry on …", "enter only when …" paired
+        #    with bullish-context indicators. Sell/exit clauses in the same
+        #    sentence are usually the EXIT of a long trade.
+        has_long = bool(re.search(
+            r"\b(?:buy|enter[\s\-]+long|go[\s\-]+long|long[\s\-]+entry"
+            r"|take[\s\-]+long|open[\s\-]+long|accumulate)\b",
+            text, re.IGNORECASE,
+        ))
+        has_short = bool(re.search(
+            r"\b(?:short(?:[\s\-]+(?:only|entry|the|when|side|trade))?"
+            r"|sell[\s\-]+short|enter[\s\-]+short|go[\s\-]+short"
+            r"|short[\s\-]+entry|open[\s\-]+short)\b",
+            text, re.IGNORECASE,
+        ))
+        # "enter only when X" + bullish indicator clues → long_only inference
+        if not (has_long or has_short):
+            enter_only = re.search(r"\benter\s+only\s+when\b", text, re.IGNORECASE)
+            bullish_hints = re.search(
+                r"\b(?:above|rising|positive|crosses?\s+above|breakout(?:\s+up)?"
+                r"|bullish|momentum|uptrend)\b",
+                text, re.IGNORECASE,
+            )
+            if enter_only and bullish_hints:
+                return "long_only"
+        if has_long and has_short:
+            return "both"           # BUG FIX: was returning None, silently dropping short leg
+        if has_long:
+            return "long_only"
+        if has_short:
+            return "short_only"
         return None
 
     def _extract_gap_filter(self, text: str) -> str | None:
@@ -962,6 +1293,177 @@ class SemanticExtractor:
                 except (IndexError, ValueError):
                     pass
         return None
+
+    def _extract_rsi_thresholds(self, text: str) -> list[dict]:
+        """Capture every single-sided RSI threshold the user wrote.
+
+        Returns a list of {op: "above"|"below", value: float} preserving order
+        so the planner can map first to entry filter and subsequent to exit
+        triggers when appropriate.
+        """
+        out: list[dict] = []
+        seen: set[tuple[str, float]] = set()
+        for pattern, op in self.RSI_THRESHOLD_PATTERNS:
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                try:
+                    val = float(m.group(1))
+                    if 0 <= val <= 100 and (op, val) not in seen:
+                        out.append({"op": op, "value": val})
+                        seen.add((op, val))
+                except (IndexError, ValueError):
+                    pass
+        return out
+
+    def _extract_macd_states(self, text: str) -> list[str]:
+        out: list[str] = []
+        for pattern, state in self.MACD_STATE_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE) and state not in out:
+                out.append(state)
+        return out
+
+    def _extract_vwap_relations(self, text: str) -> list[str]:
+        out: list[str] = []
+        for pattern, relation in self.VWAP_RELATION_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE) and relation not in out:
+                out.append(relation)
+        return out
+
+    def _extract_regime_preference(self, text: str) -> str | None:
+        """Detect explicit regime asks: 'avoid sideways', 'only trending'.
+
+        Tolerates intervening words (e.g. "avoid trades during sideways
+        market conditions" — "trades during" sits between "avoid" and
+        "sideways").
+        """
+        # "avoid ... sideways/chop/range/consolidation" → trending
+        if re.search(
+            r"\bavoid\b[\s\S]{0,40}\b(?:sideways|chop(?:py)?|range[\s\-]+bound|consolidation)\b",
+            text, re.IGNORECASE,
+        ):
+            return "trending"
+        if re.search(
+            r"\b(?:only|prefer)\b[\s\S]{0,20}\btrend(?:ing|s)?\b",
+            text, re.IGNORECASE,
+        ):
+            return "trending"
+        # Inverse: only ranging / mean-reverting
+        if re.search(
+            r"\bavoid\b[\s\S]{0,40}\btrend(?:ing|s)?\b"
+            r"|\b(?:only|prefer)\b[\s\S]{0,20}\b(?:range[\s\-]+bound|sideways|chop|mean[\s\-]+revert)",
+            text, re.IGNORECASE,
+        ):
+            return "ranging"
+        # Volatile preference
+        if re.search(
+            r"\b(?:only|prefer)\b[\s\S]{0,20}\bvolatile\b|\bhigh[\s\-]+volatility\b",
+            text, re.IGNORECASE,
+        ):
+            return "volatile"
+        return None
+
+    def _extract_sl_type_hint(self, text: str) -> str | None:
+        """Decide which SL family the user is asking for, in priority order."""
+        if re.search(r"\batr[\s\-]+based\s+stop|atr\s+stop\s+loss?|stop\s+loss\s+based\s+on\s+atr",
+                     text, re.IGNORECASE):
+            return "atr"
+        if re.search(r"\bstop\s+loss\s+(?:below|above|at)\s+(?:previous\s+)?candle\s+(?:low|high)"
+                     r"|\bstop\s+(?:loss\s+)?below\s+(?:the\s+)?(?:breakout|signal|setup)\s+candle"
+                     r"|\bswing\s+(?:low|high)\s+(?:as\s+)?(?:stop|sl)",
+                     text, re.IGNORECASE):
+            return "structural"
+        if re.search(r"\bstop\s+(?:loss\s+)?(?:of\s+|at\s+)?\d+(?:\.\d+)?\s*%",
+                     text, re.IGNORECASE):
+            return "percent"
+        return None
+
+    def _extract_exit_on_opposite(self, text: str) -> bool:
+        return any(
+            re.search(pat, text, re.IGNORECASE)
+            for pat in self.OPPOSITE_EXIT_PATTERNS
+        )
+
+    def _extract_orb_duration_minutes(self, text: str) -> int | None:
+        """Extract the user's explicitly stated opening-range duration in minutes.
+
+        "first 1-hour range" → 60
+        "first 30-minute range" → 30
+        "first hour range" → 60 (implied 1 hour)
+        Returns None when the user did not specify a range duration.
+        """
+        # "first N-hour range" / "opening N-hour range"
+        m = re.search(
+            r"(?:first|initial|opening)\s+(\d+(?:\.\d+)?)\s*[\s\-]*hour\s+(?:range|candle|session|period)",
+            text, re.IGNORECASE,
+        )
+        if m:
+            try:
+                return int(float(m.group(1)) * 60)
+            except (ValueError, IndexError):
+                pass
+
+        # "first N-minute range"
+        m = re.search(
+            r"(?:first|initial|opening)\s+(\d+)\s*[\s\-]*(?:minute|min)\s+(?:range|candle|session)",
+            text, re.IGNORECASE,
+        )
+        if m:
+            try:
+                return int(m.group(1))
+            except (ValueError, IndexError):
+                pass
+
+        # "first hour range" (plain "hour" = 1h = 60 min)
+        if re.search(
+            r"(?:first|initial)\s+hour\s+(?:range|candle|session|period)",
+            text, re.IGNORECASE,
+        ):
+            return 60
+
+        return None
+
+    def _extract_ma_relations(self, text: str) -> list[dict]:
+        """Capture user phrases like 'price crosses above 20 SMA' so the
+        planner can pick price_cross_above_sma instead of a generic preset
+        trigger that swaps SMA for EMA. Returns ordered, deduplicated dicts.
+        """
+        out: list[dict] = []
+        seen: set[tuple] = set()
+        for pattern, (family, side, kind) in self.MA_RELATION_PATTERNS:
+            for m in re.finditer(pattern, text, re.IGNORECASE):
+                try:
+                    window = int(m.group(1))
+                except (IndexError, ValueError):
+                    continue
+                key = (family, side, kind, window)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({
+                    "family": family,
+                    "side": side,
+                    "window": window,
+                    "kind": kind,
+                })
+        return out
+
+    def _extract_partial_exits(self, text: str) -> list[dict]:
+        """Capture partial profit booking instructions: '1.5R', '50% at 2R'."""
+        out: list[dict] = []
+        # "partial profit booking at 1.5R", "book 50% at 2R", "exit half at 1R"
+        for m in re.finditer(
+            r"(?:partial\s+(?:profit\s+)?booking|book(?:ing)?\s+(?:profit\s+)?|exit\s+(?:half|partial))"
+            r"\s+(?:of\s+)?(?:(\d+)\s*%\s+)?(?:at|after|on)\s+(\d+(?:\.\d+)?)\s*r\b",
+            text, re.IGNORECASE,
+        ):
+            entry: dict = {"trigger": "rr_multiple", "value": float(m.group(2))}
+            if m.group(1):
+                entry["size_pct"] = int(m.group(1))
+            out.append(entry)
+        # Simple "at 1.5R" without explicit "partial"
+        if not out:
+            for m in re.finditer(r"\bat\s+(\d+(?:\.\d+)?)\s*r\b", text, re.IGNORECASE):
+                out.append({"trigger": "rr_multiple", "value": float(m.group(1))})
+        return out
 
     def _extract_volume_ratio(self, text: str) -> float | None:
         for pattern in self.VOLUME_RATIO_PATTERNS:

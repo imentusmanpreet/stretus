@@ -25,7 +25,9 @@ _TIER = RiskTier(
     [
         ("1:2", 2.0),
         ("1:3", 3.0),
-        ("2:1", 0.5),
+        # "N:1" means N reward per 1 risk (trader convention), not 1/N.
+        ("2:1", 2.0),
+        ("3:1", 3.0),
         ("2", 2.0),
         ("2.5", 2.5),
         (3, 3.0),
@@ -62,6 +64,21 @@ def test_resolve_sl_tp_no_ohlcv_with_user_rr_overrides_tp():
 def test_resolve_sl_tp_no_ohlcv_with_user_rr_3_to_1():
     sl, tp, _ = resolve_sl_tp(_TIER, user_risk_reward="1:3")
     assert tp == 4.5      # 1.5 × 3 — overrides baseline 3.0
+
+
+@pytest.mark.parametrize("rr", ["0.36", "0.5", "1:0.4", 0.3])
+def test_resolve_sl_tp_never_returns_tp_below_sl(rr):
+    """A sub-1 risk:reward must NOT produce tp < sl. Previously this slipped
+    through and crashed the planner's validate_plan (tp_pct < sl_pct). The
+    resolver now floors TP at the SL (a 1:1 minimum)."""
+    sl, tp, _ = resolve_sl_tp(_TIER, user_risk_reward=rr)
+    assert tp >= sl, f"tp ({tp}) must be >= sl ({sl}) for rr={rr!r}"
+
+
+def test_resolve_sl_tp_floor_does_not_touch_valid_rr():
+    """A normal RR >= 1 is unaffected by the floor."""
+    sl, tp, _ = resolve_sl_tp(_TIER, user_risk_reward="1:2")
+    assert tp == round(sl * 2.0, 2)
 
 
 def test_resolve_sl_tp_with_ohlcv_scales_sl_then_applies_user_rr():

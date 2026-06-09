@@ -2,32 +2,43 @@ name: opening_range_breakdown
 category: india
 direction: bearish
 kind: pattern
-roles: [entry_trigger]
-formula: "CLOSE < OPENING_RANGE_LOW({opening_bars})"
-description: "Price breaks below the opening-range low — classic Indian intraday short entry."
-
-works_best_on: [1m, 3m, 5m, 10m, 15m]
+roles:
+- entry_trigger
+formula: CLOSE < OPENING_RANGE_LOW({opening_bars})
+description: Price breaks below the opening-range low — classic Indian intraday short entry.
+works_best_on:
+- 1m
+- 3m
+- 5m
+- 10m
+- 15m
 weak_on: []
-unsupported_on: [1h, 1d]
-
+unsupported_on:
+- 1h
+- 1d
 contraindicated_when:
-  - sentiment: bullish
-
-pairs_well_with: [vwap_bearish, volume_spike, price_below_ema]
-contradicts: [gap_up_open]
-
+- sentiment: bullish
+pairs_well_with:
+- vwap_bearish
+- volume_spike
+- price_below_ema
+contradicts:
+- gap_up_open
 params_by_timeframe:
-  1m:   {opening_bars: 15}
-  3m:   {opening_bars: 5}
-  5m:   {opening_bars: 3}
-  10m:  {opening_bars: 2}
-  15m:  {opening_bars: 2}
-
+  1m:
+    opening_bars: 15
+  3m:
+    opening_bars: 5
+  5m:
+    opening_bars: 3
+  10m:
+    opening_bars: 2
+  15m:
+    opening_bars: 2
 experience_fit:
   beginner: 1.0
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.7
   momentum: 1.0
@@ -36,3 +47,10 @@ intent_fit:
   scalping: 0.7
   mean_reversion: 0.0
   confirmation: 0.6
+match_when:
+  phrases:
+  - opening\s+range\s+breakdown
+  - \bor\s*[\s\-]*breakdown
+  - breaks?\s+(?:below\s+)?opening\s+range
+  acts_as: entry_trigger
+  mirrors_to: opening_range_breakout

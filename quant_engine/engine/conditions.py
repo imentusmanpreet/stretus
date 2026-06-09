@@ -6,10 +6,15 @@ Supported syntax:
   - Boolean:      ... AND ...,  ... OR ...,  NOT ...
   - Arithmetic:   CLOSE * 1.02,  (HIGH - LOW) / CLOSE,  SMA(20) + 10
   - Functions:    SMA(n), EMA(n), RSI(n), BB_UPPER(n), BB_LOWER(n), BB_MID(n)
-                  AVG(FIELD, n), MAX(FIELD, n), MIN(FIELD, n)
+                  ATR(n), ADX(n), PLUS_DI(n), MINUS_DI(n)   ← regime / volatility filters
+                  AVG(FIELD or INDICATOR(n), n), MAX(...), MIN(...)
                   STDEV(FIELD, n), ZSCORE(FIELD, n)
                   PREV(FIELD or EXPR, offset)   ← e.g. PREV(EMA(20), 3) for slope checks
                   OPENING_RANGE_HIGH(n), OPENING_RANGE_LOW(n)
+
+                  AVG/MAX/MIN accept a nested periodic indicator as their first
+                  argument, e.g. AVG(ATR(14), 50) — the rolling stat of ATR(14)
+                  over the last 50 bars (used by the ATR-volatility regime cards).
   - Identifiers:  CLOSE, OPEN, HIGH, LOW, VOLUME, VWAP, MACD, MACD_SIGNAL
                   REF_CLOSE, REF_OPEN, REF_HIGH, REF_LOW, REF_VOLUME  ← Phase 4: reference symbol
                   IS_SWING_HIGH, IS_SWING_LOW, IS_BOS_BULLISH, IS_BOS_BEARISH,
@@ -33,7 +38,10 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from engine.indicators import bb_lower, bb_middle, bb_upper, ema, macd_line, macd_signal, rsi, sma, vwap
+import engine.indicators as _ind
+from engine.indicators import (
+    PERIODIC_INDICATOR_NAMES, candlestick_pattern, compute_indicator_column,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -339,64 +347,73 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
-def _rolling_window(df: pd.DataFrame, field: str, n: int, i: int) -> pd.Series:
-    col = _col_name(field)
-    if n <= 0 or col not in df.columns:
-        return pd.Series(dtype=float)
-    start = max(0, i - n + 1)
-    return df.iloc[start : i + 1][col].dropna().astype(float)
+# ── Single-source precompute cache ─────────────────────────────────────────────
+#
+# conditions.py NEVER recomputes an indicator value bar-by-bar. The first time a
+# value is needed, the FULL vectorised Series is computed once — via the same
+# engine.indicators code add_all_indicators() uses — and cached as a column on
+# df. Every later bar is then a pure column read. This keeps the slow (test /
+# registry) path and the fast (simulator) path on IDENTICAL math, so a backtest
+# can never diverge from live evaluation.
+#
+# In the simulator hot loop the runner has already precomputed every referenced
+# column up front (runner._merge_indicator_requirements), so these builders only
+# ever fire on the direct evaluate_condition() path (tests, ad-hoc calls).
+
+_CACHE_PREFIX = "__qe_"
 
 
-def _rolling_mean(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    values = _rolling_window(df, field, n, i)
-    return float(values.mean()) if len(values) == n else float("nan")
+def _cache_column(df: pd.DataFrame, col: str, builder) -> pd.Series | None:
+    """Ensure df[col] exists, computing it ONCE via builder() (returns a Series
+    or None). Returns the cached Series (or None). Caches by mutating df so
+    repeated per-bar calls in build_entry_signals reuse the first computation."""
+    if col in df.columns:
+        return df[col]
+    series = builder()
+    if series is None:
+        return None
+    try:
+        df[col] = np.asarray(series, dtype=float)
+        return df[col]
+    except Exception:
+        return series
 
 
-def _rolling_ema(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    col = _col_name(field)
-    if n <= 0 or col not in df.columns:
+def _value_at(series: pd.Series | None, i: int) -> float:
+    if series is None or i < 0 or i >= len(series):
         return float("nan")
-    series = df.iloc[: i + 1][col].astype(float)
-    ema_series = series.ewm(span=n, adjust=False, min_periods=n).mean()
-    value = ema_series.iloc[-1]
+    value = series.iloc[i]
     return float(value) if not pd.isna(value) else float("nan")
 
 
-def _rolling_max(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    values = _rolling_window(df, field, n, i)
-    return float(values.max()) if len(values) == n else float("nan")
-
-
-def _rolling_min(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    values = _rolling_window(df, field, n, i)
-    return float(values.min()) if len(values) == n else float("nan")
-
-
-def _rolling_stdev(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    """Sample standard deviation over the last n bars of `field`.
-    NaN until n bars are available — same convention as _rolling_mean."""
-    values = _rolling_window(df, field, n, i)
-    if len(values) != n:
-        return float("nan")
-    return float(values.std(ddof=1))
-
-
-def _rolling_zscore(df: pd.DataFrame, field: str, n: int, i: int) -> float:
-    """Z-score of the current value of `field` against its rolling mean+stdev.
-    Returns NaN if stdev is zero (flat series — no meaningful z-score)."""
+def _ensure_field_rolling(df: pd.DataFrame, field: str, n: int, agg: str) -> pd.Series | None:
+    """Vectorised rolling aggregate over a raw field (CLOSE, VOLUME, …), cached.
+    Replaces the per-bar _rolling_mean/_rolling_ema/_rolling_max/_rolling_min/
+    _rolling_stdev, which walked bars 0..i on every call."""
     col = _col_name(field)
-    if col not in df.columns:
-        return float("nan")
-    values = _rolling_window(df, field, n, i)
-    if len(values) != n:
-        return float("nan")
-    stdev = float(values.std(ddof=1))
-    if stdev == 0.0 or _is_nan(stdev):
-        return float("nan")
-    current = float(df.iloc[i][col])
-    if _is_nan(current):
-        return float("nan")
-    return (current - float(values.mean())) / stdev
+    if n <= 0 or col not in df.columns:
+        return None
+    cache_key = f"{_CACHE_PREFIX}{agg}_{col}_{int(n)}"
+    return _cache_column(
+        df, cache_key, lambda: _ind.rolling_agg(df[col].astype(float), int(n), agg)
+    )
+
+
+def _ensure_zscore(df: pd.DataFrame, field: str, n: int) -> pd.Series | None:
+    """Vectorised rolling z-score of `field`, cached. NaN where rolling stdev is
+    zero (flat series — no meaningful z-score)."""
+    col = _col_name(field)
+    if n <= 0 or col not in df.columns:
+        return None
+    cache_key = f"{_CACHE_PREFIX}zscore_{col}_{int(n)}"
+
+    def build():
+        s = df[col].astype(float)
+        mean = _ind.rolling_agg(s, int(n), "mean")
+        std = _ind.rolling_agg(s, int(n), "stdev").replace(0.0, np.nan)
+        return (s - mean) / std
+
+    return _cache_column(df, cache_key, build)
 
 
 def _session_opening_range(df: pd.DataFrame, field: str, n: int, i: int, agg: str) -> float:
@@ -426,24 +443,64 @@ def _session_opening_range(df: pd.DataFrame, field: str, n: int, i: int, agg: st
     return float(value)
 
 
+def _ensure_indicator(df: pd.DataFrame, name: str, period: int) -> pd.Series | None:
+    """Full Series for a periodic indicator column NAME_period — read from df if
+    already precomputed, otherwise computed ONCE via the indicators registry and
+    cached. The single source of truth shared with add_all_indicators()."""
+    col = f"{name}_{int(period)}"
+    return _cache_column(df, col, lambda: compute_indicator_column(df, name, int(period)))
+
+
 def _resolve_indicator(df: pd.DataFrame, name: str, period: int, i: int) -> float:
-    close = df["close"].astype(float)
-    mapping = {
-        "SMA":      sma,
-        "EMA":      ema,
-        "RSI":      rsi,
-        "BB_UPPER": bb_upper,
-        "BB_LOWER": bb_lower,
-        "BB_MID":   bb_middle,
-    }
-    func = mapping.get(name)
-    if func is None:
+    """Value of a periodic indicator at bar i — pure column read after a
+    one-time precompute. No per-bar recompute."""
+    return _value_at(_ensure_indicator(df, name, period), i)
+
+
+def _periodic_column_for(node: Any) -> str | None:
+    """If `node` is a single-period indicator call like ATR(14), return its
+    precomputed column name 'ATR_14'. Otherwise None."""
+    if (
+        isinstance(node, FunctionNode)
+        and node.name in _PERIODIC_INDICATORS
+        and len(node.args) == 1
+        and isinstance(node.args[0], NumberNode)
+    ):
+        return f"{node.name}_{int(node.args[0].value)}"
+    return None
+
+
+def _arg_series(df: pd.DataFrame, arg: Any) -> tuple[pd.Series | None, str | None]:
+    """Resolve the first argument of AVG/MAX/MIN/STDEV to (Series, cache_label).
+
+    Accepts either a raw field identifier (CLOSE, VOLUME, …) or a nested periodic
+    indicator (ATR(14)) — precomputing the indicator column once if absent.
+    Returns (None, None) when it's neither — the caller turns that into a
+    ParseError."""
+    if isinstance(arg, IdentifierNode):
+        col = _col_name(arg.name)
+        if col in df.columns:
+            return df[col].astype(float), col
+        return None, None
+    col = _periodic_column_for(arg)
+    if col is not None:
+        name, _, period = col.rpartition("_")
+        series = _ensure_indicator(df, name, int(period))
+        if series is not None:
+            return series.astype(float), col
+    return None, None
+
+
+def _roll_over_arg(df: pd.DataFrame, arg: Any, n: int, i: int, agg: str) -> float:
+    """Vectorised rolling aggregate over a field or nested-indicator arg, cached.
+    NaN until n non-NaN values are available."""
+    series, label = _arg_series(df, arg)
+    if series is None or n <= 0:
         return float("nan")
-    series = func(close, period)
-    if i >= len(series):
-        return float("nan")
-    value = series.iloc[i]
-    return float(value) if not pd.isna(value) else float("nan")
+    cache_key = f"{_CACHE_PREFIX}{agg}_{label}_{int(n)}"
+    return _value_at(
+        _cache_column(df, cache_key, lambda: _ind.rolling_agg(series, int(n), agg)), i
+    )
 
 
 def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str, float] | None) -> Any:
@@ -455,16 +512,19 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
     if name in {"TRUE", "FALSE"}:
         return name == "TRUE"
 
-    if name in {"CLOSE", "OPEN", "HIGH", "LOW", "VOL", "VOLUME", "VWAP", "MACD", "MACD_SIGNAL", "MACD_HIST"}:
+    if name in {"CLOSE", "OPEN", "HIGH", "LOW", "VOL", "VOLUME"}:
         col = _col_name(name)
         value = row.get(col, float("nan"))
-        if pd.isna(value) and name == "VWAP":
-            return _resolve_vwap(df, i)
-        if pd.isna(value) and name == "MACD":
-            return _resolve_macd(df, i)
-        if pd.isna(value) and name == "MACD_SIGNAL":
-            return _resolve_macd_signal(df, i)
         return float(value) if not pd.isna(value) else float("nan")
+
+    # Scalar / fixed-param studies (VWAP, MACD*, OBV, SAR, STOCH_*, CDL_*, …).
+    # Read the precomputed column if present (runner fast path), else compute the
+    # full Series once and cache it — never per bar.
+    if name in _SCALAR_IDENTIFIERS_ALL or name.startswith("CDL_"):
+        value = row.get(name, float("nan"))
+        if not pd.isna(value):
+            return float(value)
+        return _resolve_scalar(df, name, i)
 
     # Phase 4 — REF_* identifiers resolve to the reference symbol's OHLCV
     # columns. NaN when the runner wasn't given reference data; comparisons
@@ -486,22 +546,56 @@ def _resolve_identifier(name: str, df: pd.DataFrame, i: int, variables: dict[str
     return float("nan")
 
 
-def _resolve_vwap(df: pd.DataFrame, i: int) -> float:
-    series = vwap(df)
-    value = series.iloc[i] if i < len(series) else float("nan")
-    return float(value) if not pd.isna(value) else float("nan")
+# Period-less / fixed-param scalar studies referenceable as identifiers in a
+# formula (e.g. CLOSE > VWAP, MACD > 0, CLOSE > SAR, STOCH_K < 20, OBV > 0).
+# Each builder returns the full Series; computed once and cached. CDL_* pattern
+# identifiers are handled by prefix (any TA-Lib candlestick alias).
+_SCALAR_BUILDERS = {
+    "VWAP":            lambda df: _ind.vwap(df),
+    "MACD":            lambda df: _ind.macd_all(df["close"])[0],
+    "MACD_SIGNAL":     lambda df: _ind.macd_all(df["close"])[1],
+    "MACD_HIST":       lambda df: _ind.macd_all(df["close"])[2],
+    "OBV":             lambda df: _ind.obv(df),
+    "AD":              lambda df: _ind.ad(df),
+    "ADOSC":           lambda df: _ind.adosc(df),
+    "SAR":             lambda df: _ind.sar(df),
+    "PPO":             lambda df: _ind.ppo(df["close"]),
+    "APO":             lambda df: _ind.apo(df["close"]),
+    "ULTOSC":          lambda df: _ind.ultosc(df),
+    "TRANGE":          lambda df: _ind.trange(df),
+    "STOCH_K":         lambda df: _ind.stoch(df)[0],
+    "STOCH_D":         lambda df: _ind.stoch(df)[1],
+    "STOCHF_K":        lambda df: _ind.stochf(df)[0],
+    "STOCHF_D":        lambda df: _ind.stochf(df)[1],
+    "STOCHRSI_K":      lambda df: _ind.stochrsi(df["close"])[0],
+    "STOCHRSI_D":      lambda df: _ind.stochrsi(df["close"])[1],
+    "SUPERTREND":      lambda df: _ind.supertrend(df)[0],
+    "SUPERTREND_LINE": lambda df: _ind.supertrend(df)[1],
+}
+
+_SCALAR_IDENTIFIERS_ALL = frozenset(_SCALAR_BUILDERS)
 
 
-def _resolve_macd(df: pd.DataFrame, i: int) -> float:
-    series = macd_line(df["close"].astype(float))
-    value = series.iloc[i] if i < len(series) else float("nan")
-    return float(value) if not pd.isna(value) else float("nan")
+def _ensure_scalar(df: pd.DataFrame, name: str) -> pd.Series | None:
+    """Precompute-if-missing for a scalar identifier column (read-only after)."""
+    builder = _SCALAR_BUILDERS.get(name)
+    if builder is None:
+        if name.startswith("CDL_"):
+            return _cache_column(df, name, lambda: candlestick_pattern(df, name))
+        return None
+    return _cache_column(df, name, lambda: builder(df))
 
 
-def _resolve_macd_signal(df: pd.DataFrame, i: int) -> float:
-    series = macd_signal(df["close"].astype(float))
-    value = series.iloc[i] if i < len(series) else float("nan")
-    return float(value) if not pd.isna(value) else float("nan")
+def _resolve_scalar(df: pd.DataFrame, name: str, i: int) -> float:
+    return _value_at(_ensure_scalar(df, name), i)
+
+
+def ensure_scalar_columns(df: pd.DataFrame, names) -> None:
+    """Precompute the given scalar-study columns (VWAP/MACD*/OBV/SAR/STOCH_*/
+    CDL_*/…) onto df in one vectorised pass, so the simulator's fast array path
+    can read them. Used by the runner before building the per-bar arrays."""
+    for name in names:
+        _ensure_scalar(df, name)
 
 
 def _evaluate_function(
@@ -513,47 +607,38 @@ def _evaluate_function(
     name = node.name
     args = node.args
 
-    if name in {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}:
+    if name in PERIODIC_INDICATOR_NAMES:
         if len(args) == 1:
             period = int(_as_float(_eval_node(args[0], df, i, variables)))
-            precomputed = f"{name}_{period}"
-            if precomputed in df.columns:
-                value = df.iloc[i].get(precomputed, float("nan"))
-                return float(value) if not pd.isna(value) else float("nan")
             return _resolve_indicator(df, name, period, i)
-        if len(args) == 2 and isinstance(args[0], IdentifierNode):
+        # Two-arg field form is only meaningful for the plain moving averages,
+        # e.g. SMA(VOLUME, 20) / EMA(VOLUME, 20).
+        if len(args) == 2 and isinstance(args[0], IdentifierNode) and name in {"SMA", "EMA"}:
             field = args[0].name
             period = int(_as_float(_eval_node(args[1], df, i, variables)))
-            if name == "SMA":
-                return _rolling_mean(df, field, period, i)
-            if name == "EMA":
-                return _rolling_ema(df, field, period, i)
-        raise ParseError(f"{name} expects either 1 period argument or FIELD, period.")
+            agg = "mean" if name == "SMA" else "ema"
+            return _value_at(_ensure_field_rolling(df, field, period, agg), i)
+        raise ParseError(f"{name} expects a single period argument.")
 
-    if name == "AVG":
-        if len(args) != 2 or not isinstance(args[0], IdentifierNode):
-            raise ParseError("AVG expects FIELD, period.")
-        return _rolling_mean(df, args[0].name, int(_as_float(_eval_node(args[1], df, i, variables))), i)
-
-    if name == "MAX":
-        if len(args) != 2 or not isinstance(args[0], IdentifierNode):
-            raise ParseError("MAX expects FIELD, period.")
-        return _rolling_max(df, args[0].name, int(_as_float(_eval_node(args[1], df, i, variables))), i)
-
-    if name == "MIN":
-        if len(args) != 2 or not isinstance(args[0], IdentifierNode):
-            raise ParseError("MIN expects FIELD, period.")
-        return _rolling_min(df, args[0].name, int(_as_float(_eval_node(args[1], df, i, variables))), i)
-
-    if name == "STDEV":
-        if len(args) != 2 or not isinstance(args[0], IdentifierNode):
-            raise ParseError("STDEV expects FIELD, period.")
-        return _rolling_stdev(df, args[0].name, int(_as_float(_eval_node(args[1], df, i, variables))), i)
+    # AVG / MAX / MIN / STDEV accept either a raw FIELD (CLOSE, VOLUME, …) or a
+    # nested periodic indicator (e.g. AVG(ATR(14), 50) for the ATR-volatility
+    # regime cards). _arg_series resolves both; a non-resolvable first arg is a
+    # ParseError so the problem surfaces loudly at strategy-load, not silently.
+    if name in {"AVG", "MAX", "MIN", "STDEV"}:
+        if len(args) != 2:
+            raise ParseError(f"{name} expects FIELD (or INDICATOR(n)), period.")
+        series, _label = _arg_series(df, args[0])
+        if series is None:
+            raise ParseError(f"{name} first argument must be a field or a periodic indicator.")
+        period = int(_as_float(_eval_node(args[1], df, i, variables)))
+        agg = {"AVG": "mean", "MAX": "max", "MIN": "min", "STDEV": "stdev"}[name]
+        return _roll_over_arg(df, args[0], period, i, agg)
 
     if name == "ZSCORE":
         if len(args) != 2 or not isinstance(args[0], IdentifierNode):
             raise ParseError("ZSCORE expects FIELD, period.")
-        return _rolling_zscore(df, args[0].name, int(_as_float(_eval_node(args[1], df, i, variables))), i)
+        period = int(_as_float(_eval_node(args[1], df, i, variables)))
+        return _value_at(_ensure_zscore(df, args[0].name, period), i)
 
     if name == "PREV":
         if len(args) != 2:
@@ -823,8 +908,19 @@ class CompiledCondition:
             return False
 
 
-_PERIODIC_INDICATORS = {"SMA", "EMA", "RSI", "BB_UPPER", "BB_LOWER", "BB_MID"}
-_SCALAR_INDICATORS = {"MACD", "MACD_SIGNAL", "MACD_HIST", "VWAP"}
+# Single-period studies referenceable as NAME(period) and precomputed as
+# NAME_{period} columns by add_all_indicators(). Sourced from the indicators
+# registry (PERIODIC_INDICATOR_NAMES) so the two never drift apart, plus the
+# session-relative opening range (computed by add_all_indicators the same way).
+# _evaluate_function_arr's periodic block reads these directly from the arrays
+# dict on the hot path.
+_PERIODIC_INDICATORS = set(PERIODIC_INDICATOR_NAMES) | {
+    "OPENING_RANGE_HIGH", "OPENING_RANGE_LOW",
+}
+# Period-less / fixed-param studies referenceable as bare identifiers (VWAP,
+# MACD*, OBV, SAR, STOCH_*, PPO, …). CDL_* candlestick identifiers are matched
+# by prefix. Sourced from the scalar-builder registry above.
+_SCALAR_INDICATORS = set(_SCALAR_IDENTIFIERS_ALL)
 
 # Phase 6 — structural-pattern identifiers. Kept in sync with the keys of
 # patterns.PATTERN_COLUMNS via a startup assertion in tests/test_patterns.py.
@@ -905,9 +1001,10 @@ def _eval_node_arr(
             return True
         if name == "FALSE":
             return False
-        col = _IDENT_TO_ARRAY.get(name)
-        if col is None:
-            return float("nan")
+        # Scalar / pattern / CDL identifiers map to a precomputed column of the
+        # same name; fall back to the identifier itself so any column the runner
+        # precomputed (OBV, SAR, STOCH_K, CDL_ENGULFING, …) is readable here.
+        col = _IDENT_TO_ARRAY.get(name, name)
         arr = arrays.get(col)
         if arr is None:
             return float("nan")
@@ -1003,9 +1100,11 @@ def _evaluate_function_arr(
         if prev_i < 0:
             return float("nan")
 
-        # Form 1: PREV(IDENT, k) — column lookup at the shifted bar
+        # Form 1: PREV(IDENT, k) — column lookup at the shifted bar. Fall back to
+        # the identifier name itself so scalar columns (OBV, SAR, STOCH_K, …) —
+        # which are stored under their uppercase name — resolve correctly.
         if type(args[0]) is IdentifierNode:
-            col = _IDENT_TO_ARRAY.get(args[0].name) or args[0].name.lower()
+            col = _IDENT_TO_ARRAY.get(args[0].name, args[0].name)
             arr = arrays.get(col)
             if arr is None:
                 return float("nan")
@@ -1018,18 +1117,14 @@ def _evaluate_function_arr(
         # CompiledCondition and use evaluate_arrays() directly.
         return _eval_node_arr(args[0], arrays, n_rows, prev_i, variables)
 
-    # AVG / MAX / MIN / OPENING_RANGE_* — these aren't pre-vectorised, so for
-    # correctness we have to fall through. They were already slow under the old
-    # path; getting these to the fast lane needs another pass (precompute as
-    # rolling columns, same as RSI/EMA). For now, return NaN for the array
-    # path so the caller can decide — but in practice strategies rarely use
-    # these inside hot conditions.
+    # AVG / MAX / MIN / STDEV / ZSCORE / RS — not yet pre-vectorised; conditions
+    # using these are marked fast_path_unsafe in _collect_refs and take the slow
+    # pandas path. Same fix shape as OPENING_RANGE_*: precompute as columns.
     return float("nan")
 
 
 _FAST_PATH_UNSAFE_FUNCS = {
     "AVG", "MAX", "MIN", "STDEV", "ZSCORE", "RS",
-    "OPENING_RANGE_HIGH", "OPENING_RANGE_LOW",
 }
 
 
@@ -1058,7 +1153,7 @@ def _collect_refs(
         for arg in node.args:
             _collect_refs(arg, indicators, scalars, patterns, flags)
     elif isinstance(node, IdentifierNode):
-        if node.name in _SCALAR_INDICATORS:
+        if node.name in _SCALAR_INDICATORS or node.name.startswith("CDL_"):
             scalars.add(node.name)
         elif node.name in _PATTERN_IDENTIFIERS:
             patterns.add(node.name)
@@ -1069,16 +1164,46 @@ def _collect_refs(
         _collect_refs(node.right, indicators, scalars, patterns, flags)
 
 
+# Every function the evaluator can actually compute. Used to fail loudly at
+# compile time: an unknown function (e.g. a regime filter the formula path can't
+# evaluate) previously raised mid-backtest, got swallowed to `False`, and — since
+# entry filters are AND-ed — silently turned the whole strategy into zero trades.
+# Validating here surfaces it as a clear strategy-load error instead.
+_KNOWN_FUNCTIONS = set(_PERIODIC_INDICATORS) | {
+    "AVG", "MAX", "MIN", "STDEV", "ZSCORE",
+    "PREV", "RS",
+}
+
+
+def _validate_known_functions(node: Any) -> None:
+    """Walk the AST and raise ParseError on any function the evaluator can't run."""
+    if isinstance(node, FunctionNode):
+        if node.name not in _KNOWN_FUNCTIONS:
+            raise ParseError(
+                f"Unsupported function {node.name!r} in condition. "
+                f"Supported functions: {', '.join(sorted(_KNOWN_FUNCTIONS))}."
+            )
+        for arg in node.args:
+            _validate_known_functions(arg)
+    elif isinstance(node, (UnaryNode, NotNode)):
+        _validate_known_functions(node.operand)
+    elif isinstance(node, (BinaryNode, ComparisonNode, BooleanNode)):
+        _validate_known_functions(node.left)
+        _validate_known_functions(node.right)
+
+
 def compile_condition(condition: str) -> CompiledCondition | None:
     """
     Parse `condition` once and return a CompiledCondition.
 
-    Returns None for empty conditions. Raises ParseError on malformed input
-    so callers can surface the problem at strategy-load time, not mid-backtest.
+    Returns None for empty conditions. Raises ParseError on malformed input or
+    an unsupported function so callers can surface the problem at strategy-load
+    time, not silently mid-backtest.
     """
     if not condition or not str(condition).strip():
         return None
     tree = _parse_expression(condition)
+    _validate_known_functions(tree)
     indicators: set[IndicatorRef] = set()
     scalars: set[str] = set()
     patterns: set[str] = set()

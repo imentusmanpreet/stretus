@@ -2,35 +2,50 @@ name: n_bar_high_breakout
 category: pattern
 direction: bullish
 kind: pattern
-roles: [entry_trigger]
-formula: "CLOSE > MAX(HIGH, {window})"
-description: "Close breaks above the highest high of the prior N bars — Donchian-style range breakout."
-
-works_best_on: [5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+roles:
+- entry_trigger
+formula: CLOSE > HIGHEST_HIGH({window})
+description: Close breaks above the highest high of the prior N COMPLETED bars — Donchian-style range breakout. Uses HIGHEST_HIGH which excludes the current bar (unlike MAX(HIGH,N) which includes it and would always be false since HIGH >= CLOSE).
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bearish
-
-pairs_well_with: [volume_spike, vwap_bullish, ema_above]
-contradicts: [n_bar_low_breakdown]
-
+- sentiment: bearish
+pairs_well_with:
+- volume_spike
+- vwap_bullish
+- ema_above
+contradicts:
+- n_bar_low_breakdown
 params_by_timeframe:
-  1m:   {window: 60}
-  3m:   {window: 30}
-  5m:   {window: 20}
-  10m:  {window: 20}
-  15m:  {window: 20}
-  30m:  {window: 20}
-  1h:   {window: 20}
-  1d:   {window: 20}
-
+  1m:
+    window: 60
+  3m:
+    window: 30
+  5m:
+    window: 20
+  10m:
+    window: 20
+  15m:
+    window: 20
+  30m:
+    window: 20
+  1h:
+    window: 20
+  1d:
+    window: 20
 experience_fit:
   beginner: 0.9
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.7
   momentum: 1.0
@@ -39,3 +54,20 @@ intent_fit:
   scalping: 0.5
   mean_reversion: 0.0
   confirmation: 0.7
+match_when:
+  phrases:
+  - break(?:s|out)?\s+(?:above\s+|over\s+)?(\d+)[\s\-]*bar\s+high
+  - new\s+(\d+)[\s\-]*bar\s+high
+  - highest\s+high\s+(?:in\s+|of\s+(?:the\s+)?last\s+)?(\d+)\s+bars?
+  - \bbreakout\s+(?:trading\s+)?strategy
+  - \b(?:price|stock)\s+breaks?\s+out
+  - breakout\s+above\s+(?:the\s+)?(?:previous|prior|recent)\s+high
+  - (?:break|breakout)\s+(?:of\s+|over\s+)?(?:previous|prior)\s+(?:day|session)\s+high
+  - clean\s+(?:intraday\s+)?breakout
+  acts_as: entry_trigger
+  mirrors_to: n_bar_low_breakdown
+  extract_params:
+    window:
+      from_group: 1
+      default: 20
+      kind: int

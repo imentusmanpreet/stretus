@@ -48,7 +48,7 @@ _DEFAULT_SEED_VALUES = {
     "risk_validation": "system risk guardials",
     "stop_loss_pct": "2.0",
     "take_profit_pct": "5.0",
-    "minimum_trade_value": "500.0",
+    "minimum_trade_value": "10.0",
 }
 _STRING_FIELDS = {
     "execution_mode",

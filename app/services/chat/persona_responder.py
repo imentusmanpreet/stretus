@@ -315,7 +315,7 @@ async def compose_milestone_response(
     """
     fallback_fn = _FALLBACKS.get(event)
     if fallback_fn is None:
-        logger.warning("persona_responder|unknown_event=%s|using_empty_fallback", event)
+        logger.warning("⚠️ persona_responder|unknown_event=%s|using_empty_fallback", event)
         return context.get("fallback_text", "")
 
     if llm is None:
@@ -332,7 +332,7 @@ async def compose_milestone_response(
             return response.strip()
     except Exception as exc:
         logger.warning(
-            "persona_responder|llm_failed|event=%s|err=%s|using_fallback",
+            "⚠️ persona_responder|llm_failed|event=%s|err=%s|using_fallback",
             event,
             str(exc)[:120],
         )

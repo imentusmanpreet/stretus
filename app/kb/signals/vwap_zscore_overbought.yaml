@@ -2,33 +2,51 @@ name: vwap_zscore_overbought
 category: volume
 direction: bearish
 kind: threshold
-roles: [entry_trigger]
-formula: "(CLOSE - VWAP) / STDEV(CLOSE, {window}) > {threshold}"
-description: "Price is more than N standard deviations above VWAP — institutional mean-reversion short entry."
-
-works_best_on: [1m, 3m, 5m, 10m, 15m, 30m]
+roles:
+- entry_trigger
+formula: (CLOSE - VWAP) / STDEV(CLOSE, {window}) > {threshold}
+description: Price is more than N standard deviations above VWAP — institutional mean-reversion short entry.
+works_best_on:
+- 1m
+- 3m
+- 5m
+- 10m
+- 15m
+- 30m
 weak_on: []
-unsupported_on: [1d]
-
+unsupported_on:
+- 1d
 contraindicated_when:
-  - sentiment: bullish
-
-pairs_well_with: [vwap_reclaim_bearish, bearish_rejection_candle, volume_spike]
-contradicts: [vwap_zscore_oversold]
-
+- sentiment: bullish
+pairs_well_with:
+- vwap_reclaim_bearish
+- bearish_rejection_candle
+- volume_spike
+contradicts:
+- vwap_zscore_oversold
 params_by_timeframe:
-  1m:   {window: 20, threshold: 2.0}
-  3m:   {window: 20, threshold: 2.0}
-  5m:   {window: 20, threshold: 2.0}
-  10m:  {window: 20, threshold: 2.0}
-  15m:  {window: 20, threshold: 2.0}
-  30m:  {window: 20, threshold: 2.0}
-
+  1m:
+    window: 20
+    threshold: 2.0
+  3m:
+    window: 20
+    threshold: 2.0
+  5m:
+    window: 20
+    threshold: 2.0
+  10m:
+    window: 20
+    threshold: 2.0
+  15m:
+    window: 20
+    threshold: 2.0
+  30m:
+    window: 20
+    threshold: 2.0
 experience_fit:
   beginner: 0.5
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.0
   momentum: 0.4
@@ -37,3 +55,14 @@ intent_fit:
   scalping: 0.7
   mean_reversion: 1.0
   confirmation: 0.5
+match_when:
+  phrases:
+  - vwap\s+(?:z[\s\-]*score|deviation)\s+(?:is\s+|above|>)\s*(\d+(?:\.\d+)?)
+  - price\s+stretched\s+above\s+vwap
+  acts_as: exit_trigger
+  mirrors_to: vwap_zscore_oversold
+  extract_params:
+    threshold:
+      from_group: 1
+      default: 2
+      kind: float

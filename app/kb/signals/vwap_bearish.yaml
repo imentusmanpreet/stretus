@@ -2,36 +2,45 @@ name: vwap_bearish
 category: volume
 direction: bearish
 kind: regime
-roles: [entry_trigger, entry_filter, exit_trigger]
-formula: "CLOSE < VWAP"
-description: "Price below VWAP — institutional bearish bias (intraday). Common bullish-position exit."
-
-works_best_on: [1m, 3m, 5m, 10m, 15m, 30m]
+roles:
+- entry_trigger
+- entry_filter
+- exit_trigger
+- exit_filter
+formula: CLOSE < VWAP
+description: Price below VWAP — institutional bearish bias (intraday). Common bullish-position exit.
+works_best_on:
+- 1m
+- 3m
+- 5m
+- 10m
+- 15m
+- 30m
 weak_on: []
-unsupported_on: [1d]
-
+unsupported_on:
+- 1d
 contraindicated_when:
-  - sentiment: bullish
-    role: entry_trigger
-  - sentiment: bullish
-    role: entry_filter
-
-pairs_well_with: [price_below_ema, ema_below, volume_spike]
-contradicts: [vwap_bullish]
-
+- sentiment: bullish
+  role: entry_trigger
+- sentiment: bullish
+  role: entry_filter
+pairs_well_with:
+- price_below_ema
+- ema_below
+- volume_spike
+contradicts:
+- vwap_bullish
 params_by_timeframe:
-  1m:   {}
-  3m:   {}
-  5m:   {}
-  10m:  {}
-  15m:  {}
-  30m:  {}
-
+  1m: {}
+  3m: {}
+  5m: {}
+  10m: {}
+  15m: {}
+  30m: {}
 experience_fit:
   beginner: 1.0
   intermediate: 1.0
   expert: 0.9
-
 intent_fit:
   trend: 0.7
   momentum: 1.0
@@ -40,3 +49,13 @@ intent_fit:
   scalping: 1.0
   mean_reversion: 0.0
   confirmation: 1.0
+match_when:
+  phrases:
+  - (?:price|close)s?\s+(?:is\s+|stays?\s+|closes?\s+|are\s+)?below\s+vwap
+  - (?:below|under|<)\s+vwap
+  - trading\s+(?:below|under)\s+vwap
+  acts_as: exit_trigger
+  mirrors_to: vwap_bullish
+  forbids_keyword:
+  - vwap\s+reclaim
+  - vwap\s+(?:bounce|rejection)

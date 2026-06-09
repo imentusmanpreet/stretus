@@ -2,10 +2,11 @@
 """
 India-specific signals — ye Mangrove me nahi the.
 NSE/BSE ke liye: circuit breakers, F&O ban, India VIX, market hours.
-pandas_ta nahi — sirf ta aur pure pandas use karta hai.
+Uses TA-Lib (C-backed) for the SMA-based broad-market filter.
 """
+import numpy as np
 import pandas as pd
-import ta
+import talib
 from stretus_knowledge_base.stretus_kb.registry import RuleRegistry
 
 NSE_OPEN_HOUR  = 9
@@ -108,10 +109,11 @@ def nifty50_trend_filter(df: pd.DataFrame, window: int = 50) -> bool:
     """
     if len(df) < window:
         return True
-    sma = ta.trend.SMAIndicator(df["Close"], window=window).sma_indicator()
-    if sma is None or pd.isna(sma.iloc[-1]):
+    close = df["Close"].to_numpy(dtype=float)
+    sma = talib.SMA(close, timeperiod=window)
+    if np.isnan(sma[-1]):
         return True
-    return float(df["Close"].iloc[-1]) > float(sma.iloc[-1])
+    return float(close[-1]) > float(sma[-1])
 
 
 @RuleRegistry.register(

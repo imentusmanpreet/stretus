@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any
 
-from app.services.agent.prompt import MASTER_AGENTIC_SYSTEM_PROMPT
+from app.services.agent.prompt import MASTER_AGENTIC_SYSTEM_PROMPT, build_agentic_system_prompt
 from app.services.agent.state import build_agent_state
 from app.services.agent.tool_catalog import (
     AGENT_TOOL_NAMES,
@@ -98,10 +98,22 @@ class AgentDecision:
         if self.tool_name in {
             AgentToolName.PLAN_STRATEGY_SIGNALS.value,
             AgentToolName.ASSEMBLE_STRATEGY.value,
-            AgentToolName.RUN_BACKTEST.value,
         }:
             route["intent"] = "confirmation"
             route["is_confirmation"] = True
+            return route
+
+        if self.tool_name == AgentToolName.RUN_BACKTEST.value:
+            route["intent"] = "run_backtest"
+            route["is_confirmation"] = False
+            if params.get("from_utc"):
+                route["backtest_from_utc"] = params["from_utc"]
+            if params.get("to_utc"):
+                route["backtest_to_utc"] = params["to_utc"]
+            return route
+
+        if self.tool_name == AgentToolName.MODIFY_SIGNAL_SELECTION.value:
+            route["intent"] = "modify_signals"
             return route
 
         if self.tool_name == AgentToolName.GET_BACKTEST_RESULT.value:
@@ -159,6 +171,7 @@ class AgentRouter:
         recent_messages: list[Any],
         latest_strategy_context: dict | None = None,
         latest_backtest_result: dict | None = None,
+        asset_classes: list[str] | None = None,
     ) -> AgentDecision:
         state = build_agent_state(
             session_id=session_id,
@@ -168,8 +181,9 @@ class AgentRouter:
             latest_backtest_result=latest_backtest_result,
             recent_messages=recent_messages,
         )
+        system_prompt = build_agentic_system_prompt(asset_classes)
         messages = [
-            {"role": "system", "content": MASTER_AGENTIC_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": (
@@ -180,15 +194,29 @@ class AgentRouter:
             },
         ]
 
+        logger.info(
+            "🧭 Agent routing | session=%s state=%s | user: %s",
+            session_id,
+            previous_state or "—",
+            " ".join(str(user_message or "").split())[:160] or "<empty>",
+        )
+
         try:
             response = await self._llm.chat_with_tools(messages, AGENT_TOOL_SCHEMAS, session_id=session_id)
             decision = _decision_from_tool_response(response)
             if decision is not None:
                 _ensure_session_id(decision, session_id)
+                logger.info(
+                    "🎯 Agent decision | session=%s tool=%s source=%s%s",
+                    session_id,
+                    decision.tool_name,
+                    decision.source,
+                    f" reply={decision.assistant_text[:80]!r}" if decision.assistant_text else "",
+                )
                 return decision
         except Exception as exc:
             logger.warning(
-                "agent_router|tool_call_failed|session_id=%s|err=%s|fallback=legacy_router",
+                "⚠️ agent_router|tool_call_failed|session_id=%s|err=%s|fallback=legacy_router",
                 session_id,
                 str(exc)[:160],
             )
@@ -201,6 +229,12 @@ class AgentRouter:
         )
         decision = _decision_from_legacy_route(legacy_route, state)
         _ensure_session_id(decision, session_id)
+        logger.info(
+            "🧭 Agent decision (legacy) | session=%s tool=%s intent=%s",
+            session_id,
+            decision.tool_name,
+            legacy_route.get("intent") if isinstance(legacy_route, dict) else None,
+        )
         return decision
 
 
@@ -310,15 +344,19 @@ def _decision_from_legacy_route(route: dict[str, Any], state: dict[str, Any]) ->
     elif intent == "general_chat":
         tool_name = AgentToolName.RESPOND_TEXT.value
         params = {"message": route.get("reply_text") or "I can help you build and backtest an Indian stock strategy."}
+    elif intent == "run_backtest":
+        tool_name = AgentToolName.RUN_BACKTEST.value
+        strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
+        if strategy.get("strategy_id"):
+            params["strategy_id"] = strategy["strategy_id"]
+        if route.get("backtest_from_utc"):
+            params["from_utc"] = route["backtest_from_utc"]
+        if route.get("backtest_to_utc"):
+            params["to_utc"] = route["backtest_to_utc"]
     elif intent == "confirmation" and route.get("is_confirmation"):
         mode = str(state.get("mode") or "")
         if mode == "plan_signals" and state.get("has_signal_plan"):
             tool_name = AgentToolName.ASSEMBLE_STRATEGY.value
-        elif mode in {"assemble_strategy", "backtest_confirmation"}:
-            tool_name = AgentToolName.RUN_BACKTEST.value
-            strategy = state.get("strategy") if isinstance(state.get("strategy"), dict) else {}
-            if strategy.get("strategy_id"):
-                params["strategy_id"] = strategy["strategy_id"]
         else:
             tool_name = AgentToolName.PLAN_STRATEGY_SIGNALS.value
     else:

@@ -71,7 +71,9 @@ async def lifespan(app: FastAPI):
         info["provider"].upper(),
         info["active_model"],
     )
+    logger.info("  🚀 🚀  LLM details | %s", {k: v for k, v in info.items() if k != "provider"})
     logger.info("the info is %s", info)
+    logger.info("Test LOG")
     if info["provider"] == "ollama":
         logger.info("🔌 Ollama endpoint configured | url=%s", info["ollama_url"])
 

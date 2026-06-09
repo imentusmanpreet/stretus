@@ -1,0 +1,56 @@
+name: shooting_star_candle
+category: pattern
+direction: bearish
+kind: pattern
+roles:
+- entry_trigger
+- entry_filter
+formula: CDL_SHOOTINGSTAR < {threshold}
+description: Shooting-star candle — long upper wick rejection, bearish reversal confirmation.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bullish
+pairs_well_with: []
+contradicts: []
+params_by_timeframe:
+  1m:
+    threshold: 0
+  3m:
+    threshold: 0
+  5m:
+    threshold: 0
+  10m:
+    threshold: 0
+  15m:
+    threshold: 0
+  30m:
+    threshold: 0
+  1h:
+    threshold: 0
+  1d:
+    threshold: 0
+experience_fit:
+  beginner: 0.6
+  intermediate: 1.0
+  expert: 1.0
+intent_fit:
+  trend: 0.3
+  momentum: 0.4
+  breakout: 0.3
+  reversal: 0.8
+  scalping: 0.5
+  mean_reversion: 0.5
+  confirmation: 1.0
+match_when:
+  phrases:
+  - shooting\s+star
+  acts_as: entry_trigger

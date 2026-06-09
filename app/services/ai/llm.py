@@ -39,6 +39,27 @@ from app.core.token_tracker import track_tokens
 logger   = logging.getLogger(__name__)
 
 
+def _preview(text: Any, limit: int = 200) -> str:
+    """One-line, length-capped preview of arbitrary text for readable logs."""
+    s = " ".join(str(text or "").split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _last_user_preview(messages: list[dict], limit: int = 200) -> str:
+    """Pull the most recent user turn so logs show *what was asked*."""
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return _preview(msg.get("content"), limit)
+    return "<no user message>"
+
+
+# Status codes that indicate the active key is the problem (out of credits,
+# rate limited, auth failed, transient server error). For these we rotate to
+# the next configured OpenRouter key and retry. 400/404/503 are not in this
+# set because switching keys won't help (bad request, missing model, network).
+_ROTATABLE_STATUS_CODES = frozenset({401, 402, 429, 502})
+
+
 # ── Available OpenRouter models ───────────────────────────────────────────────
 OPENROUTER_MODELS = {
     "meta-llama/llama-3.3-70b-instruct": "Best quality — recommended",
@@ -104,9 +125,10 @@ class LLMService:
             keys_info = f"{stats['keys_remaining']} keys available (loaded from .env)"
         
         logger.info(
-            f"LLMService initialised — provider={self._provider}  "
-            f"model={self.model_name}  "
-            f"openrouter_keys={keys_info}"
+            "🤖 LLMService initialised | provider=%s model=%s openrouter_keys=%s",
+            self._provider,
+            self.model_name,
+            keys_info,
         )
 
     # ── Public method ─────────────────────────────────────────────────────────
@@ -143,6 +165,7 @@ class LLMService:
         *,
         tool_choice: str | dict = "auto",
         session_id: str | None = None,
+        max_tokens: int = 1024,
     ) -> dict:
         """
         Send messages with tool definitions and return a normalized response:
@@ -165,10 +188,10 @@ class LLMService:
             session_id: Optional session ID for token tracking
         """
         if self._provider == "openrouter":
-            return await self._call_openrouter_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id)
+            return await self._call_openrouter_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
         if self._provider == "ollama":
             return await self._call_ollama_with_tools(messages, tools)
-        return await self._auto_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id)
+        return await self._auto_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
 
     # ── Provider info ─────────────────────────────────────────────────────────
 
@@ -221,6 +244,13 @@ class LLMService:
                 "OpenAI client is not available on the server. Please retry after some time.",
             ) from exc
 
+        logger.info(
+            "🧠 OpenRouter → asking %s | msgs=%d temp=%.2f | user: %s",
+            use_model,
+            len(messages),
+            temperature,
+            _last_user_preview(messages),
+        )
         try:
             client = AsyncOpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -235,8 +265,14 @@ class LLMService:
             )
 
             content = resp.choices[0].message.content
-            logger.debug(f"OpenRouter response — model={use_model}  tokens={resp.usage.total_tokens if resp.usage else 'N/A'}")
-            
+            total_tokens = resp.usage.total_tokens if resp.usage else None
+            logger.info(
+                "💬 OpenRouter ← %s replied | tokens=%s | reply: %s",
+                use_model,
+                total_tokens if total_tokens is not None else "N/A",
+                _preview(content),
+            )
+
             # Track token usage
             if session_id and resp.usage:
                 track_tokens(
@@ -251,13 +287,7 @@ class LLMService:
             return content
 
         except RateLimitError as exc:
-            logger.warning("OpenRouter rate limit reached for model=%s: %s", use_model, exc)
-            
-            # Rotate to next key
-            new_key = self._openrouter_key_manager.rotate_key_on_exhaustion(api_key)
-            if new_key:
-                self._openrouter_key = new_key
-            
+            logger.warning("⚠️ OpenRouter rate limit reached | model=%s: %s", use_model, exc)
             raise AppError(
                 429,
                 (
@@ -266,37 +296,47 @@ class LLMService:
                 ),
             ) from exc
         except AuthenticationError as exc:
-            logger.error("OpenRouter authentication failed for model=%s: %s", use_model, exc)
+            logger.error("🔑❌ OpenRouter authentication failed | model=%s: %s", use_model, exc)
             raise AppError(
                 401,
                 "Authentication failed. Please verify the configured OpenRouter API key and try again.",
             ) from exc
         except NotFoundError as exc:
-            logger.error("OpenRouter model not found: %s", use_model)
+            logger.error("❌ OpenRouter model not found | model=%s", use_model)
             raise AppError(
                 404,
                 f"The configured OpenRouter model '{use_model}' was not found. Please verify the model name and try again.",
             ) from exc
         except APIConnectionError as exc:
-            logger.error("OpenRouter connection error for model=%s: %s", use_model, exc)
+            logger.error("📡❌ OpenRouter connection error | model=%s: %s", use_model, exc)
             raise AppError(
                 503,
                 "Unable to reach OpenRouter right now. Please retry after some time.",
             ) from exc
         except BadRequestError as exc:
-            logger.error("OpenRouter request rejected for model=%s: %s", use_model, exc)
+            logger.error("❌ OpenRouter request rejected | model=%s: %s", use_model, exc)
             raise AppError(
                 400,
                 str(exc).strip() or "The OpenRouter request was invalid. Please review the request and try again.",
             ) from exc
         except APIError as exc:
-            logger.error("OpenRouter error for model=%s: %s", use_model, exc)
+            # 402 = insufficient credits on this key. The OpenAI SDK has no
+            # specific subclass for 402 so it arrives here. Surface it with
+            # its own status code so the wrapper rotates to the next key.
+            status = getattr(exc, "status_code", None)
+            if status == 402:
+                logger.warning("💳 OpenRouter key out of credits | model=%s: %s", use_model, exc)
+                raise AppError(
+                    402,
+                    "OpenRouter API key has insufficient credits.",
+                ) from exc
+            logger.error("❌ OpenRouter error | model=%s: %s", use_model, exc)
             raise AppError(
                 502,
                 "OpenRouter could not process the request right now. Please retry after some time.",
             ) from exc
         except Exception as exc:
-            logger.exception("Unexpected OpenRouter error for model=%s", use_model)
+            logger.exception("💥 Unexpected OpenRouter error | model=%s", use_model)
             raise AppError(
                 500,
                 "An unexpected LLM error occurred. Please retry after some time.",
@@ -310,32 +350,50 @@ class LLMService:
             )
 
         use_model = model or self._openrouter_model
-        
-        # Get the active key from the manager
-        api_key = self._openrouter_key_manager.get_active_key()
-        
-        try:
-            result = await self._call_openrouter_once(messages, api_key, use_model, session_id=session_id)
-            return result
-        except AppError as exc:
-            if exc.status_code == 429:
-                # Key was already rotated in _call_openrouter_once
-                # Try once more with the new key
-                stats = self._openrouter_key_manager.get_stats()
-                if stats['keys_remaining'] > 0:
-                    logger.info(f"Retrying with rotated key ({stats['keys_remaining']} keys remaining)")
-                    new_key = self._openrouter_key_manager.get_active_key()
-                    try:
-                        result = await self._call_openrouter_once(messages, new_key, use_model, session_id=session_id)
-                        return result
-                    except AppError:
-                        pass  # Fall through to raise the original error
-                
-                raise AppError(
-                    429,
-                    "All configured OpenRouter API keys are currently rate limited. Please retry after some time.",
+        return await self._openrouter_with_rotation(
+            lambda key: self._call_openrouter_once(messages, key, use_model, session_id=session_id),
+            label="chat",
+        )
+
+    async def _openrouter_with_rotation(self, call_with_key, *, label: str):
+        """
+        Run an OpenRouter call, cycling through configured API keys when the
+        active key returns a rotatable error (out of credits, rate limited,
+        auth failed, transient server error).
+
+        ``call_with_key`` is an async callable that takes a single API key and
+        performs one API call, raising AppError on failure.
+        """
+        stats = self._openrouter_key_manager.get_stats()
+        max_attempts = max(stats['keys_remaining'], 1)
+        last_exc: AppError | None = None
+
+        for attempt in range(max_attempts):
+            api_key = self._openrouter_key_manager.get_active_key()
+            try:
+                return await call_with_key(api_key)
+            except AppError as exc:
+                last_exc = exc
+                if exc.status_code not in _ROTATABLE_STATUS_CODES:
+                    raise
+                logger.warning(
+                    "🔁 OpenRouter %s failed (status %s, attempt %d/%d) — rotating to next key.",
+                    label, exc.status_code, attempt + 1, max_attempts,
                 )
-            raise
+                new_key = self._openrouter_key_manager.rotate_key_on_exhaustion(api_key)
+                if new_key is None:
+                    raise AppError(
+                        exc.status_code,
+                        (
+                            f"All {stats['total_keys']} configured OpenRouter API keys are "
+                            "exhausted or unavailable. Please add credits or retry after some time."
+                        ),
+                    ) from exc
+                self._openrouter_key = new_key
+
+        if last_exc:
+            raise last_exc
+        raise AppError(503, "OpenRouter request failed after exhausting all API keys.")
 
     async def _call_openrouter_tools_once(
         self,
@@ -360,6 +418,15 @@ class LLMService:
                 "OpenAI client is not available on the server. Please retry after some time.",
             ) from exc
 
+        tool_names = [
+            (t.get("function") or {}).get("name", "?") for t in (tools or [])
+        ]
+        logger.info(
+            "🧠 OpenRouter → routing with %s | tools=%s | user: %s",
+            use_model,
+            tool_names,
+            _last_user_preview(messages),
+        )
         try:
             client = AsyncOpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -373,7 +440,7 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            
+
             # Track token usage
             if session_id and resp.usage:
                 track_tokens(
@@ -384,40 +451,57 @@ class LLMService:
                     prompt_tokens=resp.usage.prompt_tokens,
                     completion_tokens=resp.usage.completion_tokens,
                 )
-            
-            return _normalise_tool_response(resp.choices[0].message)
+
+            normalised = _normalise_tool_response(resp.choices[0].message)
+            picked = normalised.get("tool_calls") or []
+            if picked:
+                for call in picked:
+                    logger.info(
+                        "🛠️  %s picked tool → %s | args=%s",
+                        use_model,
+                        call.get("name"),
+                        _preview(call.get("arguments"), 240),
+                    )
+            else:
+                logger.info(
+                    "💬 %s chose no tool | reply: %s",
+                    use_model,
+                    _preview(normalised.get("content")),
+                )
+            if normalised.get("content") and picked:
+                # Assistant text alongside a tool call is the model's reasoning.
+                logger.info("🧩 %s rationale: %s", use_model, _preview(normalised.get("content")))
+            return normalised
         except RateLimitError as exc:
-            logger.warning("OpenRouter rate limit reached for tool call model=%s: %s", use_model, exc)
-            
-            # Rotate to next key
-            new_key = self._openrouter_key_manager.rotate_key_on_exhaustion(api_key)
-            if new_key:
-                self._openrouter_key = new_key
-            
+            logger.warning("⚠️ OpenRouter rate limit reached (tool call) | model=%s: %s", use_model, exc)
             raise AppError(429, "Rate limit exceeded. Please retry after some time.") from exc
         except AuthenticationError as exc:
-            logger.error("OpenRouter authentication failed for tool call model=%s: %s", use_model, exc)
+            logger.error("🔑❌ OpenRouter authentication failed (tool call) | model=%s: %s", use_model, exc)
             raise AppError(
                 401,
                 "Authentication failed. Please verify the configured OpenRouter API key and try again.",
             ) from exc
         except NotFoundError as exc:
-            logger.error("OpenRouter tool-call model not found: %s", use_model)
+            logger.error("❌ OpenRouter tool-call model not found | model=%s", use_model)
             raise AppError(
                 404,
                 f"The configured OpenRouter model '{use_model}' was not found.",
             ) from exc
         except APIConnectionError as exc:
-            logger.error("OpenRouter connection error for tool call model=%s: %s", use_model, exc)
+            logger.error("📡❌ OpenRouter connection error (tool call) | model=%s: %s", use_model, exc)
             raise AppError(503, "Unable to reach OpenRouter right now. Please retry after some time.") from exc
         except BadRequestError as exc:
-            logger.error("OpenRouter tool-call request rejected for model=%s: %s", use_model, exc)
+            logger.error("❌ OpenRouter tool-call request rejected | model=%s: %s", use_model, exc)
             raise AppError(400, str(exc).strip() or "The OpenRouter tool request was invalid.") from exc
         except APIError as exc:
-            logger.error("OpenRouter tool-call error for model=%s: %s", use_model, exc)
+            status = getattr(exc, "status_code", None)
+            if status == 402:
+                logger.warning("💳 OpenRouter key out of credits (tool call) | model=%s: %s", use_model, exc)
+                raise AppError(402, "OpenRouter API key has insufficient credits.") from exc
+            logger.error("❌ OpenRouter tool-call error | model=%s: %s", use_model, exc)
             raise AppError(502, "OpenRouter could not process the tool request right now.") from exc
         except Exception as exc:
-            logger.exception("Unexpected OpenRouter tool-call error for model=%s", use_model)
+            logger.exception("💥 Unexpected OpenRouter tool-call error | model=%s", use_model)
             raise AppError(500, "An unexpected LLM tool-call error occurred.") from exc
 
     async def _call_openrouter_with_tools(
@@ -428,6 +512,7 @@ class LLMService:
         *,
         tool_choice: str | dict = "auto",
         session_id: str | None = None,
+        max_tokens: int = 1024,
     ) -> dict:
         if not self._openrouter_key:
             raise AppError(
@@ -436,46 +521,18 @@ class LLMService:
             )
 
         use_model = model or self._openrouter_model
-        
-        # Get the active key from the manager
-        api_key = self._openrouter_key_manager.get_active_key()
-        
-        try:
-            result = await self._call_openrouter_tools_once(
+        return await self._openrouter_with_rotation(
+            lambda key: self._call_openrouter_tools_once(
                 messages,
                 tools,
-                api_key,
+                key,
                 use_model,
                 tool_choice=tool_choice,
                 session_id=session_id,
-            )
-            return result
-        except AppError as exc:
-            if exc.status_code == 429:
-                # Key was already rotated in _call_openrouter_tools_once
-                # Try once more with the new key
-                stats = self._openrouter_key_manager.get_stats()
-                if stats['keys_remaining'] > 0:
-                    logger.info(f"Retrying tool call with rotated key ({stats['keys_remaining']} keys remaining)")
-                    new_key = self._openrouter_key_manager.get_active_key()
-                    try:
-                        result = await self._call_openrouter_tools_once(
-                            messages,
-                            tools,
-                            new_key,
-                            use_model,
-                            tool_choice=tool_choice,
-                            session_id=session_id,
-                        )
-                        return result
-                    except AppError:
-                        pass  # Fall through to raise the original error
-                
-                raise AppError(
-                    429,
-                    "All configured OpenRouter API keys are currently rate limited. Please retry after some time.",
-                )
-            raise
+                max_tokens=max_tokens,
+            ),
+            label="tool call",
+        )
 
     # ── Ollama Local ──────────────────────────────────────────────────────────
 
@@ -529,15 +586,19 @@ class LLMService:
                     options=options,
                 )
 
+            logger.info(
+                "🧠 Ollama → asking %s (local) | msgs=%d | user: %s",
+                use_model, len(messages), _last_user_preview(messages),
+            )
             resp = await loop.run_in_executor(None, _sync_call)
 
             content = resp["message"]["content"]
-            logger.debug(f"Ollama response — model={use_model}")
+            logger.info("💬 Ollama ← %s replied | reply: %s", use_model, _preview(content))
             return content
 
         except Exception as exc:
             err = str(exc)
-            logger.error(f"Ollama error: {err}")
+            logger.error("❌ Ollama error | model=%s: %s", use_model, err)
 
             if "connection refused" in err.lower() or "connect" in err.lower():
                 raise AppError(
@@ -612,10 +673,17 @@ class LLMService:
         try:
             resp = await loop.run_in_executor(None, _sync_call)
             message = resp.get("message", resp) if isinstance(resp, dict) else resp
-            return _normalise_tool_response(message)
+            normalised = _normalise_tool_response(message)
+            picked = normalised.get("tool_calls") or []
+            if picked:
+                for call in picked:
+                    logger.info("🛠️  %s (local) picked tool → %s | args=%s", use_model, call.get("name"), _preview(call.get("arguments"), 240))
+            else:
+                logger.info("💬 %s (local) chose no tool | reply: %s", use_model, _preview(normalised.get("content")))
+            return normalised
         except Exception as exc:
             err = str(exc)
-            logger.error("Ollama tool-call error: %s", err)
+            logger.error("❌ Ollama tool-call error | model=%s: %s", use_model, err)
             if "connection refused" in err.lower() or "connect" in err.lower():
                 raise AppError(
                     503,
@@ -648,12 +716,12 @@ class LLMService:
             except AppError as exc:
                 openrouter_error = exc
                 logger.warning(
-                    "OpenRouter failed in auto mode, falling back to Ollama. Reason: %s",
+                    "🔻 Auto mode: OpenRouter failed, falling back to Ollama | reason: %s",
                     exc.message,
                 )
 
         # Fall back to Ollama
-        logger.info(f"Auto mode: using Ollama ({self._ollama_model})")
+        logger.info("🔻 Auto mode: using Ollama (%s)", self._ollama_model)
         self.model_name = self._ollama_model
         try:
             return await self._call_ollama(messages)
@@ -669,6 +737,7 @@ class LLMService:
         *,
         tool_choice: str | dict = "auto",
         session_id: str | None = None,
+        max_tokens: int = 1024,
     ) -> dict:
         openrouter_error: AppError | None = None
 
@@ -679,17 +748,18 @@ class LLMService:
                     tools,
                     tool_choice=tool_choice,
                     session_id=session_id,
+                    max_tokens=max_tokens,
                 )
                 self.model_name = self._openrouter_model
                 return result
             except AppError as exc:
                 openrouter_error = exc
                 logger.warning(
-                    "OpenRouter tool call failed in auto mode, falling back to Ollama. Reason: %s",
+                    "🔻 Auto mode: OpenRouter tool call failed, falling back to Ollama | reason: %s",
                     exc.message,
                 )
 
-        logger.info("Auto mode: using Ollama tool fallback (%s)", self._ollama_model)
+        logger.info("🔻 Auto mode: using Ollama tool fallback (%s)", self._ollama_model)
         self.model_name = self._ollama_model
         try:
             return await self._call_ollama_with_tools(messages, tools)

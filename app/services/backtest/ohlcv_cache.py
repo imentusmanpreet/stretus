@@ -104,7 +104,7 @@ def get_cached_records(
         )
         return rows
     except Exception as exc:
-        logger.warning("Failed to read OHLCV cache %s: %s — refetching", path.name, exc)
+        logger.warning("⚠️  OHLCV cache read failed | file=%s error=%s — refetching", path.name, exc)
         return None
 
 
@@ -125,7 +125,7 @@ def save_records(
         )
         _enforce_size_cap()
     except Exception as exc:
-        logger.warning("Failed to save OHLCV cache for %s/%s: %s", symbol, interval, exc)
+        logger.warning("⚠️  OHLCV cache save failed | symbol=%s interval=%s error=%s", symbol, interval, exc)
 
 
 def _enforce_size_cap() -> None:
@@ -143,9 +143,9 @@ def _enforce_size_cap() -> None:
             total -= size
             deleted += 1
         except OSError as exc:
-            logger.warning("Failed to evict cache file %s: %s", oldest.name, exc)
+            logger.warning("⚠️  OHLCV cache eviction failed | file=%s error=%s", oldest.name, exc)
     if deleted:
-        logger.info("OHLCV cache size cap reached — evicted %d oldest files", deleted)
+        logger.info("🧹 OHLCV cache size cap reached — evicted %d oldest files", deleted)
 
 
 def clear_cache() -> int:
@@ -157,5 +157,5 @@ def clear_cache() -> int:
             count += 1
         except OSError:
             pass
-    logger.info("Cleared %d OHLCV cache files", count)
+    logger.info("🧹 Cleared %d OHLCV cache files", count)
     return count

@@ -37,6 +37,8 @@ _DUPLICATE_TRADE_ACTIVITY_METRIC_KEYS = (
     *_TRADE_OUTCOME_ALIAS_KEYS,
     *_TRADE_DURATION_ALIAS_KEYS,
 )
+_MONTHLY_PERFORMANCE_KEY = "monthly_performance"
+_BACKTEST_TRADES_KEY = "backtest_trades"
 
 
 def _utcnow() -> datetime:
@@ -63,6 +65,63 @@ def _first_metric_number(metrics: dict[str, Any], keys: tuple[str, ...]) -> floa
         if zero_value is None:
             zero_value = value
     return zero_value
+
+
+def _sort_monthly_performance_desc(entries: Any) -> Any:
+    if not isinstance(entries, list):
+        return entries
+
+    sortable: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return entries
+        sortable.append(entry)
+
+    return sorted(
+        sortable,
+        key=lambda entry: str(entry.get("month") or ""),
+        reverse=True,
+    )
+
+
+def _trade_date_sort_value(trade: dict[str, Any]) -> str:
+    return str(trade.get("entry_date") or trade.get("exit_date") or "")
+
+
+def _sort_backtest_trades_desc(entries: Any) -> Any:
+    if not isinstance(entries, list):
+        return entries
+
+    sortable: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return entries
+        sortable.append(entry)
+
+    return sorted(sortable, key=_trade_date_sort_value, reverse=True)
+
+
+def sort_backtest_monthly_performance_desc(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Sort time-series result lists newest first for API consumers."""
+    if not isinstance(result, dict):
+        return result
+
+    monthly_performance = result.get(_MONTHLY_PERFORMANCE_KEY)
+    if isinstance(monthly_performance, list):
+        result[_MONTHLY_PERFORMANCE_KEY] = _sort_monthly_performance_desc(monthly_performance)
+
+    metrics = result.get("metrics")
+    if isinstance(metrics, dict):
+        metrics_monthly_performance = metrics.get(_MONTHLY_PERFORMANCE_KEY)
+        if isinstance(metrics_monthly_performance, list):
+            metrics[_MONTHLY_PERFORMANCE_KEY] = _sort_monthly_performance_desc(
+                metrics_monthly_performance
+            )
+        backtest_trades = metrics.get(_BACKTEST_TRADES_KEY)
+        if isinstance(backtest_trades, list):
+            metrics[_BACKTEST_TRADES_KEY] = _sort_backtest_trades_desc(backtest_trades)
+
+    return result
 
 
 def _trade_date_duration_days(trade: dict[str, Any]) -> float | None:
@@ -131,6 +190,7 @@ def normalize_backtest_metric_aliases(result: dict[str, Any] | None) -> dict[str
 
     metrics = result.get("metrics")
     if not isinstance(metrics, dict):
+        sort_backtest_monthly_performance_desc(result)
         return result
 
     trades = metrics.get("backtest_trades")
@@ -170,6 +230,7 @@ def normalize_backtest_metric_aliases(result: dict[str, Any] | None) -> dict[str
     for key in _DUPLICATE_TRADE_ACTIVITY_METRIC_KEYS:
         metrics.pop(key, None)
 
+    sort_backtest_monthly_performance_desc(result)
     return result
 
 

@@ -103,13 +103,19 @@ class InstrumentMetadata(Base):
     """
     Exchange instrument details required for tick/lot normalisation and live quotes.
 
-    Populated by a daily refresh job (Upstox instrument dump).
-    The execution service reads this before generating bracket orders.
-    Falls back to safe defaults (tick_size=0.05, lot_size=1) when absent.
+    Multi-asset shape (post-migration 0006):
+      ``asset_class``     — 'equity_cash' | 'crypto_spot'
+      ``adapter_id``      — 'upstox_rest' | 'binance_rest'
+      ``adapter_symbol``  — venue-native symbol (e.g. 'NSE_EQ|INE002A01018' for
+                            Upstox, 'BTCUSDT' for Binance)
+      ``qty_step_size``   — fractional crypto qty step (NULL for equity)
+      ``min_notional``    — venue-enforced min trade value in quote asset
+                            (USDT for crypto; NULL for equity, where the
+                            risk-config min_trade_value is the equivalent)
 
-    upstox_instrument_key — Upstox v2 key used for live LTP / circuit calls,
-      e.g. "NSE_EQ|INE002A01018".  If NULL, the client falls back to
-      constructing "NSE_EQ|SYMBOL" which works for most equities.
+    Legacy column ``upstox_instrument_key`` is preserved (mirrored into
+    ``adapter_symbol`` by the migration backfill) so existing equity callers
+    continue to work without code changes.
     """
 
     __tablename__ = "instrument_metadata"
@@ -120,10 +126,35 @@ class InstrumentMetadata(Base):
     lot_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     upper_circuit: Mapped[Optional[float]] = mapped_column(Numeric(12, 4), nullable=True)
     lower_circuit: Mapped[Optional[float]] = mapped_column(Numeric(12, 4), nullable=True)
+
+    # Legacy Upstox key (kept for backwards compatibility).
     upstox_instrument_key: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True,
         comment="Upstox v2 instrument key, e.g. NSE_EQ|INE002A01018. Used for live LTP/circuit.",
     )
+
+    # Multi-asset additions (nullable for back-compat).
+    asset_class: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Asset class (equity_cash, crypto_spot). Mirrors ref_data.",
+    )
+    adapter_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Venue adapter id (upstox_rest, binance_rest).",
+    )
+    adapter_symbol: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Venue-native symbol (NSE_EQ|INE... for Upstox, BTCUSDT for Binance).",
+    )
+    qty_step_size: Mapped[Optional[float]] = mapped_column(
+        Numeric(28, 10), nullable=True,
+        comment="Fractional qty step (crypto). NULL for equity.",
+    )
+    min_notional: Mapped[Optional[float]] = mapped_column(
+        Numeric(28, 10), nullable=True,
+        comment="Min trade value enforced by the venue (USDT for crypto).",
+    )
+
     last_refreshed: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

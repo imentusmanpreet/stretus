@@ -234,9 +234,14 @@ def render_sidebar() -> None:
         if st.button("Create New Chat", type="primary", use_container_width=True):
             try:
                 chat = create_chat(title=title)
-                st.session_state["session_id"] = chat["session_id"]
-                st.session_state["history"] = get_messages(chat["session_id"])
+                new_session_id = chat["session_id"]
+                st.session_state["session_id"] = new_session_id
+                st.session_state["history"] = get_messages(new_session_id)
                 st.session_state["chat_list"] = list_chats()
+                # Sync the load-chat selectbox so its sticky widget state from
+                # the previous chat doesn't overwrite the new session_id on the
+                # next rerun (see the post-selectbox handler below).
+                st.session_state["chat_loader_select"] = new_session_id
                 st.session_state["last_error"] = None
                 _safe_rerun()
             except Exception as exc:
@@ -256,12 +261,21 @@ def render_sidebar() -> None:
                 for chat in chats
             }
             current = st.session_state.get("session_id")
+            # Keep the selectbox's stored state in lockstep with the active
+            # session_id whenever the prior selection is stale (e.g. the chat
+            # was deleted) or has never been set. Setting the key value before
+            # the widget renders is the supported way to drive a Streamlit
+            # selectbox without fighting its sticky widget state.
+            stored = st.session_state.get("chat_loader_select")
+            if stored not in options:
+                st.session_state["chat_loader_select"] = current if current in options else options[0]
             index = options.index(current) if current in options else 0
             selected = st.selectbox(
                 "Load existing chat",
                 options,
                 index=index,
                 format_func=lambda item: labels.get(item, item),
+                key="chat_loader_select",
             )
             if selected and selected != st.session_state.get("session_id"):
                 st.session_state["session_id"] = selected
@@ -279,7 +293,14 @@ def render_sidebar() -> None:
                     delete_chat(st.session_state["session_id"])
                     st.session_state["session_id"] = None
                     st.session_state["history"] = None
-                    st.session_state["chat_list"] = list_chats()
+                    remaining = list_chats()
+                    st.session_state["chat_list"] = remaining
+                    # Drop the selectbox's sticky reference to the deleted
+                    # chat so the next rerun picks a valid option (or none).
+                    if remaining:
+                        st.session_state["chat_loader_select"] = remaining[0]["session_id"]
+                    else:
+                        st.session_state.pop("chat_loader_select", None)
                     st.session_state["last_error"] = None
                     _safe_rerun()
                 except Exception as exc:

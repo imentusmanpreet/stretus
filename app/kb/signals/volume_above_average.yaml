@@ -1,0 +1,76 @@
+name: volume_above_average
+category: volume
+direction: neutral
+kind: threshold
+roles:
+- entry_filter
+formula: VOL > AVG(VOL, {window})
+description: Volume above its rolling average — plain participation confirmation (no multiplier).
+works_best_on:
+- 1m
+- 3m
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on: []
+unsupported_on: []
+contraindicated_when: []
+pairs_well_with:
+- price_above_ema
+- vwap_bullish
+- ema_above
+contradicts:
+- volume_dry_up
+param_specs:
+  window:
+    type: int
+    default: 20
+    min: 2
+    max: 400
+    violation_action: note
+engine:
+  kind: filter
+  anchors_supported: []
+params_by_timeframe:
+  1m:
+    window: 20
+  3m:
+    window: 20
+  5m:
+    window: 20
+  10m:
+    window: 20
+  15m:
+    window: 20
+  30m:
+    window: 20
+  1h:
+    window: 20
+  1d:
+    window: 20
+experience_fit:
+  beginner: 1.0
+  intermediate: 1.0
+  expert: 0.9
+intent_fit:
+  trend: 0.6
+  momentum: 0.8
+  breakout: 0.8
+  reversal: 0.4
+  scalping: 0.7
+  mean_reversion: 0.4
+  confirmation: 1.0
+match_when:
+  phrases:
+  - (?:above[\s\-]+average|higher[\s\-]+than[\s\-]+average)\s+volume
+  - volume\s+above\s+(?:its\s+)?(?:\d+\s+)?(?:day\s+)?average
+  - above\s+average\s+vol(?:ume)?
+  acts_as: entry_filter
+  extract_params:
+    window:
+      from_group: null
+      default: 20
+      kind: int

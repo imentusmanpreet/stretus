@@ -1,0 +1,58 @@
+name: ppo_positive
+category: momentum
+direction: bullish
+kind: threshold
+roles:
+- entry_trigger
+- entry_filter
+formula: PPO > {threshold}
+description: Percentage Price Oscillator positive — fast EMA above slow EMA (bullish).
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bearish
+pairs_well_with: []
+contradicts:
+- ppo_negative
+params_by_timeframe:
+  1m:
+    threshold: 0.0
+  3m:
+    threshold: 0.0
+  5m:
+    threshold: 0.0
+  10m:
+    threshold: 0.0
+  15m:
+    threshold: 0.0
+  30m:
+    threshold: 0.0
+  1h:
+    threshold: 0.0
+  1d:
+    threshold: 0.0
+experience_fit:
+  beginner: 0.6
+  intermediate: 1.0
+  expert: 1.0
+intent_fit:
+  trend: 0.7
+  momentum: 1.0
+  breakout: 0.4
+  reversal: 0.2
+  scalping: 0.6
+  mean_reversion: 0.0
+  confirmation: 0.6
+match_when:
+  phrases:
+  - ppo\s+(?:positive|above\s+0|bullish)
+  acts_as: entry_trigger
+  mirrors_to: ppo_negative

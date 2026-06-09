@@ -29,6 +29,16 @@ def generate_yaml(builder: StrategyBuilder) -> str:
     name      = data["strategy"]["name"]
     safe_name = re.sub(r"[^a-zA-Z0-9]", "_", name).lower()
 
+    strategy_block = data.get("strategy", {}) if isinstance(data, dict) else {}
+    signals = strategy_block.get("signals") or strategy_block.get("entry") or []
+    logger.info(
+        "🏗️  Assembling strategy YAML | name=%s symbol=%s timeframe=%s signals=%s",
+        name,
+        getattr(builder, "symbol", None),
+        getattr(builder, "timeframe", None),
+        len(signals) if isinstance(signals, (list, dict)) else signals,
+    )
+
     last_permission_error: PermissionError | None = None
     for index, folder in enumerate(_candidate_strategy_folders()):
         os.makedirs(folder, exist_ok=True)
@@ -38,11 +48,12 @@ def generate_yaml(builder: StrategyBuilder) -> str:
                 yaml.dump(data, f, sort_keys=False, default_flow_style=False)
             if index > 0:
                 logger.warning(
-                    "Strategy YAML fallback activated | configured_folder=%s fallback_folder=%s file=%s",
+                    "⚠️ Strategy YAML fallback activated | configured_folder=%s fallback_folder=%s file=%s",
                     settings.strategy_folder,
                     folder,
                     filepath,
                 )
+            logger.info("✅ Strategy YAML written | name=%s file=%s", name, filepath)
             return filepath
         except PermissionError as exc:
             last_permission_error = exc

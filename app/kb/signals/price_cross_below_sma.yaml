@@ -1,0 +1,68 @@
+name: price_cross_below_sma
+category: trend
+direction: bearish
+kind: crossover
+roles:
+- entry_trigger
+- exit_trigger
+- exit_filter
+formula: CLOSE < SMA({window}) AND PREV(CLOSE, 1) >= PREV(SMA({window}), 1)
+description: Price closes below the SMA(window) on the current bar after being at-or-above it on the prior bar.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bullish
+  role: entry_trigger
+pairs_well_with:
+- volume_spike
+contradicts:
+- price_cross_above_sma
+- price_above_ema
+params_by_timeframe:
+  1m:
+    window: 20
+  3m:
+    window: 20
+  5m:
+    window: 20
+  10m:
+    window: 20
+  15m:
+    window: 20
+  30m:
+    window: 20
+  1h:
+    window: 50
+  1d:
+    window: 50
+experience_fit:
+  beginner: 1.0
+  intermediate: 0.9
+  expert: 0.6
+intent_fit:
+  trend: 1.0
+  momentum: 0.7
+  breakout: 0.0
+  reversal: 0.4
+  scalping: 0.4
+  mean_reversion: 0.4
+  confirmation: 0.7
+match_when:
+  phrases:
+  - (?:price|close)s?\s+crosses?\s+(?:below|down\s+through)\s+(?:the\s+)?(\d+)\s*sma
+  acts_as: exit_trigger
+  mirrors_to: price_cross_above_sma
+  extract_params:
+    window:
+      from_group: 1
+      default: 20
+      kind: int

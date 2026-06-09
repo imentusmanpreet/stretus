@@ -159,14 +159,29 @@ def _parse_time_to_utc_minutes(raw_time: Any, tz: str = "Asia/Kolkata") -> int |
     return ((hh * 60 + mm) - offset) % (24 * 60)
 
 
-_STOP_LOSS_TYPES = {"percent", "structural", "atr"}
-_STOP_LOSS_ANCHORS = {
-    "opening_range_low",   # anchor at LOW of first N bars in the session (long SL)
-    "opening_range_high",  # anchor at HIGH of first N bars in the session (short SL — reserved)
-    "prev_n_bar_low",      # anchor at MIN(LOW, N) at entry (long SL)
-    "prev_n_bar_high",     # anchor at MAX(HIGH, N) at entry (short SL — reserved)
-}
-_TRAILING_TYPES = {"percent", "atr", "ema", "chandelier"}
+# Single source of truth: the planner-side engine contract. When co-located
+# (the app monorepo / tests) we import it so the planner and engine can never
+# disagree on the accepted stop vocabulary. In the STANDALONE quant_engine
+# deployment `app` isn't on the path — we fall back to the local literal, and a
+# test (tests/test_planner/test_engine_contract.py) asserts the two stay equal.
+try:  # pragma: no cover - exercised in the co-located app test suite
+    from app.planner.engine_contract import (
+        STOP_LOSS_ANCHORS as _SHARED_ANCHORS,
+        STOP_LOSS_TYPES as _SHARED_TYPES,
+        TRAILING_TYPES as _SHARED_TRAILING,
+    )
+    _STOP_LOSS_TYPES = set(_SHARED_TYPES)
+    _STOP_LOSS_ANCHORS = set(_SHARED_ANCHORS)
+    _TRAILING_TYPES = set(_SHARED_TRAILING)
+except Exception:  # standalone engine: keep the local contract
+    _STOP_LOSS_TYPES = {"percent", "structural", "atr"}
+    _STOP_LOSS_ANCHORS = {
+        "opening_range_low",   # anchor at LOW of first N bars in the session (long SL)
+        "opening_range_high",  # anchor at HIGH of first N bars in the session (short SL — reserved)
+        "prev_n_bar_low",      # anchor at MIN(LOW, N) at entry (long SL)
+        "prev_n_bar_high",     # anchor at MAX(HIGH, N) at entry (short SL — reserved)
+    }
+    _TRAILING_TYPES = {"percent", "atr", "ema", "chandelier"}
 
 
 def _parse_stop_loss_spec(raw: Any) -> dict[str, Any] | None:
@@ -439,6 +454,13 @@ class StrategyConfig:
     time_exit_spec: dict[str, Any] | None = None
     # Phase 10 — direction constraint
     direction: str = "both"   # "long_only" | "short_only" | "both"
+    # Phase 12 — short leg conditions. For a "both"-direction strategy these
+    # hold the SHORT side's entry/exit, while entry_condition/exit_condition
+    # describe the LONG leg only; the runner runs a separate SHORT pass on
+    # these. Empty for single-direction strategies (a short_only strategy keeps
+    # its condition in entry_condition/exit_condition with direction="short_only").
+    short_entry_condition: str = ""
+    short_exit_condition: str = ""
     # Phase 10 — session entry window (precomputed UTC minutes of day).
     # entry_window_start_utc blocks entries BEFORE this time (e.g. 09:30 = 4*60+30=270 UTC).
     # entry_window_end_utc blocks NEW entries AFTER this time (does not force-exit).
@@ -457,6 +479,30 @@ class StrategyConfig:
     rsi_entry_band_min: float | None = None   # RSI must be >= this to enter (None = no gate)
     rsi_entry_band_max: float | None = None   # RSI must be <= this to enter (None = no gate)
     volume_ratio_threshold: float | None = None  # volume must be >= N × avg volume (None = no gate)
+    # Phase 2 — volatility-band gate. Skip entries when volatility is too low
+    # (dead/illiquid market) or too high (chaotic). Reads ATR_{w} or NATR_{w}.
+    # Both bounds optional; None = that side of the band is open.
+    vol_filter_metric: str | None = None     # "atr" | "natr" | None (gate disabled)
+    vol_filter_window: int = 14
+    vol_filter_min: float | None = None      # block if metric < min (skip dead markets)
+    vol_filter_max: float | None = None      # block if metric > max (skip chaotic markets)
+    # Phase 2 — regime gate. Only enter when the causally-detected market regime
+    # is in this allow-list. None / empty = gate disabled. Values are regime
+    # types: "trending_up" | "trending_down" | "ranging" | "volatile".
+    regime_filter_allowed: tuple[str, ...] | None = None
+    # Phase 2 — relative-strength gate. Only enter when the symbol is
+    # outperforming its reference over `rs_window` bars (RS ratio > rs_min_ratio).
+    # Requires reference_symbol to be set. None = disabled.
+    rs_filter_window: int | None = None
+    rs_filter_min_ratio: float = 1.0
+    # Phase 2 — lunch-lull skip window (UTC minutes-of-day). Both None = disabled.
+    lunch_lull_start_utc: int | None = None
+    lunch_lull_end_utc: int | None = None
+    # Phase 2 — event filter. Skip new entries on configured calendar dates
+    # (earnings / F&O expiry / macro announcements). Dates are "YYYY-MM-DD" in
+    # the exchange's local sense; we compare against the bar's UTC date. Empty
+    # = disabled.
+    event_skip_dates: tuple[str, ...] | None = None
     # Phase 10 — position sizing
     position_sizing_mode: str = "fixed_fractional"   # "fixed_fractional" | "risk_based" | "fixed_units"
     max_capital_allocation_pct: float = 100.0        # max % of balance in one trade (100 = no cap)
@@ -523,6 +569,12 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         or strategy.get("exit", {}).get("condition")
         or "PROFIT >= TAKE_PROFIT_TARGET OR LOSS <= -STOP_LOSS_TARGET"
     ).strip()
+
+    # Phase 12 — optional SHORT leg conditions (for direction="both").
+    short_entry_condition = _normalise_legacy_entry_condition(
+        str(strategy.get("short_entry_condition") or "").strip()
+    )
+    short_exit_condition = str(strategy.get("short_exit_condition") or "").strip()
 
     stop_loss = _to_float(
         risk.get("stop_loss_percent", strategy.get("stop_loss_pct", variables.get("STOP_LOSS_TARGET"))),
@@ -644,7 +696,12 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     raw_direction = str(strategy.get("direction") or profile.get("direction") or "both").lower().strip()
     direction = raw_direction if raw_direction in ("long_only", "short_only", "both") else "both"
 
-    # Phase 10 — entry window (from YAML "entry_window" block or flat fields)
+    # Phase 10 — entry window (from YAML "entry_window" block or flat fields).
+    # Asset-class fallback when the YAML doesn't declare a window: Indian stocks
+    # default to NSE 09:15–15:30 IST; crypto leaves both bounds None (24/7);
+    # other markets stay None too. The new strategy_assembler also writes this
+    # default into the YAML, but applying it again here keeps older strategies
+    # working without a re-assemble.
     entry_window_raw = strategy.get("entry_window") or {}
     entry_window_start_utc: int | None = None
     entry_window_end_utc:   int | None = None
@@ -657,6 +714,24 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
             entry_window_raw.get("end") or entry_window_raw.get("end_time"),
             entry_window_raw.get("timezone", "Asia/Kolkata"),
         )
+    if entry_window_start_utc is None and entry_window_end_utc is None:
+        market_for_default = _normalise_market(str(strategy.get("market") or ""))
+        if market_for_default == "indian_stocks":
+            entry_window_start_utc = _parse_time_to_utc_minutes("09:15", "Asia/Kolkata")
+            entry_window_end_utc   = _parse_time_to_utc_minutes("15:30", "Asia/Kolkata")
+
+    # Phase 2 — lunch-lull skip. Block new entries inside a midday window where
+    # liquidity/edge typically dries up. lunch_lull: {start: "12:00", end:
+    # "13:00", timezone: "Asia/Kolkata"}. Both bounds required to activate.
+    lunch_lull_start_utc: int | None = None
+    lunch_lull_end_utc:   int | None = None
+    lunch_raw = strategy.get("lunch_lull")
+    if isinstance(lunch_raw, dict):
+        _ltz = lunch_raw.get("timezone", "Asia/Kolkata")
+        lunch_lull_start_utc = _parse_time_to_utc_minutes(lunch_raw.get("start") or lunch_raw.get("start_time"), _ltz)
+        lunch_lull_end_utc = _parse_time_to_utc_minutes(lunch_raw.get("end") or lunch_raw.get("end_time"), _ltz)
+        if lunch_lull_start_utc is None or lunch_lull_end_utc is None:
+            lunch_lull_start_utc = lunch_lull_end_utc = None  # need both
 
     # Phase 10 — risk circuit breakers
     max_consecutive_losses  = _to_int(
@@ -708,6 +783,71 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     _vrt = _first_not_none(strategy.get("volume_ratio_threshold"), profile.get("volume_ratio_threshold"))
     volume_ratio_threshold: float | None = float(_vrt) if _vrt is not None else None
 
+    # Phase 2 — volatility-band gate. Accept a nested block
+    #   volatility_filter: {metric: natr, window: 14, min: 0.5, max: 5.0}
+    # or flat fields (volatility_filter_min / _max / _metric / _window).
+    vol_filter_metric: str | None = None
+    vol_filter_window = 14
+    vol_filter_min: float | None = None
+    vol_filter_max: float | None = None
+    vol_raw = strategy.get("volatility_filter")
+    if isinstance(vol_raw, dict):
+        _vmetric = str(vol_raw.get("metric") or "natr").lower().strip()
+        vol_filter_metric = _vmetric if _vmetric in ("atr", "natr") else "natr"
+        vol_filter_window = int(vol_raw.get("window") or 14)
+        _vmin, _vmax = vol_raw.get("min"), vol_raw.get("max")
+        vol_filter_min = float(_vmin) if _vmin is not None else None
+        vol_filter_max = float(_vmax) if _vmax is not None else None
+    else:
+        _vmin = _first_not_none(strategy.get("volatility_filter_min"), profile.get("volatility_filter_min"))
+        _vmax = _first_not_none(strategy.get("volatility_filter_max"), profile.get("volatility_filter_max"))
+        if _vmin is not None or _vmax is not None:
+            _vmetric = str(
+                _first_not_none(strategy.get("volatility_filter_metric"), profile.get("volatility_filter_metric")) or "natr"
+            ).lower().strip()
+            vol_filter_metric = _vmetric if _vmetric in ("atr", "natr") else "natr"
+            vol_filter_window = int(
+                _first_not_none(strategy.get("volatility_filter_window"), profile.get("volatility_filter_window")) or 14
+            )
+            vol_filter_min = float(_vmin) if _vmin is not None else None
+            vol_filter_max = float(_vmax) if _vmax is not None else None
+
+    # Phase 2 — regime gate. Block: regime_filter: {allowed: [trending_up, ...]}
+    # (also accepts a single string under `allowed` or `intended`).
+    regime_filter_allowed: tuple[str, ...] | None = None
+    _valid_regimes = {"trending_up", "trending_down", "ranging", "volatile"}
+    regime_raw = strategy.get("regime_filter")
+    if isinstance(regime_raw, dict):
+        _allowed = regime_raw.get("allowed") or regime_raw.get("intended")
+        if isinstance(_allowed, str):
+            _allowed = [_allowed]
+        if _allowed:
+            cleaned = tuple(
+                str(r).lower().strip() for r in _allowed
+                if str(r).lower().strip() in _valid_regimes
+            )
+            regime_filter_allowed = cleaned or None
+
+    # Phase 2 — relative-strength gate. relative_strength_filter:
+    #   {window: 20, min_ratio: 1.0}. Requires reference_symbol.
+    rs_filter_window: int | None = None
+    rs_filter_min_ratio = 1.0
+    rs_raw = strategy.get("relative_strength_filter")
+    if isinstance(rs_raw, dict):
+        _rw = rs_raw.get("window")
+        if _rw is not None:
+            rs_filter_window = int(_rw)
+            rs_filter_min_ratio = float(rs_raw.get("min_ratio") or 1.0)
+
+    # Phase 2 — event filter. event_filter: {skip_dates: ["2026-01-31", ...]}
+    event_skip_dates: tuple[str, ...] | None = None
+    event_raw = strategy.get("event_filter")
+    if isinstance(event_raw, dict):
+        _dates = event_raw.get("skip_dates") or event_raw.get("dates")
+        if _dates:
+            cleaned_dates = tuple(str(d).strip()[:10] for d in _dates if str(d).strip())
+            event_skip_dates = cleaned_dates or None
+
     # Phase 10 — position sizing
     raw_psm = str(
         _first_not_none(strategy.get("position_sizing_mode"), profile.get("position_sizing_mode")) or "fixed_fractional"
@@ -732,6 +872,8 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         objective=objective,
         entry_condition=entry_condition,
         exit_condition=exit_condition,
+        short_entry_condition=short_entry_condition,
+        short_exit_condition=short_exit_condition,
         indicators=indicators,
         stop_loss=stop_loss,
         take_profit=take_profit,
@@ -761,6 +903,16 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         rsi_entry_band_min=rsi_entry_band_min,
         rsi_entry_band_max=rsi_entry_band_max,
         volume_ratio_threshold=volume_ratio_threshold,
+        vol_filter_metric=vol_filter_metric,
+        vol_filter_window=vol_filter_window,
+        vol_filter_min=vol_filter_min,
+        vol_filter_max=vol_filter_max,
+        regime_filter_allowed=regime_filter_allowed,
+        rs_filter_window=rs_filter_window,
+        rs_filter_min_ratio=rs_filter_min_ratio,
+        lunch_lull_start_utc=lunch_lull_start_utc,
+        lunch_lull_end_utc=lunch_lull_end_utc,
+        event_skip_dates=event_skip_dates,
         position_sizing_mode=position_sizing_mode,
         max_capital_allocation_pct=max_capital_allocation_pct,
         per_trade_risk_pct=per_trade_risk_pct,

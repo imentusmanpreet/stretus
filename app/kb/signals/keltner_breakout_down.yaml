@@ -2,34 +2,58 @@ name: keltner_breakout_down
 category: volatility
 direction: bearish
 kind: pattern
-roles: [entry_trigger]
-description: "Price closes below the lower Keltner Channel — strong bearish breakout."
-
-works_best_on: [5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+formula: CLOSE < KC_LOWER({window})
+roles:
+- entry_trigger
+description: Price closes below the lower Keltner Channel — strong bearish breakout.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bullish
-
-pairs_well_with: [bb_squeeze, volume_spike, adx_strong_trend]
-contradicts: [keltner_breakout_up]
-
+- sentiment: bullish
+pairs_well_with:
+- bb_squeeze
+- volume_spike
+- adx_strong_trend
+contradicts:
+- keltner_breakout_up
 params_by_timeframe:
-  1m:   {window: 20, multiplier: 2.0}
-  3m:   {window: 20, multiplier: 2.0}
-  5m:   {window: 20, multiplier: 2.0}
-  10m:  {window: 20, multiplier: 2.0}
-  15m:  {window: 20, multiplier: 2.0}
-  30m:  {window: 20, multiplier: 2.0}
-  1h:   {window: 20, multiplier: 2.0}
-  1d:   {window: 20, multiplier: 2.0}
-
+  1m:
+    window: 20
+    multiplier: 2.0
+  3m:
+    window: 20
+    multiplier: 2.0
+  5m:
+    window: 20
+    multiplier: 2.0
+  10m:
+    window: 20
+    multiplier: 2.0
+  15m:
+    window: 20
+    multiplier: 2.0
+  30m:
+    window: 20
+    multiplier: 2.0
+  1h:
+    window: 20
+    multiplier: 2.0
+  1d:
+    window: 20
+    multiplier: 2.0
 experience_fit:
   beginner: 0.8
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.7
   momentum: 1.0
@@ -38,3 +62,9 @@ intent_fit:
   scalping: 0.5
   mean_reversion: 0.0
   confirmation: 0.7
+match_when:
+  phrases:
+  - keltner\s+(?:channel\s+)?(?:breakout|break)\s+(?:down|below|bearish)
+  - price\s+breaks?\s+(?:below\s+)?lower\s+keltner
+  acts_as: entry_trigger
+  mirrors_to: keltner_breakout_up

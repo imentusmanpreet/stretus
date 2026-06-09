@@ -22,6 +22,10 @@ groq==0.11.0
 pyyaml==6.0.2
 python-multipart==0.0.12
 httpx==0.27.2
+# orjson is used by quant_engine_client to encode 1M+ row OHLCV POSTs
+# without building a giant intermediate Python str. ~3-10× faster than
+# stdlib json for this workload and uses noticeably less peak memory.
+orjson==3.10.7
 grpcio==1.80.0
 protobuf>=5.26.1,<7
 
@@ -36,8 +40,13 @@ pandas==2.2.3
 numpy==1.26.4
 openpyxl>=3.1.2,<4
 
-# ta — pandas_ta ka replacement, Python 3.12 compatible, PyPI pe available
-ta==0.11.0
+# TA-Lib — official Python wrapper for the TA-Lib C library.
+# Provides 150+ indicators + 60+ candlestick patterns, C-speed (2-4x faster than SWIG).
+# Requires the TA-Lib C library installed on the host — handled in Dockerfile.
+TA-Lib==0.6.8
 
 # NSE India data
 nsepython==2.9
+
+# ── UI / Streamlit ─────────────────────────────────────────
+streamlit>=1.32,<2

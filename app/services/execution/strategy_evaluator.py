@@ -29,22 +29,25 @@ from app.db.models.execution import ExecutionState
 from app.db.models.strategy import Strategy
 from app.schemas.execution import (
     ActionType,
+    AssetClass,
     EvaluateExecuteRequest,
     EvaluateExecuteResponse,
     EvaluationMode,
     ExecutionStatePayload,
     ExitInstruction,
+    GatesConfig,
     OpenPosition,
     RiskSnapshot,
     StrategyConfigPayload,
 )
 from app.services.execution.account_manager import AccountCheckInput, AccountManager
+from app.services.execution.entry_gates import evaluate_entry_gates
 from app.services.execution.indicator_engine import compute_lookback
 from app.services.execution.market_data_service import MarketDataService
 from app.services.execution.ref_data_service import (
     InstrumentDefaults,
+    lookup_adapter_symbol,
     lookup_instrument_defaults,
-    lookup_upstox_instrument_key,
 )
 from app.services.execution.risk_execution_config_service import (
     RiskExecutionConfigSnapshot,
@@ -102,33 +105,63 @@ class StrategyEvaluator:
             symbol        = strategy_cfg.symbol
             timeframe     = strategy_cfg.timeframe
             strategy_type = strategy_cfg.strategy_type
+            asset_class   = strategy_cfg.asset_class
+            currency_sym  = "$" if asset_class == AssetClass.crypto_spot else "₹"
 
-            # ── Step 2: Resolve Upstox instrument key from ref_data ───────────
-            upstox_key = await lookup_upstox_instrument_key(symbol, self._db)
-            if upstox_key:
-                self._emit(messages, f"🔑 Upstox key resolved from ref_data: {upstox_key}")
+            # ── Step 2: Resolve venue-native adapter symbol from ref_data ─────
+            adapter_symbol = await lookup_adapter_symbol(
+                symbol, asset_class, self._db,
+            )
+            if adapter_symbol:
+                self._emit(
+                    messages,
+                    f"🔑 ref_data adapter symbol | asset_class={asset_class.value} "
+                    f"symbol={symbol} → {adapter_symbol}",
+                )
             else:
-                self._emit(messages,
-                    f"⚠️  No Upstox key in ref_data for {symbol} — falling back to NSE_EQ|TICKER.",
-                    level="warning")
+                self._emit(
+                    messages,
+                    f"⚠️  No ref_data mapping for asset_class={asset_class.value} "
+                    f"symbol={symbol} — market-data client will fall back to "
+                    f"best-effort derivation.",
+                    level="warning",
+                )
 
             # ── Step 3: Fetch market data (candles + LTP + circuit limits) ────
             all_rules = self._all_signal_rules(strategy_cfg)
             lookback  = compute_lookback(all_rules)
-            self._emit(messages,
+            self._emit(
+                messages,
                 f"📊 Fetching {lookback} candles for {symbol} ({timeframe}) "
-                f"| signals: {len(all_rules)} rules, max_window={lookback}"
+                f"asset_class={asset_class.value} | signals={len(all_rules)} "
+                f"max_window={lookback}",
             )
 
-            df             = await self._market.fetch_candles(symbol, timeframe, lookback, db_instrument_key=upstox_key)
-            ltp            = await self._market.fetch_ltp(symbol, db_instrument_key=upstox_key)
-            circuit_limits = await self._market.fetch_circuit_limits(symbol, db_instrument_key=upstox_key)
+            df             = await self._market.fetch_candles(
+                symbol, timeframe, lookback,
+                db_instrument_key=adapter_symbol,
+                asset_class=asset_class,
+            )
+            ltp            = await self._market.fetch_ltp(
+                symbol,
+                db_instrument_key=adapter_symbol,
+                asset_class=asset_class,
+            )
+            circuit_limits = await self._market.fetch_circuit_limits(
+                symbol,
+                db_instrument_key=adapter_symbol,
+                asset_class=asset_class,
+            )
 
-            self._emit(messages,
-                f"📈 Market data | LTP=₹{ltp:.2f}  candles={len(df)}"
-                + (f"  upper_circuit=₹{circuit_limits['upper_circuit']:.2f}"
-                   f"  lower_circuit=₹{circuit_limits['lower_circuit']:.2f}"
-                   if circuit_limits else "  circuit=system_defaults")
+            self._emit(
+                messages,
+                f"📈 Market data | LTP={currency_sym}{ltp:.4f}  candles={len(df)}"
+                + (
+                    f"  upper_band={currency_sym}{circuit_limits['upper_circuit']:.4f}"
+                    f"  lower_band={currency_sym}{circuit_limits['lower_circuit']:.4f}"
+                    if circuit_limits
+                    else "  band=system_defaults"
+                ),
             )
 
             # ── Step 4a: Build instrument defaults from ref_data.system_configs ─
@@ -136,11 +169,17 @@ class StrategyEvaluator:
                 ltp=ltp,
                 db=self._db,
                 live_circuit_limits=circuit_limits,
+                asset_class=asset_class,
+                symbol=symbol,
             )
-            self._emit(messages,
-                f"⚙️  Instrument defaults | tick=₹{instrument.tick_size}  lot={instrument.lot_size}"
-                f"  upper_circuit=₹{instrument.upper_circuit:.2f}"
-                f"  lower_circuit=₹{instrument.lower_circuit:.2f}"
+            self._emit(
+                messages,
+                f"⚙️  Instrument defaults | tick={currency_sym}{instrument.tick_size}"
+                f"  lot={instrument.lot_size}"
+                f"  qty_step={instrument.qty_step_size}"
+                f"  min_notional={instrument.min_notional}"
+                f"  upper_band={currency_sym}{(instrument.upper_circuit or 0):.4f}"
+                f"  lower_band={currency_sym}{(instrument.lower_circuit or 0):.4f}",
             )
 
             # ── Step 4b: Fetch execution state and log resolved config ────────
@@ -210,6 +249,7 @@ class StrategyEvaluator:
                 df=df,
                 strategy_cfg=strategy_cfg,
                 strategy_type=strategy_type,
+                asset_class=asset_class,
                 messages=messages,
             )
 
@@ -231,15 +271,50 @@ class StrategyEvaluator:
             self._emit(messages,
                 f"🚀 ENTRY PHASE | evaluating signal for {symbol} @ ₹{ltp:.2f}"
             )
-            entry_signal, entry_msgs = self._rule.evaluate_entry(
-                df, {"trigger": strategy_cfg.entry.trigger.model_dump(),
-                     "filters": [f.model_dump() for f in strategy_cfg.entry.filters]}
-            )
+            entry_block = {
+                "trigger": strategy_cfg.entry.trigger.model_dump(),
+                "filters": [f.model_dump() for f in strategy_cfg.entry.filters],
+            }
+            entry_signal, entry_msgs = self._rule.evaluate_entry(df, entry_block)
             for m in entry_msgs:
                 self._emit(messages, m)
 
             if not entry_signal:
                 self._emit(messages, "⛔ No entry signal fired — returning no_action.")
+                return EvaluateExecuteResponse(
+                    status="success",
+                    action=ActionType.no_action,
+                    symbol=symbol,
+                    ltp=ltp,
+                    mode=mode,
+                    messages=messages,
+                )
+
+            # ── Phase 10: entry gates (parity with backtest simulator) ─────────
+            # The signal fired — now apply the same entry gates the quant-engine
+            # simulator enforces (direction, entry window, consecutive-loss
+            # circuit breaker, cooldowns, spread, gap, confirmation bars, RSI
+            # band, volume ratio). Without this a strategy would behave
+            # differently in backtest vs live. Live eval generates long entries.
+            self._emit(messages, "🚧 ENTRY GATES | applying Phase 10 gate checks")
+            gate_result = evaluate_entry_gates(
+                df=df,
+                gates=getattr(strategy_cfg, "gates", None) or GatesConfig(),
+                exec_state=exec_state_payload,
+                side="BUY",
+                rule_engine=self._rule,
+                entry_block=entry_block,
+                asset_class=asset_class,
+            )
+            for m in gate_result.messages:
+                self._emit(messages, m)
+
+            if not gate_result.passed:
+                self._emit(
+                    messages,
+                    f"⛔ Entry blocked by gate '{gate_result.blocked_by}' — returning no_action.",
+                    level="warning",
+                )
                 return EvaluateExecuteResponse(
                     status="success",
                     action=ActionType.no_action,
@@ -257,6 +332,7 @@ class StrategyEvaluator:
                     risk_config=effective_risk_config,
                     exec_state=effective_exec_state,
                     instrument=instrument,
+                    asset_class=asset_class,
                 )
             )
             for m in risk_out.messages:
@@ -317,6 +393,7 @@ class StrategyEvaluator:
                 strategy_id=strategy_id_str,
                 mode=mode.value,
                 bar_datetime=last_bar_dt,
+                asset_class=asset_class,
             )
 
             sl_pct  = float(getattr(effective_risk_config, "stop_loss_pct", strategy_cfg.sl_tp.stop_loss_pct))
@@ -336,11 +413,12 @@ class StrategyEvaluator:
             )
 
             self._emit(messages,
-                f"📦 BRACKET ORDER GENERATED | qty={risk_out.position_size}"
-                f"  entry=₹{ltp:.2f}"
-                f"  SL=₹{risk_out.stop_loss_price:.2f} (-{sl_pct}%)"
-                f"  TP=₹{risk_out.take_profit_price:.2f} (+{tp_pct}%)"
-                f"  principal=₹{risk_out.principal_amount:,.2f}"
+                f"📦 BRACKET ORDER GENERATED | asset_class={asset_class.value}"
+                f"  qty={risk_out.position_size}"
+                f"  entry={currency_sym}{ltp:.4f}"
+                f"  SL={currency_sym}{risk_out.stop_loss_price:.4f} (-{sl_pct}%)"
+                f"  TP={currency_sym}{risk_out.take_profit_price:.4f} (+{tp_pct}%)"
+                f"  principal={currency_sym}{risk_out.principal_amount:,.4f}"
             )
 
             return EvaluateExecuteResponse(
@@ -447,6 +525,7 @@ class StrategyEvaluator:
         strategy_cfg: StrategyConfigPayload,
         strategy_type: str,
         messages: List[str],
+        asset_class: AssetClass = AssetClass.equity_cash,
     ) -> List[ExitInstruction]:
         """
         For each open position, check (in order):
@@ -492,7 +571,9 @@ class StrategyEvaluator:
                     f"  🟢 TAKE PROFIT HIT | LTP=₹{ltp:.2f} ≥ TP=₹{pos.take_profit_price:.2f}"
                 )
 
-            # 3. Exit signal
+            # 3. Exit signal (skip if strategy has no signal-based exit)
+            elif strategy_cfg.exit.trigger is None:
+                self._emit(messages, "  ↳ No exit signal configured — SL/TP only.")
             else:
                 exit_fired, exit_msgs = self._rule.evaluate_exit(
                     df,
@@ -511,6 +592,7 @@ class StrategyEvaluator:
                         reason=reason,
                         exit_price=ltp,
                         strategy_type=strategy_type,
+                        asset_class=asset_class,
                     )
                 )
             else:
@@ -539,7 +621,8 @@ class StrategyEvaluator:
         rules: List[Dict[str, Any]] = []
         rules.append(cfg.entry.trigger.model_dump())
         rules.extend(f.model_dump() for f in cfg.entry.filters)
-        rules.append(cfg.exit.trigger.model_dump())
+        if cfg.exit.trigger is not None:
+            rules.append(cfg.exit.trigger.model_dump())
         rules.extend(f.model_dump() for f in cfg.exit.filters)
         return rules
 
@@ -613,17 +696,42 @@ def _strategy_config_from_db(
     from app.schemas.execution import EntryExitBlock, RiskConfig, SignalRule, SlTpConfig
 
     def _rule(d: Any) -> SignalRule:
+        """Build a SignalRule from a signal dict. The chat flow tags the KB
+        signal under "name"; the inline/legacy shape uses "type"."""
         if isinstance(d, dict):
-            return SignalRule(type=d.get("type", ""), params=d.get("params", {}))
+            return SignalRule(
+                type=str(d.get("type") or d.get("name") or ""),
+                params=d.get("params", {}) or {},
+            )
         return SignalRule(type=str(d), params={})
 
     def _block(b: Any) -> EntryExitBlock:
-        if not isinstance(b, dict):
-            return EntryExitBlock(trigger=SignalRule(type="", params={}))
-        return EntryExitBlock(
-            trigger=_rule(b.get("trigger", {})),
-            filters=[_rule(f) for f in b.get("filters", [])],
-        )
+        # Shape A — chat flow (strategy_assembler.build_strategy_config): a flat
+        # list of signal dicts, each tagged signal_type = "TRIGGER" | "FILTER".
+        if isinstance(b, list):
+            signals = [s for s in b if isinstance(s, dict)]
+            triggers = [s for s in signals
+                        if str(s.get("signal_type", "")).upper() == "TRIGGER"]
+            others   = [s for s in signals
+                        if str(s.get("signal_type", "")).upper() != "TRIGGER"]
+            if not triggers and signals:
+                # No explicit TRIGGER tag — treat the first signal as the trigger.
+                triggers, others = [signals[0]], signals[1:]
+            if not triggers:
+                return EntryExitBlock(trigger=SignalRule(type="", params={}))
+            # Extra triggers (if any) fold into filters so no signal is dropped.
+            filter_signals = triggers[1:] + others
+            return EntryExitBlock(
+                trigger=_rule(triggers[0]),
+                filters=[_rule(f) for f in filter_signals],
+            )
+        # Shape B — explicit {trigger, filters} dict (Mode 2 inline / legacy).
+        if isinstance(b, dict):
+            return EntryExitBlock(
+                trigger=_rule(b.get("trigger", {})),
+                filters=[_rule(f) for f in b.get("filters", [])],
+            )
+        return EntryExitBlock(trigger=SignalRule(type="", params={}))
 
     entry_raw = raw.get("entry", {})
     exit_raw  = raw.get("exit", {})
@@ -641,11 +749,41 @@ def _strategy_config_from_db(
         or runtime_risk_config.take_profit_pct
     )
 
+    # Phase 10 — entry gates. The chat flow persists these under a "gates" key
+    # in strategy_config (see app/planner/strategy_assembler.py). Strategies
+    # created before Phase 10 have no "gates" key → GatesConfig() defaults all
+    # gates to disabled, so behaviour is unchanged for them.
+    gates_raw = raw.get("gates") or {}
+    try:
+        gates_cfg = GatesConfig(**gates_raw) if isinstance(gates_raw, dict) else GatesConfig()
+    except Exception as exc:  # noqa: BLE001 — never hard-fail Mode 1 on gate schema drift
+        logger.warning("Could not parse strategy_config.gates (%s) — gates disabled.", exc)
+        gates_cfg = GatesConfig()
+
+    # Asset class resolution order (most-specific → fallback):
+    #   1. strategy_config["asset_class"] (JSONB, written by the chat flow)
+    #   2. strategy.market  ('crypto_spot' | 'indian_stocks')
+    #   3. Default to equity_cash (legacy strategies)
+    asset_class_value = (
+        raw.get("asset_class")
+        or _market_to_asset_class(strategy_row.market)
+        or AssetClass.equity_cash.value
+    )
+    try:
+        asset_class = AssetClass(str(asset_class_value))
+    except ValueError:
+        logger.warning(
+            "Strategy %s has unknown asset_class=%r — defaulting to equity_cash.",
+            strategy_id, asset_class_value,
+        )
+        asset_class = AssetClass.equity_cash
+
     return StrategyConfigPayload(
         strategy_id=strategy_id,
         symbol=strategy_row.symbol,
         timeframe=strategy_row.timeframe,
         strategy_type=raw.get("strategy_type", "intraday"),
+        asset_class=asset_class,
         entry=_block(entry_raw),
         exit=_block(exit_raw),
         sl_tp=SlTpConfig(stop_loss_pct=sl_pct, take_profit_pct=tp_pct),
@@ -660,7 +798,26 @@ def _strategy_config_from_db(
                 risk_raw.get("min_trade_value", runtime_risk_config.minimum_trade_value)
             ),
         ),
+        gates=gates_cfg,
     )
+
+
+def _market_to_asset_class(market: Optional[str]) -> Optional[str]:
+    """Translate the legacy ``strategy.market`` text column to an asset_class id.
+
+    The chat flow writes free-text values like ``"indian_stocks"`` and
+    ``"crypto"``; the asset-class taxonomy uses ``equity_cash`` / ``crypto_spot``.
+    Returns None when no mapping is known so the caller can fall through to the
+    safe equity_cash default.
+    """
+    if not market:
+        return None
+    m = str(market).strip().lower()
+    if m in {"crypto", "crypto_spot", "binance", "binance_spot"}:
+        return AssetClass.crypto_spot.value
+    if m in {"indian_stocks", "equity", "equity_cash", "nse", "bse", "us_stocks"}:
+        return AssetClass.equity_cash.value
+    return None
 
 
 def _exec_state_from_row(row: Optional[ExecutionState]) -> ExecutionStatePayload:
@@ -678,9 +835,18 @@ def _exec_state_from_row(row: Optional[ExecutionState]) -> ExecutionStatePayload
         except Exception:
             pass
 
+    # Phase 10 — gate state. consecutive_losses / last_trade_was_loss are not
+    # dedicated columns; they live in the execution_state.state_json blob,
+    # written by the OMS/trade-tracking layer. Absent → gates that need them
+    # (consecutive-loss, cooldown) stay inert.
+    raw_consec = snapshot.get("consecutive_losses", 0)
+    raw_last_loss = snapshot.get("last_trade_was_loss", None)
+
     return ExecutionStatePayload(
         available_margin=float(row.capital or 100_000.0),
         open_positions=positions,
         bars_since_last_trade=int(row.bars_since_last_trade or 0),
         capital=float(row.capital or 100_000.0),
+        consecutive_losses=int(raw_consec or 0),
+        last_trade_was_loss=(bool(raw_last_loss) if raw_last_loss is not None else None),
     )

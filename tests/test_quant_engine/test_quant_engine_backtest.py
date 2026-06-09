@@ -170,7 +170,7 @@ def test_run_backtest_rejects_data_outside_configured_window(tmp_path):
             }
         )
 
-    with pytest.raises(ValueError, match="configured backtest window"):
+    with pytest.raises(ValueError, match="No OHLCV data is available"):
         run_backtest(
             str(yaml_path),
             ohlcv_data,
@@ -178,8 +178,8 @@ def test_run_backtest_rejects_data_outside_configured_window(tmp_path):
             {
                 "symbol": "RELIANCE",
                 "interval": "1d",
-                "from_utc": "2026-04-01T00:00:00Z",
-                "to_utc": "2026-04-30T00:00:00Z",
+                "from_utc": "2026-01-01T00:00:00Z",
+                "to_utc": "2026-01-30T00:00:00Z",
             },
             "out-of-window-backtest-ref",
         )
@@ -652,3 +652,117 @@ def test_simulate_trades_intraday_skips_last_bar_entry_that_would_carry_overnigh
 
     assert any(diag["entry_signal"] for diag in diagnostics)
     assert trades == []
+
+
+def test_trade_carries_structured_entry_and_exit_reason():
+    """Each trade must explain WHY it opened and closed: the matched bar, the
+    indicator values, the fill price + costs, and the exit trigger."""
+    from engine.conditions import compile_condition
+
+    timestamps = pd.date_range("2026-01-01T03:45:00Z", periods=30, freq="15min").tz_convert("UTC").tz_localize(None)
+    df = pd.DataFrame(
+        {
+            "open":   [100 + i for i in range(30)],
+            "high":   [101 + i for i in range(30)],
+            "low":    [99 + i for i in range(30)],
+            "close":  [100.5 + i for i in range(30)],
+            "volume": [1000.0] * 30,
+        },
+        index=timestamps,
+    )
+    # Precompute EMA_5 with pandas so the entry can match a real indicator value
+    # without depending on the TA-Lib-backed indicator pipeline.
+    df["EMA_5"] = df["close"].ewm(span=5, adjust=False).mean()
+
+    condition = "CLOSE > OPEN AND EMA(5) > 0"
+    trades, _ = simulate_trades(
+        df=df,
+        symbol="RELIANCE.NS",
+        entry_condition=condition,
+        exit_condition="PROFIT >= 1",
+        compiled_entry=compile_condition(condition),
+        stop_loss_pct=10.0,
+        take_profit_pct=20.0,
+        slippage_bps=5.0,
+        commission_bps=2.0,
+        warm_up_candles=5,
+        max_holding_candles=None,
+    )
+
+    assert trades
+    trade = trades[0]
+
+    # ── Entry reason ──────────────────────────────────────────────────────────
+    entry = trade.entry_reason
+    assert entry is not None
+    assert "Entered LONG" in entry["summary"]
+    assert entry["evaluation_mode"] == "formula"
+    assert entry["condition"] == condition
+    signal_idx = entry["signal_bar"]["index"]
+    assert signal_idx >= 5                                   # past warm-up
+    assert entry["signal_bar"]["close"] is not None
+    # The indicator that made the formula true is captured with its value.
+    assert entry["indicators"]["EMA_5"] is not None
+    # Fill happens on the bar *after* the signal, at that bar's open + costs.
+    assert entry["entry_bar"]["index"] == signal_idx + 1
+    assert entry["fill"]["effective_price"] == pytest.approx(trade.entry_price, rel=1e-3)
+    assert entry["fill"]["raw_price"] < entry["fill"]["effective_price"]  # buy-side costs add
+    assert entry["initial_stop_price"] is not None
+
+    # ── Exit reason ───────────────────────────────────────────────────────────
+    exit_detail = trade.exit_reason_detail
+    assert exit_detail is not None
+    assert exit_detail["code"] == trade.exit_reason
+    assert exit_detail["trigger"]["type"] == "exit_signal"
+    assert exit_detail["fill"]["effective_price"] == pytest.approx(trade.exit_price, rel=1e-3)
+    assert exit_detail["pnl_pct"] == pytest.approx(trade.pnl_pct, rel=1e-3)
+    assert "Exited LONG" in exit_detail["summary"]
+
+    # ── Survives serialization + Pydantic validation ──────────────────────────
+    from app.schemas.backtest import BacktestTrade
+    from engine.metrics import _serialize_backtest_trades
+
+    entry_ts = pd.to_datetime([t.entry_date for t in trades]).tz_localize(None)
+    exit_ts = pd.to_datetime([t.exit_date for t in trades]).tz_localize(None)
+    serialized = _serialize_backtest_trades(trades, entry_ts, exit_ts, df)
+    model = BacktestTrade(**serialized[0])
+    assert model.entry_reason.indicators["EMA_5"] is not None
+    assert model.exit_reason_detail.code == model.exit_reason
+
+
+def test_exit_reason_detail_describes_stop_loss_trigger():
+    """A stop-loss exit must record the stop price, the breaching bar, and a
+    plain-language explanation."""
+    timestamps = pd.date_range("2026-01-01T03:45:00Z", periods=25, freq="15min").tz_convert("UTC").tz_localize(None)
+    df = pd.DataFrame(
+        {
+            "open":   [100.0] + [101.0] * 24,
+            "high":   [101.0, 101.5] + [101.0] * 23,
+            "low":    [99.0, 95.0] + [100.0] * 23,   # bar #1 low=95 breaches the stop
+            "close":  [100.5, 100.0] + [100.5] * 23,
+            "volume": [1000.0] * 25,
+        },
+        index=timestamps,
+    )
+
+    trades, _ = simulate_trades(
+        df=df,
+        symbol="RELIANCE.NS",
+        entry_condition="CLOSE > OPEN",
+        exit_condition="PROFIT >= 99",
+        stop_loss_pct=1.0,
+        take_profit_pct=50.0,        # high enough that only the stop fires
+        slippage_bps=0.0,
+        commission_bps=0.0,
+        max_holding_candles=None,
+    )
+
+    assert trades
+    trade = trades[0]
+    assert trade.exit_reason == "STOP_LOSS"
+    detail = trade.exit_reason_detail
+    assert detail["trigger"]["type"] == "stop_loss"
+    assert detail["trigger"]["stop_price"] is not None
+    assert detail["trigger"]["bar_low"] == 95.0
+    assert detail["exit_bar"]["index"] == 1
+    assert "stop loss" in detail["summary"].lower()

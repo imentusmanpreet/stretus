@@ -2,36 +2,59 @@ name: ema_cross_up
 category: trend
 direction: bullish
 kind: crossover
-roles: [entry_trigger]
-formula: "EMA({window_fast}) > EMA({window_slow})"
-description: "Fast EMA crosses above slow EMA — classic bullish trend initiation."
-
-works_best_on: [15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]                       # crossover bars too rare for stateless eval
+roles:
+- entry_trigger
+formula: EMA({window_fast}) > EMA({window_slow})
+description: Fast EMA crosses above slow EMA — classic bullish trend initiation.
+works_best_on:
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bearish
-  - frequency: very_high                # crossover too infrequent for very_high freq
-
-pairs_well_with: [price_above_ema, vwap_bullish, volume_spike]
-contradicts: [rsi_overbought, price_below_ema, ema_below]
-
+- sentiment: bearish
+- frequency: very_high
+pairs_well_with:
+- price_above_ema
+- vwap_bullish
+- volume_spike
+contradicts:
+- rsi_overbought
+- price_below_ema
+- ema_below
 params_by_timeframe:
-  1m:   {window_fast: 5,  window_slow: 13}
-  3m:   {window_fast: 5,  window_slow: 13}
-  5m:   {window_fast: 9,  window_slow: 21}
-  10m:  {window_fast: 9,  window_slow: 21}
-  15m:  {window_fast: 9,  window_slow: 21}
-  30m:  {window_fast: 9,  window_slow: 21}
-  1h:   {window_fast: 12, window_slow: 26}
-  1d:   {window_fast: 12, window_slow: 26}
-
+  1m:
+    window_fast: 5
+    window_slow: 13
+  3m:
+    window_fast: 5
+    window_slow: 13
+  5m:
+    window_fast: 9
+    window_slow: 21
+  10m:
+    window_fast: 9
+    window_slow: 21
+  15m:
+    window_fast: 9
+    window_slow: 21
+  30m:
+    window_fast: 9
+    window_slow: 21
+  1h:
+    window_fast: 12
+    window_slow: 26
+  1d:
+    window_fast: 12
+    window_slow: 26
 experience_fit:
   beginner: 0.8
   intermediate: 1.0
   expert: 0.7
-
 intent_fit:
   trend: 1.0
   momentum: 0.7
@@ -40,3 +63,20 @@ intent_fit:
   scalping: 0.2
   mean_reversion: 0.1
   confirmation: 0.5
+match_when:
+  phrases:
+  - (\d+)\s*ema\s+(?:crosses?|crossed)\s+(?:above|up\s+through)\s+(\d+)\s*ema
+  - ema\s+golden\s+cross
+  - (?:fast|short)\s+ema\s+crosses?\s+(?:above|up)\s+(?:slow|long)\s+ema
+  - ema\s+bullish\s+cross(?:over)?
+  acts_as: entry_trigger
+  mirrors_to: ema_cross_down
+  extract_params:
+    window_fast:
+      from_group: 1
+      default: null
+      kind: int
+    window_slow:
+      from_group: 2
+      default: null
+      kind: int

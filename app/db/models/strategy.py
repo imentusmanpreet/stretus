@@ -86,6 +86,9 @@ class Chat(Base):
     )
     user_id    : Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     title      : Mapped[Optional[str]]       = mapped_column(Text, nullable=True)
+    # Tenant-supplied capabilities scoped to this chat (asset_classes etc.).
+    # Shape: {"asset_classes": [{"asset_class_id": "equity_cash", "enabled": true}, ...]}
+    capabilities : Mapped[Optional[dict]]     = mapped_column(JSONB, nullable=True)
     created_at : Mapped[datetime]         = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )

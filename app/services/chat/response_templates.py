@@ -6,7 +6,8 @@ from __future__ import annotations
 from typing import Final, Literal
 
 SUPPORTED_STOCK_SELECTION_PROMPT: Final[str] = (
-    "TCS, Infosys, Reliance, Adani, HDFC Bank, NHPC, Suzlon, GMR Airports, or Vodafone Idea"
+    "TCS, Infosys, Reliance, HDFC Bank (NSE equities) "
+    "or BTC/USDT, ETH/USDT, SOL/USDT (crypto pairs)"
 )
 GOAL_EXAMPLES_TEXT: Final[str] = "Steady profit, Long-term steady growth, Aggressive"
 
@@ -47,6 +48,7 @@ AssistantResponseCode = Literal[
     "workflow.strategy_ready_for_backtest",
     "workflow.backtest_complete",
     "workflow.backtest_failed",
+    "workflow.backtest_earliest_date_unsupported",
     "workflow.backtest_already_available",
     "clarification.tutorial",
     "clarification.onboarding",
@@ -74,6 +76,7 @@ ASSISTANT_RESPONSE_CODES: Final[tuple[AssistantResponseCode, ...]] = (
     "workflow.strategy_ready_for_backtest",
     "workflow.backtest_complete",
     "workflow.backtest_failed",
+    "workflow.backtest_earliest_date_unsupported",
     "workflow.backtest_already_available",
     "clarification.tutorial",
     "clarification.onboarding",

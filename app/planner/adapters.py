@@ -47,7 +47,7 @@ def plan_to_strategy_config(plan: StrategyPlan) -> dict[str, Any]:
             "entry":         entry_block,
             "exit": {
                 "trigger": _signal_to_obj(plan.exit_trigger),
-                "filters": [],
+                "filters": [_signal_to_obj(f) for f in plan.exit_filters],
             },
             "sl_tp": {
                 "stop_loss_pct":   plan.sl_pct,
@@ -69,16 +69,23 @@ def plan_to_signal_plan(plan: StrategyPlan) -> dict[str, Any]:
         entries.append(_signal_to_plan_entry(picked, "FILTER"))
 
     exits = [_signal_to_plan_entry(plan.exit_trigger, "TRIGGER")]
+    for picked in plan.exit_filters:
+        exits.append(_signal_to_plan_entry(picked, "FILTER"))
 
     signals_used = [plan.entry_trigger.name]
     signals_used.extend(p.name for p in plan.entry_filters)
     signals_used.append(plan.exit_trigger.name)
+    signals_used.extend(p.name for p in plan.exit_filters)
 
     entry_parts = [render_formula(plan.entry_trigger.name, plan.entry_trigger.params)]
     for picked in plan.entry_filters:
         entry_parts.append(render_formula(picked.name, picked.params))
     entry_condition = " AND ".join(p for p in entry_parts if p) or None
-    exit_condition  = render_formula(plan.exit_trigger.name, plan.exit_trigger.params)
+
+    exit_parts = [render_formula(plan.exit_trigger.name, plan.exit_trigger.params)]
+    for picked in plan.exit_filters:
+        exit_parts.append(render_formula(picked.name, picked.params))
+    exit_condition = " AND ".join(p for p in exit_parts if p) or None
 
     return {
         "entry":            entries,
@@ -109,12 +116,17 @@ def plan_to_signal_plan(plan: StrategyPlan) -> dict[str, Any]:
 def _rationale(plan: StrategyPlan) -> str:
     if plan.entry_filters:
         names = ", ".join(p.name for p in plan.entry_filters)
-        filt = f" with {names} as confirmation filter{'s' if len(plan.entry_filters) > 1 else ''}"
+        entry_filt = f" with {names} as entry confirmation filter{'s' if len(plan.entry_filters) > 1 else ''}"
     else:
-        filt = ""
+        entry_filt = ""
+    if plan.exit_filters:
+        names = ", ".join(p.name for p in plan.exit_filters)
+        exit_filt = f" and {names} as exit confirmation filter{'s' if len(plan.exit_filters) > 1 else ''}"
+    else:
+        exit_filt = ""
     return (
         f"For a {plan.sentiment} {plan.timeframe} setup on {plan.stock.display_name}, "
-        f"selected {plan.entry_trigger.name} as the entry trigger{filt}, "
-        f"and {plan.exit_trigger.name} as the exit. "
+        f"selected {plan.entry_trigger.name} as the entry trigger{entry_filt}, "
+        f"and {plan.exit_trigger.name} as the exit{exit_filt}. "
         f"SL={plan.sl_pct}% TP={plan.tp_pct}% (volatility-scaled)."
     )

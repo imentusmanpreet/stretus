@@ -7,6 +7,7 @@ conversation context before rule-based validation is applied.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -14,12 +15,15 @@ from app.core.errors import AppError
 from app.services.ai.llm import LLMService
 from app.services.strategy.builder import StrategyBuilder
 
+logger = logging.getLogger(__name__)
+
 _ALLOWED_INTENTS = {
     "collect_input",
     "general_chat",
     "clarification",
     "stock_advice_request",
     "confirmation",
+    "run_backtest",
     "modify_input",
     "new_strategy",
     "user_rejection",
@@ -233,6 +237,8 @@ def _normalise_intent(value: Any) -> str:
         return "stock_advice_request"
     if compact in {"confirm", "approved"}:
         return "confirmation"
+    if compact in {"run_backtest", "backtest", "execute_backtest"}:
+        return "run_backtest"
     if compact in {
         "modify",
         "modify_inputs",
@@ -511,6 +517,8 @@ async def route_user_message(
         "recognized_fields": [],
         "reasoning": None,
         "confidence": "high",
+        "backtest_from_utc": None,
+        "backtest_to_utc": None,
     }
 
     llm = LLMService()
@@ -531,6 +539,9 @@ async def route_user_message(
                 "- clarification: the user asked about the current strategy-building process, collected values, current plan, current strategy, latest backtest, or next step\n"
                 "- stock_advice_request: the user asked which stock to buy/sell, asked for tips, calls, or recommendations\n"
                 "- confirmation: the user approved the current summary or next step\n"
+                "- run_backtest: the user explicitly asked to run or execute a historical backtest "
+                "(e.g. 'run backtest', 'backtest now', 'test on history from DATE to DATE'). "
+                "Do NOT use run_backtest for generic yes/ok/proceed after assembly — those are confirmation only.\n"
                 "- modify_input: the user wants to change one or more previously captured strategy inputs\n"
                 "- new_strategy: the user wants to start a separate new strategy or reset the current strategy\n"
                 "- user_rejection: the user is dissatisfied with or rejects the current strategy, signal plan, market view, or backtest result\n"
@@ -552,7 +563,14 @@ async def route_user_message(
                 "- If you infer some values but still need explicit confirmation before the workflow should continue, set needs_clarification to true.\n"
                 "- When needs_clarification is true, set clarification_field to the field that needs confirmation and keep reply_text as null.\n"
                 "- If the current mode is collect_user_input and all six fields are already captured (missing_fields is empty) and the user says something that means 'proceed', 'plan', 'build', 'start', or any action command (e.g. 'plan signal', 'build strategy', 'generate signals', 'yes', 'ok', 'go ahead'), set intent to confirmation and is_confirmation to true.\n"
-                "- If the current mode is plan_signals, assemble_strategy, backtest_confirmation, or backtest_complete and the user gives any natural go-ahead, approval, or affirmative reply in context, set intent to confirmation and is_confirmation to true even if they do not use one exact phrase.\n"
+                "- If the current mode is plan_signals and the user gives a natural go-ahead to assemble, set intent to confirmation and is_confirmation to true.\n"
+                "- If the current mode is assemble_strategy or backtest_confirmation and the user only affirms without asking to run a backtest, set intent to confirmation (not run_backtest).\n"
+                "- When intent is run_backtest, set backtest_from_utc and backtest_to_utc to UTC ISO strings "
+                "(YYYY-MM-DDTHH:MM:SSZ) for any explicit calendar range in the message. "
+                "Use start-of-day UTC for the start date and end-of-day UTC (23:59:59Z) for the end date. "
+                "If the user requests a backtest but gives no dates, leave both date fields null. "
+                "If they give only a start or only an end date, set that field and leave the other null "
+                "(the backend fills the missing bound with the product default).\n"
                 "- At any mode, if the user asks to modify, edit, update, change, revise, or correct previously captured inputs, set intent to modify_input.\n"
                 "- If the user asks for a new, fresh, another, restart, or start-over strategy, set intent to new_strategy.\n"
                 "- If the user gives negative feedback about the current strategy, signal plan, indicators, market view, or backtest result, set intent to user_rejection.\n"
@@ -644,7 +662,9 @@ async def route_user_message(
                 "\"is_confirmation\": false,"
                 "\"needs_clarification\": false,"
                 "\"clarification_field\": null,"
-                "\"clarification_topic\": null"
+                "\"clarification_topic\": null,"
+                "\"backtest_from_utc\": null,"
+                "\"backtest_to_utc\": null"
                 "}"
             ),
         },
@@ -659,11 +679,17 @@ async def route_user_message(
         },
     ]
 
+    logger.info(
+        "🧠 Routing brain | state=%s | user: %s",
+        previous_state or "—",
+        " ".join(str(user_message or "").split())[:160] or "<empty>",
+    )
     try:
         payload = _extract_json_object(await llm.chat(messages)) or {}
     except AppError:
         raise
     except Exception:
+        logger.exception("💥 Routing brain failed to parse LLM output — using safe defaults")
         payload = {}
 
     result["reasoning"] = _clean_text(payload.get("reasoning"))
@@ -681,6 +707,8 @@ async def route_user_message(
     result["needs_clarification"] = _coerce_bool(payload.get("needs_clarification"))
     result["clarification_field"] = _normalise_field_name(payload.get("clarification_field"))
     result["clarification_topic"] = _normalise_clarification_topic(payload.get("clarification_topic"))
+    result["backtest_from_utc"] = _clean_text(payload.get("backtest_from_utc"))
+    result["backtest_to_utc"] = _clean_text(payload.get("backtest_to_utc"))
 
     recognized_fields: list[str] = []
     if result["stock_query"]:
@@ -706,6 +734,7 @@ async def route_user_message(
             "clarification",
             "stock_advice_request",
             "confirmation",
+            "run_backtest",
             "new_strategy",
             "user_rejection",
             "pause_workflow",
@@ -723,6 +752,14 @@ async def route_user_message(
             result["clarification_topic"] = "ambiguous"
         result["needs_clarification"] = True
 
+    logger.info(
+        "🎯 Routed → intent=%s confidence=%s%s%s | why: %s",
+        result["intent"],
+        result["confidence"],
+        f" fields={result['recognized_fields']}" if result["recognized_fields"] else "",
+        f" topic={result['clarification_topic']}" if result["clarification_topic"] else "",
+        _clean_text(result["reasoning"]) or "—",
+    )
     return result
 
 

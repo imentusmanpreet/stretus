@@ -1,6 +1,9 @@
-"""Unit tests for backtest DB summary helpers (no external deps)."""
+"""Unit tests for backtest result helpers (no external deps)."""
 
-from app.services.backtest.result_store import summarize_backtest_for_db
+from app.services.backtest.result_store import (
+    normalize_backtest_metric_aliases,
+    summarize_backtest_for_db,
+)
 
 
 def test_summarize_backtest_for_db_strips_trade_list() -> None:
@@ -67,3 +70,64 @@ def test_summarize_backtest_for_db_uses_trade_dates_for_duration_precision() -> 
 
     assert metrics["average_holding_duration"] == 0.0104
     assert "avg_trade_duration_days" not in metrics
+
+
+def test_summarize_backtest_for_db_sorts_monthly_performance_descending() -> None:
+    raw = {
+        "backtest_ref_id": "ref-1",
+        "monthly_performance": [
+            {"month": "2024-01", "strategy_return_pct": 0.0, "trades_count": 0},
+            {"month": "2024-03", "strategy_return_pct": -44.3585, "trades_count": 4},
+            {"month": "2024-02", "strategy_return_pct": -48.2031, "trades_count": 3},
+        ],
+        "metrics": {
+            "total_trades": 7,
+            "monthly_performance": [
+                {"month": "2024-01", "strategy_return_pct": 0.0, "trades_count": 0},
+                {"month": "2024-03", "strategy_return_pct": -44.3585, "trades_count": 4},
+                {"month": "2024-02", "strategy_return_pct": -48.2031, "trades_count": 3},
+            ],
+        },
+        "pass": False,
+    }
+
+    out = summarize_backtest_for_db(raw)
+
+    assert [row["month"] for row in out["monthly_performance"]] == [
+        "2024-03",
+        "2024-02",
+        "2024-01",
+    ]
+    assert [row["month"] for row in out["metrics"]["monthly_performance"]] == [
+        "2024-03",
+        "2024-02",
+        "2024-01",
+    ]
+    assert [row["month"] for row in raw["monthly_performance"]] == [
+        "2024-01",
+        "2024-03",
+        "2024-02",
+    ]
+
+
+def test_normalize_backtest_metric_aliases_sorts_trades_descending() -> None:
+    raw = {
+        "backtest_ref_id": "ref-1",
+        "metrics": {
+            "total_trades": 3,
+            "backtest_trades": [
+                {"entry_date": "2024-01-10T09:15:00Z", "outcome_pct": 1.0},
+                {"entry_date": "2024-03-10T09:15:00Z", "outcome_pct": 2.0},
+                {"entry_date": "2024-02-10T09:15:00Z", "outcome_pct": -1.0},
+            ],
+        },
+        "pass": False,
+    }
+
+    out = normalize_backtest_metric_aliases(raw)
+
+    assert [row["entry_date"] for row in out["metrics"]["backtest_trades"]] == [
+        "2024-03-10T09:15:00Z",
+        "2024-02-10T09:15:00Z",
+        "2024-01-10T09:15:00Z",
+    ]

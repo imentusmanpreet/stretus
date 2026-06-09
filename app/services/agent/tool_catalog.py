@@ -9,6 +9,7 @@ class AgentToolName(str, Enum):
     MODIFY_STRATEGY_INPUTS = "modify_strategy_inputs"
     ASK_USER_FOR_CLARIFICATION = "ask_user_for_clarification"
     PLAN_STRATEGY_SIGNALS = "plan_strategy_signals"
+    MODIFY_SIGNAL_SELECTION = "modify_signal_selection"
     ASSEMBLE_STRATEGY = "assemble_strategy"
     RUN_BACKTEST = "run_backtest"
     FETCH_MARKET_DATA = "fetch_market_data"
@@ -175,6 +176,88 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     ),
     _tool(
+        AgentToolName.MODIFY_SIGNAL_SELECTION,
+        (
+            "Change which signals occupy entry or exit slots in an EXISTING "
+            "signal plan. Use this when the user asks to add, replace, swap, "
+            "change, or remove specific signals (e.g. 'change entry signal to "
+            "macd', 'use rsi_oversold instead', 'swap exit for vwap_bullish', "
+            "'add ema_cross_up to entry', 'remove volume_spike', "
+            "'change entry to sma and exit to ema'). "
+            "Pass ALL of the trader's signal edits in a SINGLE call via the "
+            "`changes` array — when the trader names both an entry change AND "
+            "an exit change in one message, BOTH must appear as items in "
+            "`changes` so the backend applies (or asks for disambiguation on) "
+            "them together. Do not split a multi-slot request into multiple "
+            "tool calls. "
+            "Do NOT use this for fresh planning — that is plan_strategy_signals. "
+            "Partial / fuzzy names are accepted; the backend resolves them "
+            "against the KB and asks the user to pick from 2–4 candidates "
+            "when the query is ambiguous (e.g. 'macd', 'rsi', 'ema_cross'). "
+            "Role-placement is validated server-side: entry-only signals "
+            "cannot be placed in exit, exit-only cannot be entry, and filters "
+            "cannot be standalone triggers — the backend returns the exact "
+            "rejection message and suggestion list to surface to the user."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "changes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": (
+                        "One item per slot the trader wants to edit. When the "
+                        "trader names both entry and exit in the same message, "
+                        "include one item for each — the backend processes them "
+                        "together so the trader sees a single combined reply."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "slot": {
+                                "type": "string",
+                                "enum": ["entry", "exit"],
+                                "description": "Which side of the plan to edit.",
+                            },
+                            "signal_name": {
+                                "type": "string",
+                                "description": (
+                                    "Trader-typed signal name. May be partial "
+                                    "(e.g. 'macd', 'rsi_over', 'ema_cross') — "
+                                    "the backend resolves it."
+                                ),
+                            },
+                            "replace_name": {
+                                "type": "string",
+                                "description": (
+                                    "Optional. Full name of the existing signal "
+                                    "to swap out. When omitted and `action` is "
+                                    "'replace', the backend replaces the first "
+                                    "signal currently in the slot."
+                                ),
+                            },
+                            "action": {
+                                "type": "string",
+                                "enum": ["add", "replace", "remove"],
+                                "description": (
+                                    "What to do: 'add' appends, 'replace' swaps "
+                                    "an existing signal, 'remove' deletes. "
+                                    "Default 'replace' when the user said "
+                                    "'change' / 'swap' / 'use X instead'."
+                                ),
+                            },
+                        },
+                        "required": ["slot", "signal_name"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["session_id", "changes"],
+            "additionalProperties": False,
+        },
+    ),
+    _tool(
         AgentToolName.ASSEMBLE_STRATEGY,
         "Assemble and persist the strategy JSON/YAML after the user approves the signal plan.",
         {
@@ -186,12 +269,20 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         AgentToolName.RUN_BACKTEST,
-        "Run a backtest only after the strategy is assembled and the user explicitly approves execution.",
+        "Run a backtest only after the strategy is assembled and the user explicitly asks to run a backtest.",
         {
             "type": "object",
             "properties": {
                 "session_id": {"type": "string"},
                 "strategy_id": {"type": "string"},
+                "from_utc": {
+                    "type": "string",
+                    "description": "Optional UTC ISO start of backtest window.",
+                },
+                "to_utc": {
+                    "type": "string",
+                    "description": "Optional UTC ISO end of backtest window.",
+                },
                 "starting_balance": {"type": "number"},
                 "slippage_bps": {"type": "number"},
                 "commission_bps": {"type": "number"},

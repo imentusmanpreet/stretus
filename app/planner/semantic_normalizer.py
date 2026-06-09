@@ -381,35 +381,25 @@ class SemanticIntentNormalizer:
             )
 
         # ── Risk:Reward ──────────────────────────────────────────────────────
-        # Guard against LLM-hallucinated RR values: only trust a builder RMS
-        # RR when the source is "user" or "semantic" AND the semantic extractor
-        # did NOT find a contradicting RR in the prompt.  When neither the
-        # extractor nor the user explicitly stated an RR, skip it entirely so
-        # the planner uses the preset default or leaves it open.
+        # Trust the source label. If a value is tagged source="user" by the
+        # chat layer, carry it forward verbatim — RR is a mandatory user input
+        # under the RMS-user-given rule, so we must not silently drop values
+        # that happen to match common defaults (a real user request for 1:2.5
+        # is indistinguishable from a hallucinated 2.5 at this layer; the
+        # source label is what we trust).
         rr: CanonicalRiskReward | None = None
         rr_val = rms.get("risk_reward")
         if rr_val is not None:
             ratio = rr_val["value"] if isinstance(rr_val, dict) else float(rr_val)
             src = rms_sources.get("risk_reward", "user")
-            # Only carry forward if the semantic extractor also found an RR
-            # (corroborates the builder value) OR if the source is explicitly
-            # "user" AND the extractor found nothing to contradict it.
-            if sem and sem.risk_reward and sem.risk_reward.ratio:
-                # Both agree — use builder's value (may be more precise)
-                rr = CanonicalRiskReward(ratio=ratio, source=src)
-            elif src == "user":
-                # Builder claims user-set, but the semantic extractor found
-                # no RR in the original text.  This almost always means the
-                # LLM hallucinated a "reasonable default" (2.5 is the most
-                # common phantom value for intraday strategies).  Only carry
-                # the builder value forward when it does NOT match a known
-                # LLM-default constant.  Without extractor corroboration we
-                # cannot trust any round default.
-                _LLM_DEFAULT_RR = {2.5, 3.0}
-                if ratio not in _LLM_DEFAULT_RR:
-                    rr = CanonicalRiskReward(ratio=ratio, source="user")
-            # else: builder has a value but source is not "user" and extractor
-            # found nothing → discard to prevent phantom RR.
+            rr = CanonicalRiskReward(ratio=ratio, source=src)
+            if sem and sem.risk_reward and sem.risk_reward.ratio \
+                    and abs(sem.risk_reward.ratio - ratio) > 0.01:
+                logger.info(
+                    "semantic_normalizer|rr_conflict|builder=%s|semantic=%s"
+                    "|chose=builder|source=%s",
+                    ratio, sem.risk_reward.ratio, src,
+                )
         elif sem and sem.risk_reward and sem.risk_reward.ratio:
             rr = CanonicalRiskReward(
                 ratio=sem.risk_reward.ratio,

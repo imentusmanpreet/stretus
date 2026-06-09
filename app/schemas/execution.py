@@ -8,16 +8,37 @@ Two request modes:
   Mode 2 (direct)      — strategy_config + execution_state supplied inline.
 
 One unified response shape returned in both cases.
+
+Multi-asset notes
+─────────────────
+A strategy carries an explicit `asset_class` ("equity_cash" for NSE/BSE via
+Upstox; "crypto_spot" for crypto pairs via Binance). This selects (a) the
+canonical-symbol form used to resolve ref_data mappings, (b) the market-data
+client, (c) the broker order-type / product-type / validity mapping, and
+(d) the trading-window/circuit-limit semantics. Legacy clients that omit
+`asset_class` keep the equity behaviour (default "equity_cash").
 """
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
+
+class AssetClass(str, Enum):
+    """
+    Asset class for a strategy / instrument. The same canonical id is used by
+    `ref_data.instruments.asset_class_id`, `app/kb/schemas.py` and the chat
+    capabilities block (`ChatCapabilities.asset_classes`).
+    """
+
+    equity_cash = "equity_cash"
+    crypto_spot = "crypto_spot"
+
 
 class EvaluationMode(str, Enum):
     paper = "paper"
@@ -32,27 +53,56 @@ class ActionType(str, Enum):
 
 class ExchangeOrderType(str, Enum):
     """
-    NSE cash-segment / Indian retail broker *order type* (same family as
-    Kite, Upstox, etc. `order_type` / `variety` payloads). Tells the exchange/OMS
-    *how* the order works (price vs market vs stop).
+    Broker / venue *order type*. The set is intentionally the union of all
+    supported venues — pickers (e.g. ``TradeManager._order_types_for``) decide
+    which subset is valid for a given asset class.
 
-    This is not the same as `order_role` (which leg in the bracket: entry, SL, TP).
+    Indian retail broker family (Upstox, Kite, etc.):
+      MARKET, LIMIT, SL, SL-M
+
+    Binance Spot:
+      MARKET, LIMIT, STOP_LOSS, STOP_LOSS_LIMIT, TAKE_PROFIT, TAKE_PROFIT_LIMIT
+
+    Note: this is not the same as `order_role` (which leg in the bracket).
     """
 
+    # Common across venues
     market = "MARKET"
     limit  = "LIMIT"
+
+    # Indian retail broker (Upstox / Kite style)
     sl     = "SL"
     sl_m   = "SL-M"
 
+    # Binance Spot
+    stop_loss          = "STOP_LOSS"
+    stop_loss_limit    = "STOP_LOSS_LIMIT"
+    take_profit        = "TAKE_PROFIT"
+    take_profit_limit  = "TAKE_PROFIT_LIMIT"
+
 
 class ProductType(str, Enum):
-    mis = "MIS"   # intraday
-    cnc = "CNC"   # delivery / positional
+    """
+    Margin / settlement product. Equity uses MIS/CNC (Indian broker norms);
+    crypto spot uses SPOT (no margin product on a cash spot order).
+    """
+
+    mis  = "MIS"   # intraday (equity)
+    cnc  = "CNC"   # delivery / positional (equity)
+    spot = "SPOT"  # crypto spot — non-margin
+    margin = "MARGIN"  # crypto margin — reserved for future use
 
 
 class OrderValidity(str, Enum):
+    """
+    Time-in-force. Indian broker family supports DAY/IOC; Binance Spot supports
+    GTC/IOC/FOK. The enum is the union; pickers reject unsupported combos.
+    """
+
     day = "DAY"
     ioc = "IOC"
+    gtc = "GTC"
+    fok = "FOK"
 
 
 class BracketOrderLegRole(str, Enum):
@@ -80,6 +130,17 @@ class EntryExitBlock(BaseModel):
     filters: List[SignalRule] = Field(default_factory=list)
 
 
+class ExitBlock(BaseModel):
+    """
+    Exit-phase signals. `trigger` is optional because many strategies exit
+    purely on SL/TP and never define a signal-based exit. When omitted, the
+    evaluator skips the exit-signal check and relies on price-based exits only.
+    """
+
+    trigger: Optional[SignalRule] = None
+    filters: List[SignalRule] = Field(default_factory=list)
+
+
 class SlTpConfig(BaseModel):
     type: Literal["percent"] = "percent"
     stop_loss_pct: float = Field(..., gt=0, le=50)
@@ -91,20 +152,119 @@ class RiskConfig(BaseModel):
     max_open_positions: int = Field(3, ge=1, le=20)
     cash_reserve_pct: float = Field(0.10, ge=0.0, le=0.5)
     cooldown_bars: int = Field(5, ge=0)
-    min_trade_value: float = Field(500.0, ge=0)
+    # Quote-currency amount: INR for equity_cash, USDT/USDC for crypto_spot.
+    # Default mirrors the equity_cash baseline; asset-class-aware lookups in
+    # `risk_execution_config_service` may override it at runtime.
+    min_trade_value: float = Field(10.0, ge=0)
+
+
+class GatesConfig(BaseModel):
+    """
+    Phase 10 entry-gate constraints — parity with the backtest simulator's
+    entry gates so a strategy behaves identically in backtest and live eval.
+
+    Every gate defaults to *disabled*, so existing strategies and requests
+    that omit this block behave exactly as before.
+    """
+
+    direction: Literal["long_only", "short_only", "both"] = "both"
+    entry_window_start: Optional[str] = Field(
+        None, description="HH:MM in IST — no entries before this time."
+    )
+    entry_window_end: Optional[str] = Field(
+        None, description="HH:MM in IST — no fresh entries after this time."
+    )
+    max_consecutive_losses: int = Field(
+        0, ge=0, description="Block entries after N consecutive losing trades. 0 = disabled."
+    )
+    cooldown_bars_after_loss: int = Field(
+        0, ge=0, description="Bars to wait after a losing trade before re-entry. 0 = disabled."
+    )
+    cooldown_bars_after_profit: int = Field(
+        0, ge=0, description="Bars to wait after a winning trade before re-entry. 0 = disabled."
+    )
+    max_spread_bps: float = Field(
+        0.0, ge=0.0, description="Reject entry if estimated spread exceeds this. 0 = disabled."
+    )
+    gap_filter: Literal["none", "ignore_gap_up", "ignore_gap_down", "ignore_both"] = "none"
+    gap_threshold_pct: float = Field(
+        0.5, ge=0.0, description="Gap size (% vs prev close) that triggers the gap_filter."
+    )
+    entry_confirmation_bars: int = Field(
+        1, ge=1, description="Entry signal must hold True for N consecutive closed bars."
+    )
+    rsi_entry_band_min: Optional[float] = Field(None, ge=0, le=100)
+    rsi_entry_band_max: Optional[float] = Field(None, ge=0, le=100)
+    volume_ratio_threshold: Optional[float] = Field(
+        None, gt=0, description="Require current volume >= N x 20-bar average."
+    )
+    # Phase 2 — volatility-band gate. Block entries when ATR/NATR is outside the
+    # band (too low = dead market, too high = chaotic). Must match the backtest
+    # simulator's vol_filter_* gate exactly.
+    vol_filter_metric: Optional[Literal["atr", "natr"]] = Field(
+        None, description="Volatility metric for the band gate. None = disabled."
+    )
+    vol_filter_window: int = Field(14, ge=1, description="Look-back for the ATR/NATR band gate.")
+    vol_filter_min: Optional[float] = Field(None, ge=0, description="Block if metric < this.")
+    vol_filter_max: Optional[float] = Field(None, ge=0, description="Block if metric > this.")
+    # Phase 2 — regime gate. Only enter when the detected regime is in this list.
+    regime_filter_allowed: Optional[List[str]] = Field(
+        None, description="Allowed regimes: trending_up|trending_down|ranging|volatile. None=off."
+    )
+    # Phase 2 — relative-strength gate (needs REF_close in the df).
+    rs_filter_window: Optional[int] = Field(None, ge=1, description="RS look-back in bars. None=off.")
+    rs_filter_min_ratio: float = Field(1.0, description="Block if RS ratio < this (1.0 = must match ref).")
+    # Phase 2 — event filter: skip new entries on these YYYY-MM-DD dates.
+    event_skip_dates: Optional[List[str]] = Field(None, description="Blackout dates. None=off.")
+    # Phase 2 — lunch-lull skip window (UTC minutes-of-day, inclusive). Both
+    # required to activate. Matches the simulator's lunch_lull gate.
+    lunch_lull_start_utc: Optional[int] = Field(None, ge=0, le=1439)
+    lunch_lull_end_utc: Optional[int] = Field(None, ge=0, le=1439)
 
 
 class StrategyConfigPayload(BaseModel):
     """Inline strategy configuration for Mode 2."""
 
     strategy_id: Optional[str] = None
-    symbol: str = Field(..., description="e.g. RELIANCE.NS")
+    symbol: str = Field(
+        ...,
+        description=(
+            "Strategy ticker. Equity: 'RELIANCE.NS' or 'RELIANCE'. "
+            "Crypto: 'BTC_USDT' (KB canonical BASE_QUOTE form)."
+        ),
+    )
     timeframe: str = Field(..., description="e.g. 5m, 15m, 1h")
     strategy_type: Literal["intraday", "positional"] = "intraday"
+    asset_class: AssetClass = Field(
+        default=AssetClass.equity_cash,
+        description=(
+            "Asset class for this strategy. Selects ref_data canonical-symbol "
+            "form, market-data adapter (Upstox vs Binance), and product/order "
+            "type mappings. Defaults to equity_cash for legacy clients."
+        ),
+    )
     entry: EntryExitBlock
-    exit: EntryExitBlock
+    exit: ExitBlock
     sl_tp: SlTpConfig
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    gates: GatesConfig = Field(default_factory=GatesConfig)
+
+
+# ── Quantity type (asset-class-aware) ──────────────────────────────────────────
+#
+# Equity exchanges (NSE/BSE) require integer quantities. Crypto exchanges
+# (Binance Spot) require fractional quantities (e.g. 0.00125 BTC). We model
+# the field as a ``Decimal`` so it round-trips losslessly for crypto, while
+# still accepting integer JSON input so existing equity payloads are unchanged.
+#
+# - Inbound: Pydantic accepts ``5`` (int), ``5.0`` (float, only for crypto
+#   asset-classes via downstream validation), and ``"0.00125"`` (string).
+# - Outbound: ``Decimal`` is serialised as a JSON *string* by Pydantic v2 to
+#   preserve precision. Equity quantities will appear as ``"5"`` instead of
+#   ``5``; downstream consumers that parse with a JSON-number-aware deserialiser
+#   should still tolerate this, but breaking changes are documented here.
+
+Quantity = Decimal
 
 
 # ── Sub-schemas: Execution State ───────────────────────────────────────────────
@@ -113,7 +273,13 @@ class OpenPosition(BaseModel):
     position_id: str
     symbol: str
     side: Literal["BUY", "SELL"]
-    quantity: int
+    quantity: Quantity = Field(
+        ...,
+        description=(
+            "Order quantity. Equity = integer share count (e.g. 5). "
+            "Crypto spot = fractional base-asset amount (e.g. 0.00125)."
+        ),
+    )
     entry_price: float
     entry_time: Optional[str] = None
     stop_loss_price: Optional[float] = None
@@ -128,6 +294,16 @@ class ExecutionStatePayload(BaseModel):
     open_positions: List[OpenPosition] = Field(default_factory=list)
     bars_since_last_trade: int = Field(0, ge=0)
     capital: float = Field(100_000.0, ge=0)
+    # Phase 10 — gate state. Needed by the consecutive-loss and cooldown gates,
+    # which (unlike the other gates) cannot be derived from the candle history.
+    consecutive_losses: int = Field(
+        0, ge=0, description="Count of consecutive losing trades for this strategy."
+    )
+    last_trade_was_loss: Optional[bool] = Field(
+        None,
+        description="True if the most recent closed trade was a loss, False if a win, "
+        "None if no trades yet. Drives the cooldown_bars_after_loss/profit gates.",
+    )
 
 
 # ── Request Models ─────────────────────────────────────────────────────────────
@@ -198,24 +374,37 @@ class OrderLeg(BaseModel):
     )
     symbol: str
     side: Literal["BUY", "SELL"]
-    quantity: int
+    quantity: Quantity = Field(
+        ...,
+        description=(
+            "Order quantity. Equity = integer share count; crypto spot = "
+            "fractional base-asset amount (e.g. 0.00125 BTC)."
+        ),
+    )
     price: Optional[float] = None
     trigger_price: Optional[float] = None
     order_type: ExchangeOrderType = Field(
         ...,
         description=(
-            "Broker / exchange *order type* (LIMIT, MARKET, SL, SL-M) — not bracket leg. "
-            "Use this when mapping to NSE cash-style or broker place-order APIs."
+            "Broker / venue *order type*. The set is the union of all supported "
+            "venues — equity legs use LIMIT/SL-M, crypto spot legs use "
+            "LIMIT/STOP_LOSS/TAKE_PROFIT (or the *_LIMIT variants). Not the "
+            "bracket leg role."
         ),
     )
     product_type: ProductType = Field(
         ...,
-        description="Margin product: MIS (intraday) or CNC (delivery) per Indian broker norms.",
+        description=(
+            "Margin / settlement product: MIS or CNC for Indian equity per "
+            "broker norms; SPOT for crypto spot (non-margin)."
+        ),
     )
     validity: OrderValidity = Field(
         default=OrderValidity.day,
-        description="Time in force of this *order* (e.g. DAY = rest of session). See API docs; "
-        "distinct from how long a CNC *position* may be held after fill.",
+        description=(
+            "Time-in-force. Equity orders use DAY/IOC; crypto spot orders use "
+            "GTC/IOC/FOK. Distinct from how long a CNC *position* may be held."
+        ),
     )
 
 
@@ -246,7 +435,7 @@ class ExitInstruction(BaseModel):
     symbol: str
     reason: Literal["stop_loss", "take_profit", "exit_signal", "time_based"]
     exit_price: float
-    quantity: int
+    quantity: Quantity
     product_type: ProductType
 
 
@@ -257,7 +446,14 @@ class RiskSnapshot(BaseModel):
     take_profit_pct: float
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
-    position_size: Optional[int] = None
+    position_size: Optional[Quantity] = Field(
+        None,
+        description=(
+            "Computed entry quantity. Decimal so it round-trips losslessly for "
+            "fractional crypto sizes (e.g. 0.00125 BTC) and integer equity "
+            "share counts alike."
+        ),
+    )
     principal_amount: Optional[float] = None
     daily_loss_cap_pct: float
     per_trade_risk_pct: float

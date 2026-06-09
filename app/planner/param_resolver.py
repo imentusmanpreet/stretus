@@ -109,10 +109,17 @@ def parse_risk_reward(raw: Any) -> float | None:
     """Parse a user-supplied risk:reward into the TP/SL multiple.
 
     Accepted forms (returns the TP/SL ratio):
-        "1:2"  → 2.0     "1:3"  → 3.0     "2:1"  → 0.5
+        "1:2"  → 2.0     "1:3"  → 3.0     "3:1"  → 3.0     "2:1"  → 2.0
         "2"    → 2.0     2.5    → 2.5     "  "   → None
     Returns None for blank, malformed, or non-positive values so the caller
     can fall back to ATR-scaling.
+
+    Note on ``N:1`` vs ``1:N``: traders write a risk:reward ratio in either
+    order but almost always mean the SAME thing — "N reward per 1 unit of risk".
+    So "3:1 risk-reward" means 3.0 (3x reward), not 0.33. Whenever one side of
+    the ratio is exactly 1, the other side IS the reward-to-risk multiple,
+    regardless of which side it's on. Only when neither side is 1 do we fall
+    back to the literal risk-first reading (reward/risk).
     """
     if raw is None:
         return None
@@ -121,12 +128,17 @@ def parse_risk_reward(raw: Any) -> float | None:
         return None
     try:
         if ":" in text:
-            risk_str, reward_str = text.split(":", 1)
-            risk = float(risk_str.strip())
-            reward = float(reward_str.strip())
-            if risk <= 0 or reward <= 0:
+            a_str, b_str = text.split(":", 1)
+            a = float(a_str.strip())
+            b = float(b_str.strip())
+            if a <= 0 or b <= 0:
                 return None
-            return reward / risk
+            # "N:1" and "1:N" both mean N-to-1 reward:risk.
+            if a == 1.0:
+                return b
+            if b == 1.0:
+                return a
+            return b / a   # ambiguous "A:B" — literal risk-first reading
         value = float(text)
         return value if value > 0 else None
     except (TypeError, ValueError):
@@ -150,6 +162,27 @@ _REGIME_TP_MULT: dict[str, float] = {
     "ranging":       0.9,
     "volatile":      1.0,
 }
+
+
+# A take-profit must never be tighter than the stop-loss: that is a risk:reward
+# below 1:1 (you'd risk more than you aim to gain), which the plan validator
+# forbids outright. If volatility/regime scaling or a sub-1 user ratio would
+# produce tp < sl, we floor the TP at the SL (a 1:1 minimum) instead of letting
+# the planner raise and crash the whole chat flow.
+_MIN_RISK_REWARD = 1.0
+
+
+def _enforce_min_rr(sl_pct: float, tp_pct: float, user_rr: Any) -> float:
+    """Clamp tp_pct up to sl_pct when it would otherwise fall below a 1:1 RR."""
+    floor = round(sl_pct * _MIN_RISK_REWARD, 2)
+    if tp_pct < floor:
+        logger.warning(
+            "param_resolver|tp_floored_to_min_rr|sl=%.2f%%|tp_in=%.2f%%|tp_out=%.2f%%"
+            "|user_rr=%r|reason=risk_reward_below_1:1_is_not_allowed",
+            sl_pct, tp_pct, floor, user_rr,
+        )
+        return floor
+    return tp_pct
 
 
 def resolve_sl_tp(
@@ -184,8 +217,22 @@ def resolve_sl_tp(
         sl_pct = round(base_sl * regime_sl_mult, 2)
         if user_rr is not None:
             tp_pct = round(sl_pct * user_rr, 2)
+            tp_source = "user_rr"
         else:
             tp_pct = round(base_tp * regime_tp_mult, 2)
+            tp_source = "ai_default"
+            logger.warning(
+                "param_resolver|tp_ai_defaulted|sl=%.2f%%|tp=%.2f%%|regime=%s"
+                "|reason=user_did_not_provide_risk_reward_or_take_profit"
+                "|action_required=chat_layer_should_gate_planner_until_rms_complete",
+                sl_pct, tp_pct, regime_type,
+            )
+        tp_pct = _enforce_min_rr(sl_pct, tp_pct, user_rr)
+        logger.info(
+            "param_resolver|sl_tp|regime=%s|sl=%.2f%%|tp=%.2f%%|tp_source=%s"
+            "|atr_unavailable=true",
+            regime_type, sl_pct, tp_pct, tp_source,
+        )
         return sl_pct, tp_pct, 1.0
 
     raw_mult = atr_pct / _BASELINE_ATR_PCT
@@ -193,13 +240,22 @@ def resolve_sl_tp(
     sl_pct   = round(base_sl * vol_mult * regime_sl_mult, 2)
     if user_rr is not None:
         tp_pct = round(sl_pct * user_rr, 2)
+        tp_source = "user_rr"
     else:
         tp_pct = round(base_tp * vol_mult * regime_tp_mult, 2)
+        tp_source = "ai_default"
+        logger.warning(
+            "param_resolver|tp_ai_defaulted|sl=%.2f%%|tp=%.2f%%|regime=%s"
+            "|reason=user_did_not_provide_risk_reward_or_take_profit"
+            "|action_required=chat_layer_should_gate_planner_until_rms_complete",
+            sl_pct, tp_pct, regime_type,
+        )
 
+    tp_pct = _enforce_min_rr(sl_pct, tp_pct, user_rr)
     logger.info(
         "param_resolver|sl_tp|regime=%s|regime_sl_mult=%.2f|regime_tp_mult=%.2f"
-        "|vol_mult=%.2f|sl=%.2f%%|tp=%.2f%%",
-        regime_type, regime_sl_mult, regime_tp_mult, vol_mult, sl_pct, tp_pct,
+        "|vol_mult=%.2f|sl=%.2f%%|tp=%.2f%%|tp_source=%s",
+        regime_type, regime_sl_mult, regime_tp_mult, vol_mult, sl_pct, tp_pct, tp_source,
     )
     return sl_pct, tp_pct, round(vol_mult, 3)
 

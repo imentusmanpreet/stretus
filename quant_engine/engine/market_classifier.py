@@ -152,6 +152,7 @@ def build_market_phase_analysis(
     df: pd.DataFrame,
     trades: list[Any],   # list[Trade] — typed as Any to avoid circular import
     strategy_side: str,
+    entry_ts_sorted: pd.DatetimeIndex | None = None,
 ) -> list[dict]:
     """
     Split the OHLCV data into calendar quarters and return one dict per quarter.
@@ -172,14 +173,20 @@ def build_market_phase_analysis(
     if not isinstance(df.index, pd.DatetimeIndex):
         return []
 
-    # Pre-parse all trade entry timestamps once
-    entry_timestamps: list[pd.Timestamp | None] = []
-    for trade in trades:
-        try:
-            ts = pd.to_datetime(trade.entry_date, utc=True).tz_localize(None)
-            entry_timestamps.append(ts)
-        except Exception:
-            entry_timestamps.append(None)
+    # Pre-parse all trade entry timestamps once. When the caller already has
+    # a sorted DatetimeIndex (the common path from calculate_metrics) use it
+    # directly — this skips ~13k pd.to_datetime calls and ~13k tz_localize.
+    entry_timestamps: list[pd.Timestamp | None]
+    if entry_ts_sorted is not None and len(entry_ts_sorted) == len(trades):
+        entry_timestamps = list(entry_ts_sorted)
+    else:
+        entry_timestamps = []
+        for trade in trades:
+            try:
+                ts = pd.to_datetime(trade.entry_date, utc=True).tz_localize(None)
+                entry_timestamps.append(ts)
+            except Exception:
+                entry_timestamps.append(None)
 
     quarterly_groups = list(df.groupby(pd.Grouper(freq="QE")))
     phases: list[dict] = []
@@ -244,7 +251,8 @@ def build_market_phase_analysis(
 
 def compute_monthly_performance(
     daily_values: pd.Series,
-    trades: list[Any],  # list[Trade]
+    trades: list[Any],  # list[Trade]  — kept for back-compat / arg parity
+    entry_ts_sorted: pd.DatetimeIndex | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Compute per-month strategy returns from the daily portfolio equity curve.
@@ -256,6 +264,11 @@ def compute_monthly_performance(
     monthly_statistics : dict
         Aggregate stats: highest/lowest/range monthly gain,
         return-vs-drawdown efficiency, best performing market condition.
+
+    Performance note: when entry_ts_sorted is supplied the per-trade month
+    bucketing uses vectorized strftime over the pre-parsed DatetimeIndex,
+    skipping ~13k pd.to_datetime calls. Falls back to the per-string path
+    when only `trades` is provided (test/back-compat).
     """
     if daily_values is None or daily_values.empty:
         return [], {}
@@ -266,13 +279,19 @@ def compute_monthly_performance(
 
     # Count trades entered per calendar month
     trade_month_counts: dict[str, int] = {}
-    for trade in trades:
-        try:
-            ts        = pd.to_datetime(trade.entry_date, utc=True).tz_localize(None)
-            month_key = ts.strftime("%Y-%m")
-            trade_month_counts[month_key] = trade_month_counts.get(month_key, 0) + 1
-        except Exception:
-            pass
+    if entry_ts_sorted is not None and len(entry_ts_sorted) > 0:
+        # Vectorized: single strftime on the whole DatetimeIndex, then count.
+        month_keys = entry_ts_sorted.strftime("%Y-%m")
+        for key in month_keys:
+            trade_month_counts[key] = trade_month_counts.get(key, 0) + 1
+    else:
+        for trade in trades:
+            try:
+                ts        = pd.to_datetime(trade.entry_date, utc=True).tz_localize(None)
+                month_key = ts.strftime("%Y-%m")
+                trade_month_counts[month_key] = trade_month_counts.get(month_key, 0) + 1
+            except Exception:
+                pass
 
     monthly_list: list[dict] = []
     for month_ts, return_pct in monthly_returns.items():

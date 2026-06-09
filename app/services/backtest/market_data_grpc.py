@@ -5,6 +5,7 @@ Bypasses User-Gateway → BFF → HTTP when streutus-ai runs in the same K8s clu
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -110,7 +111,9 @@ async def fetch_ohlcv_chunk_grpc(
             interval,
             len(response.bars),
         )
-        return bars_to_record_dicts(response.bars)
+        # Per-bar dict construction is sync CPU work; offload so we don't
+        # block the event loop while gRPC keeps streaming the next chunk.
+        return await asyncio.to_thread(bars_to_record_dicts, response.bars)
     except grpc.aio.AioRpcError as exc:
         chunk_duration = time.perf_counter() - chunk_start
         logger.exception(

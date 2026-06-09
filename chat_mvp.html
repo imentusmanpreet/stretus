@@ -6,16 +6,16 @@
   <title>Stretus chat API tester</title>
   <style>
     :root {
-      --bg: #0f1419;
-      --surface: #1a2332;
-      --border: #2d3a4d;
-      --text: #e7ecf3;
-      --muted: #8b9cb3;
+      --bg: #e8f3fd;          /* lightest sky / powder blue */
+      --surface: #f4faff;
+      --border: #c7ddf0;
+      --text: #16273a;
+      --muted: #5b7186;
       --user: #2563eb;
-      --assistant: #334155;
-      --danger: #f87171;
-      --ok: #4ade80;
-      --warn: #fbbf24;
+      --assistant: #ffffff;
+      --danger: #dc2626;
+      --ok: #16a34a;
+      --warn: #b45309;
     }
     * { box-sizing: border-box; }
     html {
@@ -76,7 +76,7 @@
       border: 1px solid transparent;
       font-size: 0.8rem;
     }
-    .chat-item:hover { background: rgba(255,255,255,0.06); }
+    .chat-item:hover { background: rgba(37,99,235,0.08); }
     .chat-item.active {
       background: rgba(37, 99, 235, 0.2);
       border-color: var(--user);
@@ -94,7 +94,7 @@
       width: 0;
       overflow: hidden;
       border-left: 1px solid transparent;
-      background: #0c1018;
+      background: #eaf2fb;
       display: flex;
       flex-direction: column;
       flex-shrink: 0;
@@ -233,12 +233,52 @@
     }
     .row.user .role { color: rgba(255,255,255,0.85); }
     .row.assistant .role { color: var(--muted); }
+    .md { word-break: break-word; }
+    .md > :first-child { margin-top: 0; }
+    .md > :last-child { margin-bottom: 0; }
+    .md p { margin: 0.4rem 0; }
+    .md h1, .md h2, .md h3, .md h4 {
+      margin: 0.7rem 0 0.35rem;
+      line-height: 1.25;
+    }
+    .md h1 { font-size: 1.1rem; }
+    .md h2 { font-size: 1rem; }
+    .md h3 { font-size: 0.92rem; }
+    .md h4 { font-size: 0.88rem; }
+    .md ul { margin: 0.35rem 0; padding-left: 1.25rem; }
+    .md li { margin: 0.15rem 0; }
+    .md strong { font-weight: 600; }
+    .md code {
+      background: rgba(37,99,235,0.1);
+      padding: 0.05rem 0.3rem;
+      border-radius: 4px;
+      font-family: ui-monospace, monospace;
+      font-size: 0.82em;
+    }
+    .md hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0.7rem 0;
+    }
+    .md table {
+      border-collapse: collapse;
+      margin: 0.5rem 0;
+      width: 100%;
+      font-size: 0.82rem;
+    }
+    .md th, .md td {
+      border: 1px solid var(--border);
+      padding: 0.3rem 0.5rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    .md th { background: rgba(37,99,235,0.08); font-weight: 600; }
     .state-pill {
       display: inline-block;
       font-size: 0.7rem;
       padding: 0.15rem 0.45rem;
       border-radius: 4px;
-      background: rgba(0,0,0,0.25);
+      background: rgba(0,0,0,0.06);
       margin-top: 0.35rem;
     }
     .processing { color: var(--warn); }
@@ -505,6 +545,120 @@
         return d.innerHTML;
       }
 
+      function mdInline(s) {
+        s = escapeHtml(s);
+        s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+        s = s.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+        return s;
+      }
+
+      function mdSplitRow(row) {
+        let r = row.trim();
+        if (r.startsWith("|")) r = r.slice(1);
+        if (r.endsWith("|")) r = r.slice(0, -1);
+        return r.split("|").map((c) => c.trim());
+      }
+
+      // Lightweight markdown → HTML for assistant messages (headings, bold,
+      // bullets, tables, rules, inline code). No external dependency.
+      function renderMarkdown(src) {
+        if (!src) return "";
+        const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
+        let html = "";
+        let listOpen = false;
+        const closeList = () => {
+          if (listOpen) {
+            html += "</ul>";
+            listOpen = false;
+          }
+        };
+        const isBlockStart = (t) =>
+          /^(#{1,6})\s+/.test(t) ||
+          /^[-*•✗✓]\s+/.test(t) ||
+          /^\d+[.)]\s+/.test(t) ||
+          /^(---+|___+|\*\*\*+)$/.test(t) ||
+          t.includes("|");
+
+        let i = 0;
+        while (i < lines.length) {
+          const trimmed = lines[i].trim();
+
+          if (!trimmed) {
+            closeList();
+            i++;
+            continue;
+          }
+
+          if (/^(---+|___+|\*\*\*+)$/.test(trimmed)) {
+            closeList();
+            html += "<hr/>";
+            i++;
+            continue;
+          }
+
+          // table: header row followed by a |---|---| separator row
+          if (
+            trimmed.includes("|") &&
+            i + 1 < lines.length &&
+            lines[i + 1].includes("-") &&
+            /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])
+          ) {
+            closeList();
+            const header = mdSplitRow(trimmed);
+            i += 2;
+            const rows = [];
+            while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+              rows.push(mdSplitRow(lines[i].trim()));
+              i++;
+            }
+            html +=
+              "<table><thead><tr>" +
+              header.map((h) => `<th>${mdInline(h)}</th>`).join("") +
+              "</tr></thead><tbody>" +
+              rows
+                .map(
+                  (r) =>
+                    "<tr>" + r.map((c) => `<td>${mdInline(c)}</td>`).join("") + "</tr>"
+                )
+                .join("") +
+              "</tbody></table>";
+            continue;
+          }
+
+          const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+          if (heading) {
+            closeList();
+            const level = Math.min(heading[1].length, 4);
+            html += `<h${level}>${mdInline(heading[2])}</h${level}>`;
+            i++;
+            continue;
+          }
+
+          const bullet = trimmed.match(/^(?:[-*•✗✓]|\d+[.)])\s+(.*)$/);
+          if (bullet) {
+            if (!listOpen) {
+              html += "<ul>";
+              listOpen = true;
+            }
+            html += `<li>${mdInline(bullet[1])}</li>`;
+            i++;
+            continue;
+          }
+
+          // paragraph: join consecutive plain lines
+          closeList();
+          const para = [trimmed];
+          i++;
+          while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i].trim())) {
+            para.push(lines[i].trim());
+            i++;
+          }
+          html += `<p>${mdInline(para.join(" "))}</p>`;
+        }
+        closeList();
+        return html;
+      }
+
       function prettyJson(obj) {
         try {
           return JSON.stringify(obj, null, 2);
@@ -597,7 +751,7 @@
           if (st === "processing") {
             inner += `<div class="processing"><span class="spinner"></span>AI working…</div>`;
             if (m.content) {
-              inner += `<div style="margin-top:.5rem;opacity:.75">${escapeHtml(m.content)}</div>`;
+              inner += `<div class="md" style="margin-top:.5rem;opacity:.75">${renderMarkdown(m.content)}</div>`;
             }
           } else if (st === "failed") {
             inner += `<div class="failed">Assistant failed</div>`;
@@ -605,10 +759,10 @@
               inner += `<div class="error-box">${escapeHtml(m.error_message)}</div>`;
             }
             if (m.content) {
-              inner += `<div style="margin-top:.5rem">${escapeHtml(m.content)}</div>`;
+              inner += `<div class="md" style="margin-top:.5rem">${renderMarkdown(m.content)}</div>`;
             }
           } else {
-            inner += `<div>${escapeHtml(m.content || "")}</div>`;
+            inner += `<div class="md">${renderMarkdown(m.content || "")}</div>`;
           }
 
           if (m.strategy_draft && Object.keys(m.strategy_draft).length) {
@@ -616,6 +770,13 @@
           }
           if (m.strategy_json && Object.keys(m.strategy_json).length) {
             inner += `<details><summary>strategy_json</summary><pre>${escapeHtml(prettyJson(m.strategy_json))}</pre></details>`;
+          }
+          if (m.backtest_result && Object.keys(m.backtest_result).length) {
+            const trades = m.backtest_result.metrics && m.backtest_result.metrics.backtest_trades;
+            if (Array.isArray(trades) && trades.length) {
+              inner += `<details><summary>backtest_trades (${trades.length})</summary><pre>${escapeHtml(prettyJson(trades))}</pre></details>`;
+            }
+            inner += `<details><summary>backtest_result (full)</summary><pre>${escapeHtml(prettyJson(m.backtest_result))}</pre></details>`;
           }
 
           if (m.created_at) {

@@ -86,6 +86,10 @@ class NoValidCandidate(PlannerError):
 # the ranker pile on more.
 MAX_ENTRY_FILTERS = 3
 
+# Maximum exit filters (AND-ed confirmations before the exit trigger fires).
+# Typically 1 is enough; 2 is the practical ceiling for real strategies.
+MAX_EXIT_FILTERS = 2
+
 
 class Pipeline:
     """One instance per request (light); safe to construct inline."""
@@ -157,7 +161,7 @@ class Pipeline:
         all_cards = list(self.kb.signals.values())
         preset = self._resolve_preset(builder)
         if preset is not None:
-            entry_trigger_card, entry_filter_cards, exit_trigger_card = (
+            entry_trigger_card, entry_filter_cards, exit_trigger_card, exit_filter_cards = (
                 self._apply_preset(preset, sentiment=sentiment, timeframe=timeframe, trace=trace)
             )
         else:
@@ -214,6 +218,41 @@ class Pipeline:
                 trace=trace,
             )
 
+            # Step 3b-exit: pick up to MAX_EXIT_FILTERS exit filters (AND-ed
+            # confirmations that must hold alongside the exit trigger). Same
+            # deduplication logic as entry filters.
+            exit_filter_cards = []
+            exit_avoid_families: set[str] = {
+                exit_trigger_card.family,
+                entry_trigger_card.family,
+            }
+            exit_most_recent: SignalCard = exit_trigger_card
+            for _ in range(MAX_EXIT_FILTERS):
+                ef_card, _ = self._filter_and_pick(
+                    all_cards,
+                    role="exit_filter",
+                    sentiment=sentiment,
+                    timeframe=timeframe,
+                    intent=intent,
+                    experience=experience,
+                    avoid_family=None,
+                    pair_with=exit_most_recent,
+                    trace=trace,
+                    optional=True,
+                    exclude_families=exit_avoid_families,
+                    exclude_names={
+                        exit_trigger_card.name,
+                        entry_trigger_card.name,
+                        *(c.name for c in exit_filter_cards),
+                        *(c.name for c in entry_filter_cards),
+                    },
+                )
+                if ef_card is None:
+                    break
+                exit_filter_cards.append(ef_card)
+                exit_avoid_families.add(ef_card.family)
+                exit_most_recent = ef_card
+
         # ── Step 3c: Semantic signal injection ──────────────────────────────
         # After preset-or-ranker signal selection, inject entry filter signals
         # derived from the canonical semantic intent (HTF confluence rules,
@@ -262,6 +301,17 @@ class Pipeline:
             exit_trigger_card, "exit_trigger", ex_params, timeframe,
         )
 
+        exit_filter_picks: list[PickedSignal] = []
+        for ef_card in exit_filter_cards:
+            ef_params, ef_src = resolve_params(
+                ef_card, timeframe=timeframe, symbol=stock.symbol,
+                objective=objective, ohlcv=ohlcv,
+            )
+            trace.record_param_source(ef_card.name, ef_src)
+            exit_filter_picks.append(PickedSignal.from_card(
+                ef_card, "exit_filter", ef_params, timeframe,
+            ))
+
         # ── Step 5b: Classify market regime ─────────────────────────────────
         # Done after param resolution (signals are already picked) so the
         # regime can inform SL/TP scaling but not signal selection (which
@@ -308,6 +358,7 @@ class Pipeline:
             entry_trigger=entry_trigger_picked,
             entry_filters=entry_filter_picks,
             exit_trigger=exit_trigger_picked,
+            exit_filters=exit_filter_picks,
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             risk=build_risk_dict(risk_tier),
@@ -358,12 +409,18 @@ class Pipeline:
             ",".join(p.name for p in entry_filter_picks)
             if entry_filter_picks else "—"
         )
+        exit_filters_summary = (
+            ",".join(p.name for p in exit_filter_picks)
+            if exit_filter_picks else "—"
+        )
         logger.info(
-            "planner|done|symbol=%s|tf=%s|entry=%s|filters=[%s]|exit=%s|sl=%s%%|tp=%s%%",
+            "planner|done|symbol=%s|tf=%s|entry=%s|entry_filters=[%s]"
+            "|exit=%s|exit_filters=[%s]|sl=%s%%|tp=%s%%",
             stock.symbol, timeframe,
             entry_trigger_picked.name,
             filters_summary,
             exit_trigger_picked.name,
+            exit_filters_summary,
             sl_pct, tp_pct,
         )
         return plan
@@ -466,7 +523,7 @@ class Pipeline:
         sentiment: SignalDirection,
         timeframe: str,
         trace: DecisionTrace,
-    ) -> tuple[SignalCard, list[SignalCard], SignalCard]:
+    ) -> tuple[SignalCard, list[SignalCard], SignalCard, list[SignalCard]]:
         """Pin the preset's signal stack for the requested sentiment.
 
         Raises NoValidCandidate when the preset has no leg matching sentiment,
@@ -488,6 +545,7 @@ class Pipeline:
             entry_trigger = self.kb.signals[leg.entry_trigger]
             entry_filters = [self.kb.signals[s] for s in leg.entry_filters]
             exit_trigger = self.kb.signals[leg.exit_trigger]
+            exit_filters = [self.kb.signals[s] for s in leg.exit_filters]
         except KeyError as exc:
             # _load_presets validates references at startup; if we land here
             # the KB was reloaded with mismatched files. Surface as a planner
@@ -506,14 +564,19 @@ class Pipeline:
             trace.record_pick("entry_filter", card.name)
         trace.record_initial("exit_trigger", [exit_trigger.name])
         trace.record_pick("exit_trigger", exit_trigger.name)
+        for card in exit_filters:
+            trace.record_initial("exit_filter", [card.name])
+            trace.record_pick("exit_filter", card.name)
         logger.info(
-            "planner|preset_pinned|preset=%s|sentiment=%s|tf=%s|trigger=%s|filters=%s|exit=%s",
+            "planner|preset_pinned|preset=%s|sentiment=%s|tf=%s"
+            "|trigger=%s|entry_filters=%s|exit=%s|exit_filters=%s",
             preset.name, sentiment, timeframe,
             entry_trigger.name,
             [c.name for c in entry_filters],
             exit_trigger.name,
+            [c.name for c in exit_filters],
         )
-        return entry_trigger, entry_filters, exit_trigger
+        return entry_trigger, entry_filters, exit_trigger, exit_filters
 
     def _filter_and_pick(
         self,

@@ -143,7 +143,18 @@ class Settings(BaseSettings):
     signal_eval_lookback_days: int = 30
     # Chunk size for backtest OHLCV fetching. The full backtest range is split
     # into windows of this many days and fetched sequentially to avoid HTTP 429.
+    # Indian equity APIs cope with ~180-day windows. Crypto venues return very
+    # dense candles (24/7 markets) and reject the same window — use a smaller
+    # default (~30 days) which is overridable per env.
     backtest_fetch_chunk_days: int = 180
+    backtest_fetch_chunk_days_crypto: int = 45
+    # Earliest UTC start users may request for a custom backtest window.
+    # Requests before this date receive a friendly rejection in chat/API.
+    backtest_earliest_from_utc: str = "2024-01-01T00:00:00Z"
+    # When the user specifies a custom from/to, only this many calendar days of
+    # pre-window OHLCV are fetched for indicator warm-up (sim stays on user range).
+    backtest_user_range_max_padding_days: int = 90
+    backtest_user_range_min_padding_days: int = 14
 
     # ── Live market data (Execution / Order Evaluation service only) ──────────
     # Points to Upstox v2 base URL.  All execution market data comes from here:
@@ -155,6 +166,11 @@ class Settings(BaseSettings):
     market_data_timeout_seconds: float = 30.0
     upstox_api_key: str = ""
     upstox_access_token: str = ""
+    # Binance Spot public REST base URL — used by BinanceClient for crypto
+    # strategy evaluation (candles, LTP, 24h band). No auth required; this is
+    # read-only market data. Override per environment (e.g. for a regional
+    # mirror or a public-test endpoint).
+    crypto_market_data_url: str = "https://api.binance.com"
     # In-process cache TTL for execution market data (seconds)
     market_data_cache_ttl_seconds: int = 1
     # Skip entry if LTP is within this fraction of the circuit limit (2% buffer)

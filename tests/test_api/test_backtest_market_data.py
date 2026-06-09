@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.backtest import market_data
 from app.schemas.backtest import BacktestTriggerRequest
+from app.services.backtest import market_data
+from app.services.backtest.backtest_window import BacktestWindowError
 from app.services.backtest.market_data import (
     StrategyMarketDataRequest,
     _build_ohlcv_fetch_slots,
-    _merge_ohlcv_slot_rows,
+    _dedup_and_sort_records,
     extract_strategy_market_data_request,
     normalize_ohlcv_payload,
 )
@@ -18,7 +19,7 @@ from quant_engine.engine.config import (
 )
 
 
-def test_extract_strategy_market_data_request_enforces_configured_window(tmp_path):
+def test_extract_strategy_market_data_request_honors_user_window(tmp_path):
     yaml_path = tmp_path / "strategy.yaml"
     yaml_path.write_text(
         "\n".join(
@@ -47,8 +48,9 @@ def test_extract_strategy_market_data_request_enforces_configured_window(tmp_pat
         raw_symbol="TCS",
         symbol="TCS",
         interval="5m",
-        from_utc=BACKTEST_MARKET_DATA_FROM_UTC,
-        to_utc=BACKTEST_MARKET_DATA_TO_UTC,
+        from_utc="2026-03-02T03:45:00Z",
+        to_utc="2026-03-02T09:59:00Z",
+        user_specified_window=True,
     )
 
 
@@ -74,6 +76,7 @@ def test_extract_strategy_market_data_request_uses_configured_default_window(tmp
     assert request.interval == "15m"
     assert request.from_utc == BACKTEST_MARKET_DATA_FROM_UTC
     assert request.to_utc == BACKTEST_MARKET_DATA_TO_UTC
+    assert request.user_specified_window is False
 
 
 def test_extract_strategy_market_data_request_rejects_inverted_window(tmp_path):
@@ -89,7 +92,7 @@ def test_extract_strategy_market_data_request_rejects_inverted_window(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="from_utc must be earlier than to_utc"):
+    with pytest.raises(BacktestWindowError, match="earlier than the end"):
         extract_strategy_market_data_request(
             str(yaml_path),
             overrides=BacktestTriggerRequest(
@@ -113,7 +116,7 @@ def test_extract_strategy_details_ignores_optional_input_phrases() -> None:
 def test_build_ohlcv_fetch_slots_uses_six_month_backtest_windows() -> None:
     slots = _build_ohlcv_fetch_slots(
         BACKTEST_MARKET_DATA_FROM_UTC,
-        BACKTEST_MARKET_DATA_TO_UTC,
+        "2026-03-31T23:59:59Z",
     )
 
     assert [(slot.index, slot.from_utc, slot.to_utc) for slot in slots] == [
@@ -125,37 +128,33 @@ def test_build_ohlcv_fetch_slots_uses_six_month_backtest_windows() -> None:
     ]
 
 
-def test_merge_ohlcv_slot_rows_sorts_and_deduplicates_timestamps() -> None:
-    rows = _merge_ohlcv_slot_rows(
+def test_dedup_and_sort_records_sorts_and_deduplicates_timestamps() -> None:
+    rows = _dedup_and_sort_records(
         [
-            [
-                {
-                    "timestamp": "2024-07-01T03:45:00Z",
-                    "open": 102.0,
-                    "high": 105.0,
-                    "low": 101.0,
-                    "close": 104.0,
-                    "volume": 2000.0,
-                }
-            ],
-            [
-                {
-                    "timestamp": "2024-01-01T03:45:00Z",
-                    "open": 100.0,
-                    "high": 103.0,
-                    "low": 99.0,
-                    "close": 101.0,
-                    "volume": 1200.0,
-                },
-                {
-                    "timestamp": "2024-07-01T03:45:00Z",
-                    "open": 102.0,
-                    "high": 106.0,
-                    "low": 101.0,
-                    "close": 105.0,
-                    "volume": 2100.0,
-                },
-            ],
+            {
+                "timestamp": "2024-07-01T03:45:00Z",
+                "open": 102.0,
+                "high": 105.0,
+                "low": 101.0,
+                "close": 104.0,
+                "volume": 2000.0,
+            },
+            {
+                "timestamp": "2024-01-01T03:45:00Z",
+                "open": 100.0,
+                "high": 103.0,
+                "low": 99.0,
+                "close": 101.0,
+                "volume": 1200.0,
+            },
+            {
+                "timestamp": "2024-07-01T03:45:00Z",
+                "open": 102.0,
+                "high": 106.0,
+                "low": 101.0,
+                "close": 105.0,
+                "volume": 2100.0,
+            },
         ]
     )
 
@@ -163,12 +162,18 @@ def test_merge_ohlcv_slot_rows_sorts_and_deduplicates_timestamps() -> None:
         "2024-01-01T03:45:00Z",
         "2024-07-01T03:45:00Z",
     ]
-    assert rows[1]["close"] == 105.0
+    assert rows[1]["close"] == 104.0
 
 
 @pytest.mark.asyncio
-async def test_fetch_ohlcv_records_continues_when_a_slot_fails(monkeypatch) -> None:
+async def test_fetch_ohlcv_records_fetches_multiple_chunks(monkeypatch) -> None:
     calls: list[dict] = []
+    fixed_chunks = [
+        ("2024-01-01T00:00:00Z", "2024-03-31T23:59:59Z"),
+        ("2024-04-01T00:00:00Z", "2024-06-30T23:59:59Z"),
+        ("2024-07-01T00:00:00Z", "2024-09-30T23:59:59Z"),
+        ("2024-10-01T00:00:00Z", "2024-12-31T23:59:59Z"),
+    ]
 
     class FakeResponse:
         def __init__(self, payload: dict):
@@ -192,8 +197,6 @@ async def test_fetch_ohlcv_records_continues_when_a_slot_fails(monkeypatch) -> N
 
         async def get(self, endpoint: str, params: dict):
             calls.append(dict(params))
-            if "2024-07-01T00:00:00Z" <= params["from"] <= "2024-12-31T23:59:59Z":
-                raise RuntimeError("temporary upstream failure")
             return FakeResponse(
                 {
                     "data": [
@@ -209,9 +212,15 @@ async def test_fetch_ohlcv_records_continues_when_a_slot_fails(monkeypatch) -> N
                 }
             )
 
+    monkeypatch.setattr(market_data, "use_grpc_transport", lambda _cfg: False)
+    monkeypatch.setattr(market_data, "get_cached_records", lambda *_a, **_k: None)
+    monkeypatch.setattr(market_data, "_build_date_chunks", lambda *_a, **_k: fixed_chunks)
+    monkeypatch.setattr(
+        "app.services.backtest.backtest_window.extend_fetch_start",
+        lambda from_utc, **_kwargs: from_utc,
+    )
     monkeypatch.setattr(market_data.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(market_data.settings, "historical_data_url", "http://data.test")
-    monkeypatch.setattr(market_data, "OHLCV_SLOT_FETCH_DELAY_SECONDS", 0)
 
     rows = await market_data.fetch_ohlcv_records(
         StrategyMarketDataRequest(
@@ -219,83 +228,29 @@ async def test_fetch_ohlcv_records_continues_when_a_slot_fails(monkeypatch) -> N
             raw_symbol="TCS.NS",
             symbol="TCS",
             interval="1d",
-            from_utc=BACKTEST_MARKET_DATA_FROM_UTC,
-            to_utc=BACKTEST_MARKET_DATA_TO_UTC,
+            from_utc="2024-01-01T00:00:00Z",
+            to_utc="2024-12-31T23:59:59Z",
         )
     )
 
-    assert len(calls) == 11
+    assert len(calls) == 4
     assert len(rows) == 4
     assert calls[0]["from"] == "2024-01-01T00:00:00Z"
-    assert calls[-1]["to"] == "2026-03-31T23:59:59Z"
-    assert all(not ("2024-07" <= row["timestamp"][:7] <= "2024-12") for row in rows)
+    assert calls[-1]["to"] == "2024-12-31T23:59:59Z"
 
 
-@pytest.mark.asyncio
-async def test_fetch_ohlcv_records_recovers_first_half_with_monthly_fallback(monkeypatch) -> None:
-    calls: list[dict] = []
+def test_build_monthly_fallback_slots_splits_half_year_window() -> None:
+    from app.services.backtest.market_data import OhlcvFetchSlot, _build_monthly_fallback_slots
 
-    class FakeResponse:
-        def __init__(self, payload: dict):
-            self._payload = payload
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return self._payload
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get(self, endpoint: str, params: dict):
-            calls.append(dict(params))
-            is_first_half_request = (
-                params["from"] == "2024-01-01T00:00:00Z"
-                and params["to"] == "2024-06-30T23:59:59Z"
-            )
-            if is_first_half_request:
-                raise RuntimeError("range too large")
-            return FakeResponse(
-                {
-                    "data": [
-                        {
-                            "timestamp": params["from"],
-                            "open": 100,
-                            "high": 105,
-                            "low": 99,
-                            "close": 104,
-                            "volume": 1500,
-                        }
-                    ]
-                }
-            )
-
-    monkeypatch.setattr(market_data.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(market_data.settings, "historical_data_url", "http://data.test")
-    monkeypatch.setattr(market_data, "OHLCV_SLOT_FETCH_DELAY_SECONDS", 0)
-
-    rows = await market_data.fetch_ohlcv_records(
-        StrategyMarketDataRequest(
-            yaml_path="",
-            raw_symbol="TCS.NS",
-            symbol="TCS",
-            interval="1d",
-            from_utc=BACKTEST_MARKET_DATA_FROM_UTC,
-            to_utc=BACKTEST_MARKET_DATA_TO_UTC,
-        )
+    slot = OhlcvFetchSlot(
+        index=1,
+        from_utc="2024-01-01T00:00:00Z",
+        to_utc="2024-06-30T23:59:59Z",
     )
+    fallback_slots = _build_monthly_fallback_slots(slot)
 
-    assert len(calls) == 11
-    assert len(rows) == 10
-    assert [row["timestamp"] for row in rows[:6]] == [
+    assert len(fallback_slots) == 6
+    assert [slot.from_utc for slot in fallback_slots] == [
         "2024-01-01T00:00:00Z",
         "2024-02-01T00:00:00Z",
         "2024-03-01T00:00:00Z",

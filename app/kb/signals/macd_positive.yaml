@@ -2,38 +2,70 @@ name: macd_positive
 category: momentum
 direction: bullish
 kind: regime
-roles: [entry_trigger, entry_filter, exit_trigger]
-formula: "MACD > 0"
-description: "MACD line is above zero — bullish regime, fires on every bar in the regime."
-
-works_best_on: [5m, 15m, 30m, 1h, 1d]
-weak_on: [1m]
+roles:
+- entry_trigger
+- entry_filter
+- exit_trigger
+- exit_filter
+formula: MACD > 0
+description: MACD line is above zero — bullish regime, fires on every bar in the regime.
+works_best_on:
+- 5m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bearish
-    role: entry_trigger
-  - sentiment: bearish
-    role: entry_filter
-
-pairs_well_with: [price_above_ema, ema_above]
-contradicts: [macd_negative, macd_bearish_cross]
-
+- sentiment: bearish
+  role: entry_trigger
+- sentiment: bearish
+  role: entry_filter
+pairs_well_with:
+- price_above_ema
+- ema_above
+contradicts:
+- macd_negative
+- macd_bearish_cross
 params_by_timeframe:
-  1m:   {window_fast: 12, window_slow: 26, window_sign: 9}
-  3m:   {window_fast: 12, window_slow: 26, window_sign: 9}
-  5m:   {window_fast: 12, window_slow: 26, window_sign: 9}
-  10m:  {window_fast: 12, window_slow: 26, window_sign: 9}
-  15m:  {window_fast: 12, window_slow: 26, window_sign: 9}
-  30m:  {window_fast: 12, window_slow: 26, window_sign: 9}
-  1h:   {window_fast: 12, window_slow: 26, window_sign: 9}
-  1d:   {window_fast: 12, window_slow: 26, window_sign: 9}
-
+  1m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  3m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  5m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  10m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  15m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  30m:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  1h:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
+  1d:
+    window_fast: 12
+    window_slow: 26
+    window_sign: 9
 experience_fit:
   beginner: 0.7
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 1.0
   momentum: 1.0
@@ -42,3 +74,13 @@ intent_fit:
   scalping: 0.6
   mean_reversion: 0.0
   confirmation: 0.9
+match_when:
+  phrases:
+  - macd\s+(?:line\s+)?(?:is\s+|>)?\s*positive
+  - macd\s+(?:histogram\s+)?(?:turns?\s+|is\s+)?positive
+  - macd\s+above\s+(?:zero|0)
+  - macd\s+histogram\s+(?:>|above)\s*0
+  acts_as: entry_filter
+  mirrors_to: macd_negative
+  forbids_keyword:
+  - macd\s+(?:line\s+)?cross(?:es)?\s+above\s+signal

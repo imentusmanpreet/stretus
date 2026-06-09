@@ -1,0 +1,72 @@
+name: roc_negative
+category: momentum
+direction: bearish
+kind: threshold
+roles:
+- entry_trigger
+- entry_filter
+formula: ROC({window}) < {threshold}
+description: Rate of change negative — price lower than n bars ago, bearish momentum.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+unsupported_on: []
+contraindicated_when:
+- sentiment: bullish
+pairs_well_with: []
+contradicts:
+- roc_positive
+params_by_timeframe:
+  1m:
+    window: 10
+    threshold: 0.0
+  3m:
+    window: 10
+    threshold: 0.0
+  5m:
+    window: 10
+    threshold: 0.0
+  10m:
+    window: 10
+    threshold: 0.0
+  15m:
+    window: 10
+    threshold: 0.0
+  30m:
+    window: 10
+    threshold: 0.0
+  1h:
+    window: 10
+    threshold: 0.0
+  1d:
+    window: 10
+    threshold: 0.0
+experience_fit:
+  beginner: 0.6
+  intermediate: 1.0
+  expert: 1.0
+intent_fit:
+  trend: 0.7
+  momentum: 1.0
+  breakout: 0.4
+  reversal: 0.2
+  scalping: 0.6
+  mean_reversion: 0.0
+  confirmation: 0.6
+match_when:
+  phrases:
+  - roc\s+(?:negative|below\s+0|<\s*0)
+  - rate\s+of\s+change\s+negative
+  acts_as: entry_trigger
+  mirrors_to: roc_positive
+  extract_params:
+    window:
+      from_group: 1
+      default: 14
+      kind: int

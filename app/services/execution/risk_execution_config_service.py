@@ -29,19 +29,44 @@ STRATEGY_SCOPE = "strategy"
 GLOBAL_SCOPE_ID = "global-default"
 VALID_SCOPES = {GLOBAL_SCOPE, SESSION_SCOPE, STRATEGY_SCOPE}
 
-DEFAULT_SEED_VALUES: dict[str, Any] = {
-    "max_trades": 2,
-    "risk_reward": 2.5,
-    "daily_loss_cap": 3.0,
-    "execution_mode": "Backtest",
-    "per_trade_risk": 2.0,
-    "trading_window": "9:15 - 15:30",
-    "position_sizing": "Risk based",
-    "risk_validation": "system risk guardials",
-    "stop_loss_pct": 2.0,
-    "take_profit_pct": 5.0,
-    "minimum_trade_value": 500.0,
+# Default display labels for the `trading_window` summary field, per market.
+# Used by build_risk_and_execution_from_builder() when the user didn't set an
+# explicit entry_window. Indian stocks reflect the NSE cash session; crypto is
+# labelled "24/7" because Binance has no session boundary. Unknown markets fall
+# through to whatever the seed / risk_cfg provided.
+_TRADING_WINDOW_BY_MARKET: dict[str, str] = {
+    "indian_stocks":  "09:15 - 15:30",
+    "indian_indices": "09:15 - 15:30",
+    "crypto":         "24/7",
 }
+
+
+def _default_trading_window_label(market: Optional[str]) -> Optional[str]:
+    return _TRADING_WINDOW_BY_MARKET.get((market or "").lower().strip())
+
+def _seed_from_default_tier() -> dict[str, Any]:
+    # Pull risk numbers from risk_tiers.yaml's `default` tier so the seed
+    # never drifts from the tier baseline. Non-risk fields (execution mode,
+    # trading window, etc.) stay hardcoded — they have no tier counterpart.
+    from app.kb import kb
+
+    tier = kb.get_risk_tier("default")
+    return {
+        "max_trades": 2,
+        "risk_reward": 2.5,
+        "daily_loss_cap": float(tier.daily_loss_cap_pct),
+        "execution_mode": "Backtest",
+        "per_trade_risk": float(tier.per_trade_risk_pct),
+        "trading_window": "9:15 - 15:30",
+        "position_sizing": "Risk based",
+        "risk_validation": "system risk guardials",
+        "stop_loss_pct": float(tier.base_sl_pct),
+        "take_profit_pct": float(tier.base_tp_pct),
+        "minimum_trade_value": float(tier.min_trade_value),
+    }
+
+
+DEFAULT_SEED_VALUES: dict[str, Any] = _seed_from_default_tier()
 
 _CONFIG_FIELDS = tuple(DEFAULT_SEED_VALUES.keys())
 _STRING_FIELDS = {
@@ -462,10 +487,24 @@ def build_risk_execution_values_from_builder(
         # Intraday circuit breaker often implies low trade count
         max_trades = max(max_trades, int(builder.max_consecutive_losses))
 
+    # Trading window display string. Priority:
+    #   1. Explicit builder.entry_window_start/_end — these are populated only
+    #      when the user (or the agent on the user's behalf) typed a custom
+    #      window; see builder.py where every user-supplied trading_window
+    #      writes BOTH the structured bounds AND the display string.
+    #   2. Asset-class default derived from builder.market. This overrides
+    #      whatever risk_cfg["trading_window"] holds, because the seed and the
+    #      DB-persisted snapshot both default to the NSE label "9:15 - 15:30"
+    #      regardless of asset class — without this override, a crypto strategy
+    #      would inherit that stale label.
+    #   3. risk_cfg / base seed only when the market is unknown.
     ew_start = getattr(builder, "entry_window_start", None)
     ew_end = getattr(builder, "entry_window_end", None)
+    market_label = _default_trading_window_label(getattr(builder, "market", None))
     if ew_start and ew_end:
         trading_window = f"{ew_start} - {ew_end}"
+    elif market_label is not None:
+        trading_window = market_label
     else:
         trading_window = str(risk_cfg.get("trading_window", base.trading_window))
 
@@ -515,11 +554,26 @@ def sync_builder_risk_from_state(builder: Any) -> None:
     elif cfg.get("take_profit_pct") is not None:
         builder.take_profit = float(cfg["take_profit_pct"])
 
+    # Preserve any already-recorded source label. NEVER promote a builder
+    # attribute to source="user" just because it has a non-None value — that
+    # used to mislabel seed defaults (DEFAULT_SEED_VALUES) as user-given and
+    # silently violated the "RMS must be user-given" rule. Unlabeled values
+    # are tagged "system_default" so downstream layers (planner, validator,
+    # chat-layer gate) can detect them and either prompt the user or refuse
+    # to assemble until the user confirms.
     sources = dict(cfg.get("rms_sources") or {})
-    if getattr(builder, "stop_loss", None) is not None:
-        sources["stop_loss_pct"] = sources.get("stop_loss_pct") or "user"
-    if getattr(builder, "take_profit", None) is not None:
-        sources["take_profit_pct"] = sources.get("take_profit_pct") or "user"
+    # Every RMS field we know about — if a value is present but no source was
+    # ever set, tag it as system_default. This catches risk_reward, daily_loss_cap,
+    # max_trades, per_trade_risk, etc. that get seeded from DEFAULT_SEED_VALUES.
+    _RMS_FIELDS_TO_TAG = (
+        "stop_loss_pct", "take_profit_pct", "risk_reward",
+        "daily_loss_cap", "max_trades", "per_trade_risk",
+        "trading_window", "position_sizing", "minimum_trade_value",
+        "execution_mode", "risk_validation",
+    )
+    for fld in _RMS_FIELDS_TO_TAG:
+        if cfg.get(fld) is not None:
+            sources.setdefault(fld, "system_default")
     if sources:
         cfg["rms_sources"] = sources
 

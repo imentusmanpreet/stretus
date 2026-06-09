@@ -2,33 +2,57 @@ name: atr_low_volatility
 category: volatility
 direction: neutral
 kind: threshold
-roles: [entry_filter]
-description: "ATR below its own moving average — low-volatility regime, tight stops viable."
-
-works_best_on: [5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+formula: ATR({window}) < AVG(ATR({window}), 50)
+roles:
+- entry_filter
+description: ATR below its own moving average — low-volatility regime, tight stops viable.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when: []
-
-pairs_well_with: [bb_squeeze, ema_pullback_bullish, ema_pullback_bearish]
-contradicts: [atr_high_volatility]
-
+pairs_well_with:
+- bb_squeeze
+- ema_pullback_bullish
+- ema_pullback_bearish
+contradicts:
+- atr_high_volatility
 params_by_timeframe:
-  1m:   {window: 14, multiplier: 0.7}
-  3m:   {window: 14, multiplier: 0.7}
-  5m:   {window: 14, multiplier: 0.7}
-  10m:  {window: 14, multiplier: 0.7}
-  15m:  {window: 14, multiplier: 0.7}
-  30m:  {window: 14, multiplier: 0.7}
-  1h:   {window: 14, multiplier: 0.7}
-  1d:   {window: 14, multiplier: 0.7}
-
+  1m:
+    window: 14
+    multiplier: 0.7
+  3m:
+    window: 14
+    multiplier: 0.7
+  5m:
+    window: 14
+    multiplier: 0.7
+  10m:
+    window: 14
+    multiplier: 0.7
+  15m:
+    window: 14
+    multiplier: 0.7
+  30m:
+    window: 14
+    multiplier: 0.7
+  1h:
+    window: 14
+    multiplier: 0.7
+  1d:
+    window: 14
+    multiplier: 0.7
 experience_fit:
   beginner: 0.7
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 1.0
   momentum: 0.4
@@ -37,3 +61,11 @@ intent_fit:
   scalping: 0.6
   mean_reversion: 0.8
   confirmation: 0.7
+match_when:
+  phrases:
+  - low\s+(?:realised\s+|realized\s+)?volatility
+  - atr\s+(?:is\s+)?(?:contracting|compressed|tight)
+  - quiet\s+market
+  - low[\s\-]*atr
+  acts_as: entry_filter
+  mirrors_to: atr_high_volatility

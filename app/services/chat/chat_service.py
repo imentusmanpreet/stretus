@@ -4,6 +4,7 @@ ChatService — the main orchestration layer for the strategy chat flow.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -28,13 +29,16 @@ from app.services.ai.parser import (
     detect_supported_stocks_question,
     detect_user_confirmation,
 )
-from app.services.ai.system_prompt import SYSTEM_INSTRUCTION
+from app.services.ai.system_prompt import SYSTEM_INSTRUCTION, build_system_instruction
 from app.services.backtest import (
+    INTRABAR_EXECUTION_INTERVAL,
+    build_main_fetch_request,
     extract_strategy_market_data_request,
     fetch_auxiliary_ohlcv,
     fetch_ohlcv_records,
     insert_chat_backtest_row,
     insert_failed_chat_backtest,
+    resolve_intrabar_execution,
     run_quant_backtest_sync,
     summarize_backtest_for_db,
 )
@@ -46,6 +50,7 @@ from app.schemas.backtest import BacktestTriggerRequest
 from app.services.chat.strategy_flow import (
     build_assemble_strategy_reply,
     build_backtest_error_reply,
+    build_backtest_earliest_date_reply,
     build_backtest_ready_reminder,
     build_backtest_result_reply,
     build_collect_user_input_reply,
@@ -229,16 +234,138 @@ def _compact_number(value: Any) -> str:
     return f"{number:g}"
 
 
+def _format_signal_plan_lines(plan: dict[str, Any] | None) -> str:
+    """Render the trader-facing summary of a signal_plan dict."""
+    plan = plan or {}
+    entry_items = [
+        str(s.get("name"))
+        for s in plan.get("entry") or []
+        if isinstance(s, dict) and s.get("name")
+    ]
+    exit_items = [
+        str(s.get("name"))
+        for s in plan.get("exit") or []
+        if isinstance(s, dict) and s.get("name")
+    ]
+    entry_line = ", ".join(entry_items) if entry_items else "(none)"
+    exit_line = ", ".join(exit_items) if exit_items else "(none)"
+    return f"- Entry: {entry_line}\n- Exit: {exit_line}"
+
+
+def _format_candidates(candidates: tuple[str, ...] | list[str] | None) -> str:
+    """Pretty-print a short list of suggested signal names."""
+    items = list(candidates or [])
+    if not items:
+        return ""
+    shown = items[:6]
+    return "Suggestions: " + ", ".join(shown) + (" …" if len(items) > 6 else "")
+
+
+def _llm_hallucinated_signal_names(
+    changes: list[dict[str, Any]], user_content: str
+) -> bool:
+    """
+    True when the LLM filled `changes` with `signal_name` values that the
+    trader never typed — e.g. the user said "change signals" and the LLM
+    guessed "macd" / "rsi". We detect this by checking whether the family
+    prefix of every guessed signal_name (e.g. "macd_positive" → "macd")
+    appears in the user message. If none do, the LLM hallucinated and we
+    should surface the suggestion list instead of running the resolver.
+    """
+    if not changes:
+        return False
+    haystack = (user_content or "").lower()
+    for change in changes:
+        signal_name = str(change.get("signal_name") or "").strip().lower()
+        if not signal_name:
+            continue
+        # Match either the full name or its family prefix anywhere in the
+        # user's message — handles "macd", "macd_positive", "rsi_oversold".
+        family = signal_name.split("_", 1)[0]
+        if signal_name in haystack or (family and family in haystack):
+            return False
+    return True
+
+
+def _parse_rms_agent_value(raw: Any) -> tuple[float | None, str]:
+    """Parse RMS tool values: plain numbers or ``{"value": N, "source": "user"}``."""
+    if raw is None:
+        return None, "user"
+    if isinstance(raw, dict):
+        try:
+            val = float(raw["value"])
+        except (KeyError, TypeError, ValueError):
+            return None, str(raw.get("source") or "user")
+        return val, str(raw.get("source") or "user")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None, "user"
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return _parse_rms_agent_value(parsed)
+        except json.JSONDecodeError:
+            pass
+        try:
+            return float(text.rstrip("%").strip()), "user"
+        except ValueError:
+            return None, "user"
+    try:
+        return float(raw), "user"
+    except (TypeError, ValueError):
+        return None, "user"
+
+
 def _coerce_agent_float_param(params: dict[str, Any], key: str) -> float | None:
     if params.get(key) is None:
         return None
-    value = float(params[key])
+    value, _ = _parse_rms_agent_value(params[key])
+    if value is None:
+        value = float(params[key])
     if key == "daily_loss_cap":
         if value < 0:
             raise ValueError("daily_loss_cap cannot be negative.")
     elif value <= 0:
         raise ValueError(f"{key} must be greater than 0.")
     return value
+
+
+def _apply_agent_risk_param_overrides(
+    builder: "StrategyBuilder",
+    params: dict[str, Any],
+) -> bool:
+    """Apply agent ``stop_loss`` / ``take_profit`` objects onto builder + risk config."""
+    attr_by_rms_key = {
+        "stop_loss_pct": "stop_loss",
+        "take_profit_pct": "take_profit",
+    }
+    alias_to_rms_key = (
+        ("stop_loss", "stop_loss_pct"),
+        ("take_profit", "take_profit_pct"),
+        ("stop_loss_pct", "stop_loss_pct"),
+        ("take_profit_pct", "take_profit_pct"),
+    )
+    existing_rms = dict(builder.risk_execution_config or {})
+    existing_sources = dict(existing_rms.get("rms_sources", {}))
+    changed = False
+    for agent_key, rms_key in alias_to_rms_key:
+        if agent_key not in params:
+            continue
+        val, source = _parse_rms_agent_value(params[agent_key])
+        if val is None or val <= 0:
+            continue
+        existing_rms[rms_key] = float(val)
+        existing_sources[rms_key] = source or "user"
+        attr = attr_by_rms_key.get(rms_key)
+        if attr:
+            setattr(builder, attr, float(val))
+            builder.mark_phase10_user_override(attr)
+        changed = True
+    if changed:
+        existing_rms["rms_sources"] = existing_sources
+        builder.risk_execution_config = existing_rms
+    return changed
 
 
 def _coerce_agent_int_param(params: dict[str, Any], key: str) -> int | None:
@@ -261,11 +388,31 @@ def _merge_agent_risk_config(
         merged.update({key: value for key, value in existing.items() if value is not None})
 
     changed: list[str] = []
-    for key in ("stop_loss_pct", "take_profit_pct", "daily_loss_cap", "per_trade_risk"):
-        value = _coerce_agent_float_param(params, key)
+    rms_aliases = (
+        ("stop_loss_pct", "stop_loss_pct"),
+        ("take_profit_pct", "take_profit_pct"),
+        ("stop_loss", "stop_loss_pct"),
+        ("take_profit", "take_profit_pct"),
+        ("daily_loss_cap", "daily_loss_cap"),
+        ("per_trade_risk", "per_trade_risk"),
+    )
+    for agent_key, cfg_key in rms_aliases:
+        if params.get(agent_key) is None:
+            continue
+        if agent_key in ("daily_loss_cap", "per_trade_risk"):
+            value = _coerce_agent_float_param(params, agent_key)
+            source = "user"
+        else:
+            value, source = _parse_rms_agent_value(params[agent_key])
+            if value is None or value <= 0:
+                continue
         if value is not None:
-            merged[key] = value
-            changed.append(key)
+            merged[cfg_key] = value
+            sources = dict(merged.get("rms_sources") or {})
+            sources[cfg_key] = source
+            merged["rms_sources"] = sources
+            if cfg_key not in changed:
+                changed.append(cfg_key)
 
     max_trades = _coerce_agent_int_param(params, "max_trades")
     if max_trades is not None:
@@ -390,17 +537,37 @@ def _prefer_agent_question_text(route: dict | None, fallback_text: str) -> str:
     return _agent_question_text(route) or fallback_text
 
 
-async def create_chat_session(db: AsyncSession, title: Optional[str] = None) -> Chat:
-    chat = Chat(id=uuid.uuid4(), title=title or "New Strategy")
+def _enabled_asset_classes(capabilities: Optional[dict]) -> list[str]:
+    """Extract asset_class_id strings of enabled capabilities. Empty list when
+    capabilities is None / missing / contains only disabled entries."""
+    return [
+        item.get("asset_class_id")
+        for item in (capabilities or {}).get("asset_classes", [])
+        if item.get("enabled") and item.get("asset_class_id")
+    ]
+
+
+async def create_chat_session(
+    db: AsyncSession,
+    title: Optional[str] = None,
+    capabilities: Optional[dict] = None,
+) -> Chat:
+    chat = Chat(
+        id=uuid.uuid4(),
+        title=title or "New Strategy",
+        capabilities=capabilities,
+    )
     db.add(chat)
     await db.flush()
+
+    enabled_asset_classes = _enabled_asset_classes(capabilities)
 
     db.add(
         ChatMessage(
             id=uuid.uuid4(),
             session_id=chat.id,
             role=ChatRole.system,
-            content=SYSTEM_INSTRUCTION,
+            content=build_system_instruction(enabled_asset_classes),
             model="system",
             status=MessageStatus.completed,
         )
@@ -412,7 +579,7 @@ async def create_chat_session(db: AsyncSession, title: Optional[str] = None) -> 
             id=uuid.uuid4(),
             session_id=chat.id,
             role=ChatRole.assistant,
-            content=build_welcome_message(),
+            content=build_welcome_message(enabled_asset_classes),
             model=FLOW_MODEL_NAME,
             strategy_draft=welcome_builder.to_draft_json(
                 mode_override="collect_user_input",
@@ -570,6 +737,50 @@ def _is_placeholder_title(title: Optional[str]) -> bool:
 
 def _is_greeting_message(message: str) -> bool:
     return bool(_GREETING_ONLY_RE.match(message or ""))
+
+
+def _resolve_strategy_source_prompt(
+    builder: "StrategyBuilder",
+    user_content: str,
+    all_messages: list[ChatMessage] | None = None,
+) -> str:
+    """Return the best available representation of the user's literal strategy
+    description for downstream extractors/validators.
+
+    Priority order:
+        1. builder.original_user_prompt — set on first substantive turn and
+           persisted across turns via to_draft_json/merge_preview.
+        2. First substantive user message in chat history (≥ 6 words, not a
+           greeting, not a confirmation reply). Defends against the case
+           where original_user_prompt was lost / never set.
+        3. The current user_content.
+        4. builder.goal — the (lossy) agent-summarized version.
+
+    Always returns a string (possibly empty); never None.
+    """
+    raw = (getattr(builder, "original_user_prompt", None) or "").strip()
+    if raw and len(raw.split()) >= 6:
+        return raw
+
+    if all_messages:
+        for msg in all_messages:
+            if getattr(msg, "role", None) != ChatRole.user:
+                continue
+            content = (msg.content or "").strip()
+            if not content:
+                continue
+            if _is_greeting_message(content):
+                continue
+            if detect_user_confirmation(content):
+                continue
+            if len(content.split()) >= 6:
+                return content
+
+    current = (user_content or "").strip()
+    if current and len(current.split()) >= 6 and not detect_user_confirmation(current):
+        return current
+
+    return (getattr(builder, "goal", None) or current or "").strip()
 
 
 def _derive_max_trades_from_builder(builder: "StrategyBuilder") -> int:
@@ -1984,6 +2195,9 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 recent_messages=all_messages,
                 latest_strategy_context=latest_strategy_context,
                 latest_backtest_result=latest_backtest_result,
+                asset_classes=_enabled_asset_classes(
+                    chat_obj.capabilities if chat_obj else None
+                ),
             )
             route = agent_decision.to_legacy_route()
             route_intent = route.get("intent", "collect_input")
@@ -2152,6 +2366,271 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 await db.commit()
                 return
 
+            if route_intent == "modify_signals":
+                from app.services.strategy.signal_modifier import (
+                    apply_signal_request,
+                )
+
+                params = dict(route.get("agent_tool_parameters") or {})
+
+                # The tool schema requires `changes: [...]`. Older shapes
+                # (top-level slot/signal_name) are folded into a single-item
+                # list so a stray legacy call still works.
+                raw_changes = params.get("changes")
+                if isinstance(raw_changes, list) and raw_changes:
+                    changes = [c for c in raw_changes if isinstance(c, dict)]
+                else:
+                    legacy_slot = params.get("slot")
+                    legacy_signal = params.get("signal_name")
+                    if legacy_slot or legacy_signal:
+                        changes = [{
+                            "slot": legacy_slot,
+                            "signal_name": legacy_signal,
+                            "replace_name": params.get("replace_name"),
+                            "action": params.get("action"),
+                        }]
+                    else:
+                        changes = []
+
+                logger.info(
+                    "🔧 chat_flow|event=modify_signal_request|session_id=%s"
+                    "|change_count=%d",
+                    session_id,
+                    len(changes),
+                )
+
+                # Always force plan_signals so that the next "yes" re-assembles
+                # the strategy with the new signals and shows the preview card,
+                # instead of jumping directly to backtest with the old yaml.
+                assistant_state = "plan_signals"
+                assistant_text: str
+                per_change_outcomes: list[dict[str, Any]] = []
+                applied_messages: list[str] = []
+                pending_prompts: list[str] = []
+                error_messages: list[str] = []
+
+                # ── SDL-first modify ──────────────────────────────────────────
+                # If this strategy was built via the SDL flow, edit the SDL
+                # ticket directly (holistic + accurate) rather than the legacy
+                # per-signal modifier. The user's raw message is the change
+                # instruction ("change RSI to 20", "use EMA instead of SMA").
+                # Falls back to legacy when there is no SDL on the builder or the
+                # SDL modify can't run — so legacy-built strategies are unaffected.
+                _sdl_modified = False
+                if getattr(builder, "_sdl", None) is not None:
+                    try:
+                        from app.planner.sdl_flow import try_sdl_modify
+                        _mod = await try_sdl_modify(
+                            user_content, builder, session_id=session_id,
+                        )
+                    except Exception as _exc:
+                        logger.warning(
+                            "⚠️ chat_flow|event=sdl_modify_error|session_id=%s|err=%s",
+                            session_id, _exc,
+                        )
+                        _mod = None
+                    if _mod is not None and _mod.used_sdl:
+                        _sdl_modified = True
+                        builder.signal_plan = _mod.signal_plan or builder.signal_plan
+                        if _mod.validation_ok:
+                            assistant_text = (
+                                (_mod.readback_text or "").rstrip()
+                                + "\n\nConfirm to assemble the strategy, or request "
+                                "another change."
+                            )
+                        else:
+                            assistant_text = (
+                                (_mod.readback_text or "").rstrip()
+                                or "I updated the strategy, but it needs a fix "
+                                "before backtest."
+                            )
+                        per_change_outcomes.append({
+                            "status": "sdl_modified",
+                            "match_pct": _mod.match_pct,
+                            "valid": _mod.validation_ok,
+                        })
+                        logger.info(
+                            "✅ chat_flow|event=sdl_modify_used|session_id=%s"
+                            "|match=%.0f%%|valid=%s",
+                            session_id, _mod.match_pct, _mod.validation_ok,
+                        )
+
+                if _sdl_modified:
+                    pass  # SDL path already set assistant_text + signal_plan
+                elif not builder.signal_plan:
+                    assistant_text = (
+                        "There is no signal plan to modify yet. Please ask me "
+                        "to plan signals first, then you can swap individual "
+                        "entry / exit signals."
+                    )
+                    per_change_outcomes.append({"status": "no_plan"})
+                elif not changes or _llm_hallucinated_signal_names(changes, user_content):
+                    from app.services.strategy.signal_suggestions import (
+                        format_signal_suggestions,
+                    )
+                    assistant_text = format_signal_suggestions(session_id, n=5)
+                    per_change_outcomes.append({"status": "bad_params"})
+                else:
+                    for change in changes:
+                        slot = str(change.get("slot") or "").strip().lower()
+                        signal_name = str(change.get("signal_name") or "").strip()
+                        replace_name = (
+                            str(change.get("replace_name") or "").strip() or None
+                        )
+                        action = str(change.get("action") or "").strip().lower()
+
+                        outcome: dict[str, Any] = {
+                            "slot": slot,
+                            "signal_name": signal_name,
+                            "action": action or "replace",
+                            "replace_name": replace_name,
+                        }
+
+                        logger.info(
+                            "🔧 chat_flow|modify_signal_item|session_id=%s"
+                            "|slot=%s|signal=%s|action=%s|replace=%s",
+                            session_id,
+                            slot,
+                            signal_name,
+                            action or "(default)",
+                            replace_name or "-",
+                        )
+
+                        if slot not in ("entry", "exit") or not signal_name:
+                            error_messages.append(
+                                "Skipped a change with missing slot or signal "
+                                f"name (slot={slot or '?'}, signal={signal_name or '?'})."
+                            )
+                            outcome["status"] = "bad_params"
+                            per_change_outcomes.append(outcome)
+                            continue
+
+                        if action == "remove":
+                            try:
+                                builder.remove_signal(slot, signal_name)
+                                applied_messages.append(
+                                    f"Removed {slot} signal '{signal_name}'."
+                                )
+                                outcome["status"] = "removed"
+                            except Exception as exc:
+                                error_messages.append(
+                                    f"Could not remove '{signal_name}' from "
+                                    f"{slot}: {exc}"
+                                )
+                                outcome["status"] = "error"
+                                outcome["error"] = str(exc)
+                            per_change_outcomes.append(outcome)
+                            continue
+
+                        # Default to 'replace' when the LLM does not specify —
+                        # matches the most common phrasing ("change entry
+                        # signal to X" / "use Y for exit"), which wipes the
+                        # slot and sets the new signal. Only 'add' preserves
+                        # prior entries; anything else falls back to 'replace'.
+                        apply_action = action if action in ("replace", "add") else "replace"
+                        try:
+                            result = apply_signal_request(
+                                builder,
+                                slot,  # type: ignore[arg-type]
+                                signal_name,
+                                replace_name=replace_name,
+                                action=apply_action,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "modify_signal|unexpected_error|session_id=%s|err=%s",
+                                session_id,
+                                str(exc)[:160],
+                            )
+                            error_messages.append(
+                                f"Could not apply '{signal_name}' to {slot}: {exc}"
+                            )
+                            outcome["status"] = "error"
+                            outcome["error"] = str(exc)
+                            per_change_outcomes.append(outcome)
+                            continue
+
+                        outcome["status"] = result.status
+                        if result.candidates:
+                            outcome["candidates"] = list(result.candidates)
+                        if result.resolved_name:
+                            outcome["resolved_name"] = result.resolved_name
+
+                        if result.status == "applied":
+                            applied_messages.append(result.message)
+                        elif result.status == "needs_choice":
+                            pending_prompts.append(result.message)
+                        elif result.status == "wrong_slot":
+                            pending_prompts.append(
+                                f"{result.message}\n"
+                                + _format_candidates(result.candidates)
+                            )
+                        else:  # not_found
+                            pending_prompts.append(result.message)
+
+                        per_change_outcomes.append(outcome)
+
+                    # Compose a single trader-facing reply that combines every
+                    # outcome — applied changes show first, then any pending
+                    # disambiguation prompts, then per-item errors.
+                    if applied_messages and not pending_prompts and not error_messages:
+                        assistant_text = (
+                            " ".join(applied_messages)
+                            + " Updated plan:\n"
+                            + _format_signal_plan_lines(builder.signal_plan)
+                            + "\n\nConfirm to assemble the strategy, or "
+                            "request another change."
+                        )
+                    elif applied_messages:
+                        sections: list[str] = [" ".join(applied_messages)]
+                        sections.append(
+                            "Updated plan so far:\n"
+                            + _format_signal_plan_lines(builder.signal_plan)
+                        )
+                        if pending_prompts:
+                            sections.extend(pending_prompts)
+                        if error_messages:
+                            sections.append("\n".join(error_messages))
+                        assistant_text = "\n\n".join(sections)
+                    elif pending_prompts or error_messages:
+                        sections = list(pending_prompts)
+                        if error_messages:
+                            sections.append("\n".join(error_messages))
+                        assistant_text = "\n\n".join(sections)
+                    else:
+                        assistant_text = "I could not apply any signal changes."
+
+                draft = builder.to_draft_json(
+                    mode_override=assistant_state,
+                    processing_status=_draft_processing_status(builder, assistant_state),
+                )
+                draft["agent_decision"] = {
+                    "tool": route.get("agent_tool"),
+                    "parameters": params,
+                    "source": route.get("agent_source"),
+                }
+                draft["modify_signal_outcomes"] = per_change_outcomes
+
+                if user_msg:
+                    user_msg.strategy_draft = draft
+                    user_msg.status = MessageStatus.completed
+
+                assistant_msg = ChatMessage(
+                    id=uuid.uuid4(),
+                    session_id=session_uuid,
+                    role=ChatRole.assistant,
+                    content=assistant_text,
+                    model=FLOW_MODEL_NAME,
+                    strategy_draft=draft,
+                    strategy_json=None,
+                    status=MessageStatus.completed,
+                    is_final=True,
+                    parent_message_id=user_msg_uuid,
+                )
+                db.add(assistant_msg)
+                await db.commit()
+                return
+
             if route_intent == "new_strategy":
                 logger.info(
                     "🆕 chat_flow|event=new_strategy_requested|session_id=%s|tool=%s",
@@ -2290,6 +2769,11 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             market_data_request.from_utc,
                             market_data_request.to_utc,
                         )
+                        # Release the DB connection for the duration of this network
+                        # fetch (~20s). user_msg will be detached on close — re-fetch
+                        # it below in the now-fresh session before mutating.
+                        await db.commit()
+                        await db.close()
                         ohlcv_data = await fetch_ohlcv_records(market_data_request)
                         assistant_text = _build_market_data_reply(
                             symbol=resolved_symbol,
@@ -2321,6 +2805,10 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         draft["processing_status"] = "failed"
                         draft["market_data_error"] = str(market_exc)
 
+                # Session was released around the network fetch above; user_msg is
+                # now detached. Re-fetch it so the mutations below get persisted.
+                if user_msg is not None and user_msg_uuid is not None:
+                    user_msg = await db.get(ChatMessage, user_msg_uuid)
                 if user_msg:
                     user_msg.strategy_draft = draft
                     user_msg.status = MessageStatus.completed
@@ -2479,7 +2967,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         stop_loss_spec=parsed_builder.stop_loss_spec,
                         trailing_stop_spec=parsed_builder.trailing_stop_spec,
                         risk_execution_config=parsed_builder.risk_execution_config,
-                        source_prompt=user_content[:200],
+                        source_prompt=user_content[:1000],
                     )
                     parsed_builder.semantic_intent = _canonical.dict()
                     # Propagate structural SL to parsed_builder so the pipeline
@@ -2541,6 +3029,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
             recognized_fields = set(route.get("recognized_fields") or [])
             if pending_stock_choice:
                 builder.symbol = pending_stock_choice
+                builder.sync_market_from_symbol()
                 builder.set_symbol_validation(None)
                 builder.clear_validation_state()
                 relevant_message = True
@@ -2674,12 +3163,14 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         if exchange_hint and not resolved_symbol.upper().endswith((".NS", ".BO")):
                             resolved_symbol = f"{resolved_symbol}.{exchange_hint}"
                         builder.symbol = resolved_symbol
+                        builder.sync_market_from_symbol()
                         builder.set_symbol_validation(None)
                         logger.info(
-                            "✅ chat_flow|event=stock_resolved|session_id=%s|query=%r|symbol=%s",
+                            "✅ chat_flow|event=stock_resolved|session_id=%s|query=%r|symbol=%s|asset_class=%s",
                             session_id,
                             stock_query,
                             resolved_symbol,
+                            builder.asset_class,
                         )
                     else:
                         builder.symbol = None
@@ -2771,6 +3262,27 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     builder.goal = re.sub(r"\s+", " ", str(goal)).strip()
                     relevant_message = True
 
+                # Capture the user's raw, full strategy description on the
+                # first substantive turn. This survives subsequent `goal`
+                # summaries from the agent router so semantic extraction can
+                # always go back to the user's literal phrasing (e.g. "buy
+                # when price crosses above 20 SMA, 3:7 reward risk ratio").
+                # We never overwrite once set — the original prompt is
+                # immutable. (Persisted via to_draft_json/merge_preview.)
+                if getattr(builder, "original_user_prompt", None) is None:
+                    raw = re.sub(r"\s+", " ", user_content or "").strip()
+                    if (
+                        not _is_greeting_message(user_content)
+                        and len(raw.split()) >= 6
+                        and not detect_user_confirmation(user_content)
+                    ):
+                        builder.original_user_prompt = raw
+                        logger.info(
+                            "📝 chat_flow|event=original_user_prompt_captured"
+                            "|session_id=%s|len=%d|preview=%r",
+                            session_id, len(raw), raw[:80],
+                        )
+
                 # Propagate strategy_preset — three sources in priority order:
                 #   1. Agent explicitly named a preset in tool params (highest)
                 #   2. KB keyword detection on the user message (parsed_builder)
@@ -2811,11 +3323,10 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     if changed:
                         existing_rms["rms_sources"] = existing_sources
                         builder.risk_execution_config = existing_rms
-                        # Mirror onto builder direct attributes
-                        if "stop_loss_pct" in parsed_rms and builder.stop_loss is None:
-                            builder.stop_loss = parsed_rms["stop_loss_pct"]
-                        if "take_profit_pct" in parsed_rms and builder.take_profit is None:
-                            builder.take_profit = parsed_rms["take_profit_pct"]
+                        # stop_loss / take_profit are read-through properties over
+                        # risk_execution_config — writing the dict above is the
+                        # single source of truth, no mirror needed. daily_loss_cap
+                        # is still a plain attribute.
                         if "daily_loss_cap" in parsed_rms and builder.daily_loss_cap is None:
                             builder.daily_loss_cap = parsed_rms["daily_loss_cap"]
                         relevant_message = True
@@ -2862,9 +3373,20 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     ("max_capital_allocation_pct", _p2_float("max_capital_allocation_pct") if _p2_agent.get("max_capital_allocation_pct") is not None else parsed_builder.max_capital_allocation_pct),
                 ]
                 for _field, _val in _p2_updates:
-                    if _val is not None and getattr(builder, _field, None) is None:
+                    # Always honour a value that came from the current turn
+                    # (either the agent's tool call or the regex/semantic
+                    # extractor). Previously this only wrote when the builder
+                    # field was None, which silently dropped user updates
+                    # after tier defaults had filled the slot. Tier-derived
+                    # fields are marked so apply_tier_execution_defaults()
+                    # won't overwrite them later when experience changes.
+                    if _val is not None:
                         setattr(builder, _field, _val)
+                        builder.mark_phase10_user_override(_field)
                         relevant_message = True
+
+                if _apply_agent_risk_param_overrides(builder, _p2_agent):
+                    relevant_message = True
 
                 # Propagate structural SL + trailing stop specs from parsed_builder.
                 # User-specified specs from the current message override stored ones.
@@ -3048,7 +3570,17 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
             ref_backtest_id = None
             persisted_backtest_uuid: uuid.UUID | None = None
 
-            if user_state in {"assemble_strategy", "backtest_confirmation"} and user_confirmed:
+            if route_intent == "run_backtest" and user_state in {
+                "assemble_strategy",
+                "backtest_confirmation",
+                "backtest_complete",
+            }:
+                from app.services.backtest.backtest_window import (
+                    BacktestWindowError,
+                    earliest_backtest_from_display,
+                    resolve_backtest_window,
+                )
+
                 _sid = (latest_strategy_context or {}).get("strategy_id")
                 logger.info(
                     "📈 chat_flow|event=backtest_user_trigger|session_id=%s|user_state=%s|strategy_id=%s",
@@ -3061,28 +3593,52 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     if not yaml_path:
                         raise ValueError("The assembled strategy YAML could not be found for this session.")
 
-                    # Build run request with objective and risk controls from strategy builder
                     _objective         = str(getattr(builder, "objective", None) or "positional").lower()
                     _daily_loss_cap    = float(getattr(builder, "daily_loss_cap", None) or 0.0)
                     _max_trades_per_day = _derive_max_trades_from_builder(builder)
 
+                    _bt_from = route.get("backtest_from_utc") or None
+                    _bt_to = route.get("backtest_to_utc") or None
+                    _from_utc, _to_utc = resolve_backtest_window(_bt_from, _bt_to, objective=_objective)
+
                     run_request = BacktestTriggerRequest(
                         strategy_id=str((latest_strategy_context or {}).get("strategy_id") or uuid.uuid4()),
+                        from_utc=_bt_from,
+                        to_utc=_bt_to,
                         objective=_objective,
                         daily_loss_cap_pct=_daily_loss_cap,
                         max_trades_per_day=_max_trades_per_day,
                     )
                     logger.info(
                         "⚙️ chat_flow|event=backtest_run_config|session_id=%s"
-                        "|objective=%s|daily_loss_cap=%.1f%%|max_trades=%d|yaml=%s",
+                        "|objective=%s|daily_loss_cap=%.1f%%|max_trades=%d|from=%s|to=%s|yaml=%s",
                         session_id,
                         _objective,
                         _daily_loss_cap,
                         _max_trades_per_day,
+                        _from_utc,
+                        _to_utc,
                         yaml_path,
                     )
                     backtest_started_at = datetime.now(timezone.utc)
                     market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
+                    run_request = run_request.model_copy(
+                        update={
+                            "from_utc": market_data_request.from_utc,
+                            "to_utc": market_data_request.to_utc,
+                        }
+                    )
+                    # Phase 11 — 1-minute execution. AUTO-on for any non-1m
+                    # strategy. The main series fed to the engine is fetched at
+                    # 1m below; signal enrichment further down stays on the
+                    # strategy-timeframe series so its stats remain calibrated to
+                    # the strategy's own bars. The resolved decision is written
+                    # back onto run_request so the engine run_config gets a
+                    # definite bool (never the AUTO sentinel).
+                    intrabar_execution = resolve_intrabar_execution(
+                        run_request, signal_interval=market_data_request.interval,
+                    )
+                    run_request = run_request.model_copy(update={"intrabar_execution": intrabar_execution})
                     logger.info(
                         "📡 chat_flow|event=market_data_fetching|session_id=%s"
                         "|symbol=%s|interval=%s|from=%s|to=%s",
@@ -3092,6 +3648,14 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         market_data_request.from_utc,
                         market_data_request.to_utc,
                     )
+                    # Release the DB connection for the duration of the long network
+                    # calls below (fetch_ohlcv_records, fetch_auxiliary_ohlcv,
+                    # run_quant_backtest_sync — up to ~3 minutes for big crypto runs).
+                    # SQLAlchemy auto-reacquires when the next db op runs at
+                    # insert_chat_backtest_row(...) below. Prevents pool starvation
+                    # under concurrent load.
+                    await db.commit()
+                    await db.close()
                     ohlcv_data = await fetch_ohlcv_records(market_data_request)
                     logger.info(
                         "📡 chat_flow|event=market_data_ready|session_id=%s"
@@ -3126,7 +3690,33 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             builder.signal_plan = enriched_plan
                             builder.entry_condition = enriched_plan.get("entry_condition")
                             builder.exit_condition = enriched_plan.get("exit_condition")
-                            yaml_path = generate_yaml(builder)
+                            # SDL path: use artifact_to_yaml so the engine
+                            # receives the exact contract the SDL compiled.
+                            _bt_artifact = getattr(builder, "_sdl_artifact", None)
+                            if _bt_artifact is not None:
+                                try:
+                                    from app.planner.evaluator import artifact_to_yaml as _a2y
+                                    import tempfile, os as _os
+                                    _yaml_str = _a2y(_bt_artifact)
+                                    _tmp = tempfile.NamedTemporaryFile(
+                                        mode="w", suffix=".yaml", delete=False
+                                    )
+                                    _tmp.write(_yaml_str)
+                                    _tmp.close()
+                                    yaml_path = _tmp.name
+                                    logger.info(
+                                        "📦 chat_flow|event=sdl_yaml_written|session_id=%s"
+                                        "|artifact=%.8s|path=%s",
+                                        session_id, _bt_artifact.artifact_id, yaml_path,
+                                    )
+                                except Exception as _y_err:
+                                    logger.warning(
+                                        "⚠️ chat_flow|event=sdl_yaml_fallback|err=%s",
+                                        _y_err,
+                                    )
+                                    yaml_path = generate_yaml(builder)
+                            else:
+                                yaml_path = generate_yaml(builder)
                             logger.info(
                                 "✅ chat_flow|event=signal_params_enriched|session_id=%s"
                                 "|bars=%d|yaml_path=%s|entry=%r|exit=%r",
@@ -3159,10 +3749,24 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     # Phase 7 — fetch reference / HTF OHLCV when the strategy
                     # declares them (Phases 4 / 5). Both are None for legacy
                     # strategies, so this is purely additive.
-                    reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(market_data_request)
+                    reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(
+                        market_data_request,
+                        main_fetch_interval=INTRABAR_EXECUTION_INTERVAL if intrabar_execution else None,
+                    )
+                    # Phase 11 — when 1-minute execution is on, fetch the 1m
+                    # series for the engine (it resamples to the strategy
+                    # timeframe for signals and walks minutes for fills/SL/TP).
+                    # Enrichment above already ran on the strategy-timeframe
+                    # `ohlcv_data`, so its calibration is unaffected.
+                    if intrabar_execution:
+                        engine_ohlcv = await fetch_ohlcv_records(
+                            build_main_fetch_request(market_data_request, intrabar_execution=True)
+                        )
+                    else:
+                        engine_ohlcv = ohlcv_data
                     backtest_result = await run_quant_backtest_sync(
                         yaml_path=yaml_path,
-                        ohlcv_data=ohlcv_data,
+                        ohlcv_data=engine_ohlcv,
                         run_config=run_request,
                         market_data_request={
                             "symbol": market_data_request.symbol,
@@ -3252,12 +3856,30 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         mode_override="backtest_complete",
                         processing_status="complete",
                     )
+                    draft["backtest_window"] = {
+                        "from_utc": _from_utc,
+                        "to_utc": _to_utc,
+                    }
                     ref_backtest_id = str(backtest_result.get("backtest_ref_id") or "")
                     if ref_backtest_id:
                         draft["backtest_ref_id"] = ref_backtest_id
                     
                     # Log token usage summary at backtest completion
                     log_token_summary(session_id, "backtest_complete")
+                except BacktestWindowError as window_exc:
+                    assistant_text = build_backtest_earliest_date_reply(
+                        earliest_backtest_from_display(),
+                    )
+                    assistant_state = (
+                        "assemble_strategy"
+                        if user_state == "assemble_strategy"
+                        else "backtest_confirmation"
+                    )
+                    draft = builder.to_draft_json(
+                        mode_override=assistant_state,
+                        processing_status=_draft_processing_status(builder, assistant_state),
+                    )
+                    draft["backtest_error"] = str(window_exc)
                 except Exception as backtest_exc:
                     logger.error(
                         "❌ chat_flow|event=backtest_failed|session_id=%s|error=%s",
@@ -3321,7 +3943,31 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     if builder.stop_loss
                     else None,
                 }
-                yaml_path = generate_yaml(builder)
+                # SDL path: emit exact compiled artifact YAML for the engine.
+                _asm_artifact = getattr(builder, "_sdl_artifact", None)
+                if _asm_artifact is not None:
+                    try:
+                        from app.planner.evaluator import artifact_to_yaml as _a2y_asm
+                        import tempfile as _tf
+                        _yaml_str_asm = _a2y_asm(_asm_artifact)
+                        _tmp_asm = _tf.NamedTemporaryFile(
+                            mode="w", suffix=".yaml", delete=False
+                        )
+                        _tmp_asm.write(_yaml_str_asm)
+                        _tmp_asm.close()
+                        yaml_path = _tmp_asm.name
+                        logger.info(
+                            "📦 chat_flow|event=sdl_yaml_asm|session_id=%s"
+                            "|artifact=%.8s|path=%s",
+                            session_id, _asm_artifact.artifact_id, yaml_path,
+                        )
+                    except Exception as _ya_err:
+                        logger.warning(
+                            "⚠️ chat_flow|sdl_yaml_asm_fallback|err=%s", _ya_err
+                        )
+                        yaml_path = generate_yaml(builder)
+                else:
+                    yaml_path = generate_yaml(builder)
                 logger.info(
                     "📝 chat_flow|event=strategy_yaml_written|session_id=%s|yaml_path=%s",
                     session_id,
@@ -3402,6 +4048,49 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     strategy.status.value,
                 )
 
+                # Fidelity validation at final assembly — defense in depth.
+                # Same prompt-vs-plan comparison as the plan_signals path, but
+                # here we only attach the findings to the draft for the UI to
+                # render. The strategy has already been persisted at this point
+                # so we don't block; we just make sure the user can see any
+                # remaining substitutions.
+                final_fidelity_findings: list = []
+                try:
+                    from app.planner.fidelity_validator import (
+                        validate_strategy_fidelity as _validate_fidelity_final,
+                    )
+                    # When the strategy was built via the SDL flow, hand the
+                    # fidelity validator the SDL provenance so it trusts what the
+                    # user actually stated (SL/TP/RR) instead of re-deriving it
+                    # from the unreliable legacy rms_sources and raising false
+                    # "system default" clarifications.
+                    _sdl_for_fidelity = getattr(builder, "_sdl", None)
+                    _sdl_field_sources = (
+                        dict((_sdl_for_fidelity.provenance.field_sources or {}))
+                        if _sdl_for_fidelity is not None else None
+                    )
+                    final_fidelity_findings = _validate_fidelity_final(
+                        _resolve_strategy_source_prompt(
+                            builder, user_content, all_messages,
+                        ),
+                        signal_plan=builder.signal_plan,
+                        risk_execution_config=builder.risk_execution_config,
+                        stop_loss_spec=getattr(builder, "stop_loss_spec", None),
+                        sdl_field_sources=_sdl_field_sources,
+                    )
+                    logger.info(
+                        "🔎 chat_flow|event=fidelity_check_done_at_assembly|session_id=%s"
+                        "|critical=%d|warning=%d",
+                        session_id,
+                        sum(1 for f in final_fidelity_findings if f.severity == "critical"),
+                        sum(1 for f in final_fidelity_findings if f.severity == "warning"),
+                    )
+                except Exception as _fid_err2:
+                    logger.warning(
+                        "⚠️ chat_flow|event=fidelity_check_error_at_assembly|session_id=%s|err=%s",
+                        session_id, str(_fid_err2)[:200],
+                    )
+
                 assistant_text = build_assemble_strategy_reply(builder, strategy_config)
                 strategy_json_to_save = build_final_strategy_payload(
                     session_id=session_id,
@@ -3412,6 +4101,7 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     yaml_path=yaml_path,
                     current_mode="assemble_strategy",
                     next_state="backtest_confirmation",
+                    asset_class=builder.asset_class,
                 )
                 assistant_state = "assemble_strategy"
                 draft = builder.to_draft_json(
@@ -3421,6 +4111,25 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 retrieval_meta = build_retrieval_meta(strategy_payload)
                 draft["kb_signals_used"] = retrieval_meta.get("signals_used", [])
                 draft["kb_signals_available"] = retrieval_meta.get("signals_available", 0)
+                if final_fidelity_findings:
+                    draft["fidelity_findings"] = [
+                        {
+                            "severity": f.severity,
+                            "code": f.code,
+                            "field": f.field,
+                            "message": f.message,
+                            "user_value": f.user_value,
+                            "assembled_value": f.assembled_value,
+                        }
+                        for f in final_fidelity_findings
+                    ]
+                    draft["fidelity_summary"] = {
+                        "critical": sum(1 for f in final_fidelity_findings if f.severity == "critical"),
+                        "warning":  sum(1 for f in final_fidelity_findings if f.severity == "warning"),
+                        "requires_user_clarification": any(
+                            f.severity == "critical" for f in final_fidelity_findings
+                        ),
+                    }
             else:
                 if builder.is_user_input_complete() and not builder.user_input_confirmed and user_confirmed:
                     builder.user_input_confirmed = True
@@ -3664,13 +4373,22 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     )
                     if (sl_missing or tp_missing) and not user_said_use_defaults:
                         from app.kb.compat import get_risk_defaults
-                        risk_cfg = MARKET_CONFIG.get(builder.market or "", {})
+                        from app.services.strategy.risk_defaults import (
+                            DEFAULT_RISK_REWARD,
+                            resolve_default_stop_loss,
+                            resolve_default_take_profit,
+                        )
                         default_sl = float(
                             (builder.risk_execution_config or {}).get("stop_loss_pct")
-                            or risk_cfg.get("default_stop_loss", 1.5)
+                            or resolve_default_stop_loss(builder.objective, builder.experience).value
                         )
-                        default_tp_rr = 2.0
-                        default_tp = round(default_sl * default_tp_rr, 2)
+                        default_tp_rr = DEFAULT_RISK_REWARD
+                        default_tp = round(
+                            resolve_default_take_profit(
+                                builder.objective, builder.experience, stop_loss=default_sl
+                            ).value,
+                            2,
+                        )
                         default_dlc = 3.0
                         missing_lines = []
                         if sl_missing:
@@ -3804,63 +4522,160 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         (builder.goal or "")[:60],
                         len(_planning_ohlcv) if _planning_ohlcv else 0,
                     )
+
+                    # ════════════════════════════════════════════════════════
+                    # SDL PATH — try the SDL selector first.
+                    # When the user's message is a full strategy description,
+                    # the SDL selector (one LLM call) fills a typed form from
+                    # the catalog, validates it, compiles it to the existing
+                    # engine contract, and shows the user a read-back with
+                    # match%.  Nothing is silently dropped or invented.
+                    # On any failure the code falls through to the legacy pipeline.
+                    # ════════════════════════════════════════════════════════
+                    _sdl_prompt = _resolve_strategy_source_prompt(
+                        builder, user_content, all_messages,
+                    )
                     try:
-                        plan = await plan_signals_v2(
-                            builder,
-                            ohlcv_records=_planning_ohlcv,
-                            session_id=session_id,
+                        from app.planner.sdl_flow import try_sdl_plan
+                        _sdl_result = await try_sdl_plan(
+                            _sdl_prompt, builder, session_id=session_id,
                         )
-                    except (UnsupportedStock, UnsupportedTimeframe, NoValidCandidate) as exc:
-                        logger.error(
-                            "❌ chat_flow|event=planner_failed|session_id=%s|err=%s",
-                            session_id, exc,
-                        )
-                        raise
-
-                    # ===== NEW: Apply semantic extraction and orchestration =====
-                    semantic_instructions = None
-                    semantic_gates_applied = []
-                    try:
-                        # Extract semantic instructions from user prompt
-                        semantic_extractor = SemanticExtractor()
-                        semantic_instructions = semantic_extractor.extract(user_content)
-
-                        logger.info(
-                            "📊 chat_flow|event=semantic_extraction_done|session_id=%s"
-                            "|family=%s|htf_rules=%d|quality=%.2f",
-                            session_id,
-                            semantic_instructions.strategy_family,
-                            len(semantic_instructions.htf_rules),
-                            semantic_instructions.extraction_quality_score,
-                        )
-
-                        # Apply semantic gates to enhance signal plan
-                        orchestrator = ExecutionOrchestrator()
-                        plan = orchestrator.apply_semantic_gates(plan, semantic_instructions)
-                        semantic_gates_applied = plan.get("_semantic_gates_applied", [])
-
-                        # Stage 4 — compile semantic/builder constraints into signals
-                        plan = apply_semantic_constraints(
-                            plan,
-                            builder,
-                            semantic_instructions=semantic_instructions,
-                            source_prompt=user_content,
-                        )
-                        semantic_gates_applied.extend(
-                            plan.get("_constraint_compiler_applied") or []
-                        )
-
-                        logger.info(
-                            "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s|gates=%s",
-                            session_id,
-                            ", ".join(semantic_gates_applied),
-                        )
-                    except Exception as e:
+                    except Exception as _sdl_exc:
                         logger.warning(
-                            "⚠️ chat_flow|event=semantic_extraction_error|session_id=%s|error=%s",
-                            session_id,
-                            str(e),
+                            "⚠️ chat_flow|event=sdl_flow_error|session_id=%s|err=%s",
+                            session_id, _sdl_exc,
                         )
+                        _sdl_result = None
+
+                    if _sdl_result and _sdl_result.used_sdl:
+                        # SDL path succeeded — use the SDL plan directly.
+                        plan = _sdl_result.signal_plan
+                        logger.info(
+                            "✅ chat_flow|event=sdl_plan_used|session_id=%s"
+                            "|match=%.0f%%|valid=%s|signals=%s",
+                            session_id, _sdl_result.match_pct,
+                            _sdl_result.validation_ok,
+                            plan.get("signals_used", []),
+                        )
+                        # Skip the legacy pipeline and catalog picker entirely —
+                        # jump straight to apply_signal_plan below.
+                        semantic_instructions = None
+                        semantic_gates_applied = []
+                    else:
+                        # ── Legacy pipeline (fallback) ─────────────────────
+                        if _sdl_result:
+                            logger.info(
+                                "🔄 chat_flow|event=sdl_fallback|session_id=%s"
+                                "|reason=%s — running legacy pipeline",
+                                session_id, (_sdl_result.skip_reason or "unknown"),
+                            )
+                        try:
+                            plan = await plan_signals_v2(
+                                builder,
+                                ohlcv_records=_planning_ohlcv,
+                                session_id=session_id,
+                            )
+                        except (UnsupportedStock, UnsupportedTimeframe, NoValidCandidate) as exc:
+                            logger.error(
+                                "❌ chat_flow|event=planner_failed|session_id=%s|err=%s",
+                                session_id, exc,
+                            )
+                            raise
+
+                    # ───── Phase 14 + semantic: legacy path only ────────────
+                    # Skip catalog picker and semantic extraction when the SDL
+                    # path succeeded — the SDL selector already captured intent
+                    # more accurately than the regex + ranker pipeline.
+                    _used_sdl_path = bool(_sdl_result and _sdl_result.used_sdl)
+
+                    if not _used_sdl_path:
+                        # ── Phase 14: Catalog-driven signal picker ───────────
+                        try:
+                            from app.kb import kb as _kb_global
+                            from app.planner.catalog_signal_picker import (
+                                pick_plan_from_catalog,
+                                merge_picker_with_preset,
+                                auto_fill_missing_families,
+                            )
+                            from app.planner.semantic_extractor import SemanticExtractor as _SE
+                            _picker_prompt = _resolve_strategy_source_prompt(
+                                builder, user_content, all_messages,
+                            )
+                            _picker_sem = _SE().extract(_picker_prompt)
+                            _picker_pick = pick_plan_from_catalog(
+                                _picker_prompt,
+                                kb=_kb_global,
+                                timeframe=builder.timeframe,
+                                sentiment=(builder.sentiment or "bullish"),
+                                exit_on_opposite=bool(getattr(_picker_sem, "exit_on_opposite", False)),
+                            )
+                            plan, _merge_mode = merge_picker_with_preset(
+                                plan, _picker_pick.signal_plan,
+                                picker_confidence=_picker_pick.confidence,
+                            )
+                            plan["_catalog_picker_confidence"] = _picker_pick.confidence
+                            plan["_catalog_picker_merge_mode"] = _merge_mode
+                            _auto_audit = auto_fill_missing_families(
+                                plan, _picker_prompt,
+                                kb=_kb_global,
+                                timeframe=builder.timeframe,
+                                sentiment=(builder.sentiment or "bullish"),
+                            )
+                            if _auto_audit:
+                                plan["_catalog_auto_fill"] = _auto_audit
+                            logger.info(
+                                "🧭 chat_flow|event=catalog_picker_done|session_id=%s"
+                                "|confidence=%.3f|merge_mode=%s|auto_fill=%d",
+                                session_id, _picker_pick.confidence, _merge_mode,
+                                len(_auto_audit),
+                            )
+                        except Exception as _picker_err:
+                            logger.warning(
+                                "⚠️ chat_flow|event=catalog_picker_error|session_id=%s|err=%s",
+                                session_id, str(_picker_err)[:200],
+                            )
+                        # ── End Phase 14 ──────────────────────────────────────
+
+                        # ── Semantic extraction + constraint compiler ─────────
+                        semantic_instructions = None
+                        semantic_gates_applied = []
+                        try:
+                            semantic_extractor = SemanticExtractor()
+                            semantic_instructions = semantic_extractor.extract(user_content)
+
+                            logger.info(
+                                "📊 chat_flow|event=semantic_extraction_done|session_id=%s"
+                                "|family=%s|htf_rules=%d|quality=%.2f",
+                                session_id,
+                                semantic_instructions.strategy_family,
+                                len(semantic_instructions.htf_rules),
+                                semantic_instructions.extraction_quality_score,
+                            )
+
+                            orchestrator = ExecutionOrchestrator()
+                            plan = orchestrator.apply_semantic_gates(plan, semantic_instructions)
+                            semantic_gates_applied = plan.get("_semantic_gates_applied", [])
+
+                            plan = apply_semantic_constraints(
+                                plan,
+                                builder,
+                                semantic_instructions=semantic_instructions,
+                                source_prompt=user_content,
+                            )
+                            semantic_gates_applied.extend(
+                                plan.get("_constraint_compiler_applied") or []
+                            )
+
+                            logger.info(
+                                "⚙️ chat_flow|event=semantic_gates_applied|session_id=%s|gates=%s",
+                                session_id, ", ".join(semantic_gates_applied),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "⚠️ chat_flow|event=semantic_extraction_error|session_id=%s|error=%s",
+                                session_id, str(e),
+                            )
+                    # ── End legacy-only block ─────────────────────────────────
                         # Continue without semantic enhancement if extraction fails
                         pass
                     # ===== END: Semantic extraction and orchestration =====
@@ -3879,19 +4694,9 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     )
                     builder.apply_signal_plan(plan)
 
-                    # ── Post-planning semantic sync-back ──────────────────
-                    # The execution orchestrator may have bridged semantic
-                    # results (HTF, structural SL, ref_symbol, trailing) into
-                    # plan underscore keys, which apply_signal_plan already
-                    # consumed.  Now sync the remaining fields that live outside
-                    # the plan dict:
-                    #
-                    # 1. Risk:Reward — if the semantic extractor found an RR
-                    #    ratio that _extract_rms_from_text missed (e.g. the RR
-                    #    was specified post-hoc or in an unusual phrasing), and
-                    #    the builder doesn't already have a user-sourced RR,
-                    #    write it in so future turns preserve it.
-                    if semantic_instructions:
+                    # ── Post-planning semantic sync-back (legacy path only) ───
+                    # Skip for SDL path: artifact fields are already on builder.
+                    if not _used_sdl_path and semantic_instructions:
                         sem_rr = plan.get("_semantic_risk_reward")
                         if sem_rr and sem_rr.get("ratio"):
                             existing_rms = builder.risk_execution_config or {}
@@ -3917,12 +4722,12 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                                 stop_loss_spec=builder.stop_loss_spec,
                                 trailing_stop_spec=builder.trailing_stop_spec,
                                 risk_execution_config=builder.risk_execution_config,
-                                # Use the ORIGINAL strategy prompt (stored in builder.goal),
-                                # NOT the current user turn ("yes, proceed").  Using the
-                                # confirmation message as source_prompt causes
-                                # detect_primary_framework_in_text("yes, proceed") → None,
-                                # wiping out base_framework and all semantic extraction.
-                                source_prompt=(builder.goal or user_content)[:200],
+                                # Single source of truth for "the user's
+                                # literal prompt". Walks builder →
+                                # all_messages → user_content → goal.
+                                source_prompt=_resolve_strategy_source_prompt(
+                                    builder, user_content, all_messages,
+                                )[:1000],
                             )
                             builder.semantic_intent = _post_canonical.dict()
                         except Exception as _norm_err:
@@ -3932,13 +4737,113 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             )
                             # Fall back to storing raw SemanticInstructions dict
                             builder.semantic_intent = semantic_instructions.dict()
+                    # ── Fidelity / SDL validation ─────────────────────────
+                    # SDL path:    use SDL's own validation results — no regex
+                    #              heuristics needed; provenance is authoritative.
+                    # Legacy path: run the regex-based fidelity validator.
+                    fidelity_findings: list = []
+                    fidelity_user_message: str | None = None
+
+                    if _used_sdl_path and _sdl_result:
+                        # Map SDL validation errors → fidelity_findings shape
+                        # so the rest of the draft/reply logic is unchanged.
+                        for _ve in (_sdl_result.validation_errors or []):
+                            from app.planner.fidelity_validator import FidelityFinding
+                            fidelity_findings.append(FidelityFinding(
+                                severity="critical",
+                                code=_ve.get("code", "sdl_validation_error"),
+                                message=_ve.get("message", ""),
+                                field=_ve.get("field"),
+                            ))
+                        if not _sdl_result.validation_ok and fidelity_findings:
+                            from app.planner.fidelity_validator import format_user_message as _fmt_f
+                            fidelity_user_message = _fmt_f(fidelity_findings)
+                    else:
+                        try:
+                            from app.planner.fidelity_validator import (
+                                validate_strategy_fidelity,
+                                format_user_message as _format_fidelity_message,
+                            )
+                            fidelity_source_prompt = _resolve_strategy_source_prompt(
+                                builder, user_content, all_messages,
+                            )
+                            fidelity_findings = validate_strategy_fidelity(
+                                fidelity_source_prompt,
+                                signal_plan=plan,
+                                risk_execution_config=builder.risk_execution_config,
+                                stop_loss_spec=getattr(builder, "stop_loss_spec", None),
+                            )
+                            fidelity_user_message = _format_fidelity_message(
+                                fidelity_findings
+                            )
+                            logger.info(
+                                "🔎 chat_flow|event=fidelity_check_done|session_id=%s"
+                                "|critical=%d|warning=%d|info=%d|prompt_len=%d|prompt_preview=%r",
+                                session_id,
+                                sum(1 for f in fidelity_findings if f.severity == "critical"),
+                                sum(1 for f in fidelity_findings if f.severity == "warning"),
+                                sum(1 for f in fidelity_findings if f.severity == "info"),
+                                len(fidelity_source_prompt),
+                                fidelity_source_prompt[:120],
+                            )
+                        except Exception as _fid_err:
+                            logger.warning(
+                                "⚠️ chat_flow|event=fidelity_check_error|session_id=%s|err=%s",
+                                session_id, str(_fid_err)[:200],
+                            )
+
+                    # ── Build reply text ──────────────────────────────────────
+                    # SDL path: read-back (Built/Assumed/Couldn't-do/match%) is the
+                    #   primary content.  We prepend it to the plan summary.
+                    # Legacy path: existing build_plan_signals_reply output.
                     assistant_text = build_plan_signals_reply(builder, plan)
+                    if _used_sdl_path and _sdl_result and _sdl_result.readback_text:
+                        assistant_text = (
+                            _sdl_result.readback_text
+                            + "\n\n"
+                            + assistant_text
+                        )
+                        logger.info(
+                            "📝 chat_flow|event=sdl_readback_prepended|session_id=%s"
+                            "|match=%.0f%%",
+                            session_id, _sdl_result.match_pct,
+                        )
+
                     assistant_state = "plan_signals"
                     plan_status = "awaiting_confirmation"
-                    if semantic_instructions and needs_manual_review(
+
+                    # If any CRITICAL fidelity/SDL-validation finding, prepend the
+                    # clarifying questions and block auto-advance to backtest.
+                    critical_findings = [
+                        f for f in fidelity_findings if f.severity == "critical"
+                    ]
+                    if critical_findings and fidelity_user_message:
+                        assistant_text = (
+                            f"{fidelity_user_message}\n\n"
+                            "I have a draft plan ready below, but I'd like to "
+                            "fix the items above first. Reply with the corrections "
+                            "(e.g. \"use SMA 20\", \"RR is 3:7\", \"SL 1.5%\") and "
+                            "I'll re-plan.\n\n"
+                            f"{assistant_text}"
+                        )
+                        plan_status = "fidelity_review_required"
+                        logger.warning(
+                            "⚠️ chat_flow|event=fidelity_critical|session_id=%s"
+                            "|count=%d|codes=%s",
+                            session_id,
+                            len(critical_findings),
+                            ", ".join(f.code for f in critical_findings),
+                        )
+                    elif fidelity_user_message:
+                        assistant_text = f"{assistant_text}\n\n{fidelity_user_message}"
+
+                    if not _used_sdl_path and semantic_instructions and needs_manual_review(
                         semantic_instructions.extraction_quality_score
                     ):
-                        plan_status = "manual_review_required"
+                        # Don't downgrade a fidelity flag back to manual_review;
+                        # fidelity is the stronger signal.
+                        if plan_status == "awaiting_confirmation":
+                            plan_status = "manual_review_required"
                         logger.warning(
                             "⚠️ chat_flow|event=low_semantic_quality|session_id=%s|score=%.3f",
                             session_id,
@@ -3951,8 +4856,51 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     draft["kb_signals_used"] = plan.get("signals_used", [])
                     draft["kb_signals_available"] = plan.get("signals_available", 0)
 
-                    # ===== NEW: Add semantic extraction results to draft =====
-                    if semantic_instructions:
+                    # Expose fidelity findings on the draft so the API/UI can
+                    # render structured clarification prompts (one per finding)
+                    # instead of the plain-text fallback message.
+                    if fidelity_findings:
+                        draft["fidelity_findings"] = [
+                            {
+                                "severity": f.severity,
+                                "code": f.code,
+                                "field": f.field,
+                                "message": f.message,
+                                "user_value": f.user_value,
+                                "assembled_value": f.assembled_value,
+                            }
+                            for f in fidelity_findings
+                        ]
+                        draft["fidelity_summary"] = {
+                            "critical": sum(1 for f in fidelity_findings if f.severity == "critical"),
+                            "warning":  sum(1 for f in fidelity_findings if f.severity == "warning"),
+                            "info":     sum(1 for f in fidelity_findings if f.severity == "info"),
+                            "requires_user_clarification": any(
+                                f.severity == "critical" for f in fidelity_findings
+                            ),
+                        }
+
+                    # ── SDL provenance on draft (SDL path only) ───────────
+                    if _used_sdl_path and _sdl_result:
+                        _sdl = _sdl_result.sdl
+                        if _sdl:
+                            prov = _sdl.provenance
+                            draft["sdl_provenance"] = {
+                                "field_sources":         dict(prov.field_sources or {}),
+                                "unmapped_details":      [u.model_dump() for u in (prov.unmapped_details or [])],
+                                "clarifications_needed": [c.model_dump() for c in (prov.clarifications_needed or [])],
+                            }
+                            draft["sdl_match_pct"]     = round(_sdl_result.match_pct, 1)
+                            draft["sdl_version"]        = _sdl.version
+                            draft["sdl_content_hash"]   = _sdl.content_hash
+                            draft["sdl_readback"]       = _sdl_result.readback_text
+                            if _sdl_result.engine_gaps:
+                                draft["sdl_engine_gaps"] = _sdl_result.engine_gaps
+                        if _sdl_result.artifact:
+                            draft["sdl_artifact_id"] = _sdl_result.artifact.artifact_id
+
+                    # ── Semantic extraction results on draft (legacy path) ────
+                    elif semantic_instructions:
                         draft["semantic_extraction"] = {
                             "quality_score": semantic_instructions.extraction_quality_score,
                             "strategy_family": semantic_instructions.strategy_family,
@@ -3968,7 +4916,6 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                             "candle_confirmation": semantic_instructions.candle_confirmation.dict() if semantic_instructions.candle_confirmation else None,
                         }
                         draft["semantic_gates_applied"] = semantic_gates_applied
-                    # ===== END: Semantic extraction results =====
                 else:
                     assistant_text = build_plan_signals_reminder(builder)
                     assistant_state = "plan_signals"
@@ -4019,6 +4966,15 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
 
             if user_msg:
                 user_msg.status = MessageStatus.completed
+
+            from app.services.chat.inputs_snapshot import append_inputs_snapshot
+
+            assistant_text, draft = append_inputs_snapshot(
+                assistant_text,
+                builder,
+                state=assistant_state,
+                draft=draft if isinstance(draft, dict) else None,
+            )
 
             assistant_msg = ChatMessage(
                 id=uuid.uuid4(),

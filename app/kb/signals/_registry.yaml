@@ -11,6 +11,9 @@ enabled:
   - price_above_ema
   - price_below_ema
   - is_above_sma
+  - price_below_sma
+  - price_cross_above_sma
+  - price_cross_below_sma
 
   # ── Momentum ─────────────────────────────────────
   - rsi_cross_up
@@ -34,6 +37,8 @@ enabled:
   - vwap_bullish
   - vwap_bearish
   - volume_spike
+  - volume_above_average
+  - volume_dry_up
   - high_delivery_volume
 
   # ── India-specific intraday ──────────────────────
@@ -48,6 +53,10 @@ enabled:
   # ── VWAP-event signals ───────────────────────────
   - vwap_reclaim_bullish
   - vwap_reclaim_bearish
+  # Percentage distance from VWAP (plain "N% below/above VWAP" the trader names
+  # directly — distinct from the std-dev-based vwap_zscore_* pair below).
+  - vwap_below_pct
+  - vwap_above_pct
 
   # ── Pullback patterns ────────────────────────────
   - ema_pullback_bullish
@@ -122,3 +131,46 @@ enabled:
   - bearish_fvg_signal
   - uptrend_structure
   - downtrend_structure
+
+  # ── Phase 1 — additional indicator signals ───────
+  # (Backend note: EVERY indicator in the engine is TA-Lib-backed — these are
+  #  simply the signal cards added in Phase 1, not a separate engine.)
+  - williams_oversold
+  - williams_overbought
+  - cmo_oversold
+  - cmo_overbought
+  - ultosc_oversold
+  - ultosc_overbought
+  - roc_positive
+  - roc_negative
+  - momentum_positive
+  - trix_positive
+  - trix_negative
+  - ppo_positive
+  - ppo_negative
+  - stoch_bullish_cross
+  - stoch_bearish_cross
+  - adxr_strong_trend
+  - aroon_bullish
+  - aroon_bearish
+  - sar_bullish
+  - sar_bearish
+  - price_above_kama
+  - price_below_kama
+  - price_above_dema
+  - price_below_dema
+  - price_above_tema
+  - price_below_tema
+  - price_above_wma
+  - price_below_wma
+  - donchian_breakout_up
+  - donchian_breakdown
+  - bullish_engulfing
+  - bearish_engulfing
+  - hammer_candle
+  - shooting_star_candle
+  - doji_indecision
+  - morning_star
+  - evening_star
+  - three_white_soldiers
+  - three_black_crows

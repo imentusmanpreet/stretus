@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import requests
 
@@ -23,6 +23,11 @@ from app.kb.compat import (
     get_daily_loss_cap_bounds,
     get_experience_risk,
     get_risk_defaults,
+)
+from app.kb.signal_validation import (
+    SignalPlacementValidationError,
+    assert_valid_signal_lists,
+    validate_signal_placement,
 )
 from app.services.chat.response_composer import (
     build_unsupported_timeframe_message,
@@ -150,6 +155,28 @@ _STOP_WORDS = {
     "go", "ahead", "do", "it", "setup", "sentiment", "view", "trader", "traders", "trading",
     "change", "update", "set", "use", "keep", "same", "show", "give", "tell",
 }
+_MISSING_INPUT_TEXT = {
+    "none",
+    "null",
+    "nil",
+    "n/a",
+    "na",
+    "not applicable",
+    "unknown",
+    "unspecified",
+    "not specified",
+}
+
+
+def _normalize_optional_input_text(value: Any, *, lowercase: bool = False) -> Optional[str]:
+    if value is None:
+        return None
+    text = " ".join(str(value).split()).strip()
+    if not text:
+        return None
+    if text.lower() in _MISSING_INPUT_TEXT:
+        return None
+    return text.lower() if lowercase else text
 
 
 @lru_cache(maxsize=1)
@@ -400,6 +427,101 @@ _TF_RE = re.compile(
 )
 
 
+# Default trading window per asset class — applied when the user didn't
+# explicitly set entry_window_start / entry_window_end on the builder.
+# Indian stocks: NSE cash session 09:15–15:30 IST (the 375-minute session).
+# Crypto:        no window (24/7 market) — leave as None so the gate is a no-op.
+# Other markets (US, indices, ...): no opinion; let the data layer handle it.
+def _default_entry_window_for_market(market: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    m = (market or "").lower().strip()
+    if m == "indian_stocks":
+        return ("09:15", "15:30")
+    return (None, None)
+
+
+# Display label of the default trading window per market. Same mapping logic
+# as _default_entry_window_for_market but rendered as a single string for UI
+# fields like `risk_and_execution.trading_window`. Crypto resolves to "24/7"
+# because Binance has no session boundary.
+def _default_trading_window_label_for_market(market: Optional[str]) -> Optional[str]:
+    m = (market or "").lower().strip()
+    if m in ("indian_stocks", "indian_indices"):
+        return "09:15 - 15:30"
+    if m == "crypto":
+        return "24/7"
+    return None
+
+
+# ── Asset-class ↔ market mappings ─────────────────────────────────────────────
+# The KB universe.csv uses `asset_class` ("equity_cash" / "crypto_spot"); the
+# builder works in "market" terms ("indian_stocks" / "crypto"). These two
+# dicts let us round-trip between the two views.
+_ASSET_CLASS_TO_MARKET: dict[str, str] = {
+    "equity_cash": "indian_stocks",
+    "crypto_spot": "crypto",
+}
+_MARKET_TO_ASSET_CLASS: dict[str, str] = {
+    "indian_stocks":  "equity_cash",
+    "indian_indices": "equity_cash",
+    "us_stocks":      "equity_cash",
+    "crypto":         "crypto_spot",
+}
+
+# Symbol-shape heuristics — used as fallback when the symbol isn't in the KB.
+_CRYPTO_QUOTE_TAIL_RE = re.compile(r"(USDT|USDC|BUSD|FDUSD|DAI|USD)$", re.IGNORECASE)
+_CANONICAL_CRYPTO_PAIR_RE = re.compile(r"^[A-Z0-9]+_[A-Z0-9]+$")
+
+
+def _infer_market_from_symbol(symbol: Optional[str]) -> Optional[str]:
+    """Resolve the canonical market string from a symbol.
+
+    Source-of-truth order:
+      1. KB universe.csv (`stock.asset_class`) — definitive when the symbol is
+         in the catalogue.
+      2. Shape heuristics for symbols not in the KB:
+         - "*.NS" / "*.BO" → indian_stocks
+         - "BASE_QUOTE"     → crypto    (canonical, e.g. "BTC_USDT")
+         - "BASEQUOTE" ending in a known quote tail → crypto (broker-native).
+      3. None when ambiguous — caller keeps whatever market it had.
+
+    This is called from `sync_market_from_symbol()` so every symbol assignment
+    forces the market to follow what the symbol actually is, never the other
+    way around.
+    """
+    if not symbol:
+        return None
+    s = str(symbol).strip()
+    if not s:
+        return None
+
+    # 1. KB universe lookup. The KB import is lazy because the builder is
+    # imported during app startup before the KB module is necessarily loaded.
+    try:
+        from app.kb import kb as _kb  # type: ignore
+        stock = _kb.stocks.get(s) or _kb.stocks.get(s.upper())
+        if stock is not None:
+            asset_class = getattr(stock, "asset_class", None)
+            mapped = _ASSET_CLASS_TO_MARKET.get(str(asset_class or "").lower())
+            if mapped:
+                return mapped
+    except Exception:
+        # KB unavailable / not loaded yet — fall through to heuristics.
+        pass
+
+    # 2. Shape heuristics.
+    u = s.upper()
+    if u.endswith((".NS", ".BO", ".NSE", ".BSE")):
+        return "indian_stocks"
+    if _CANONICAL_CRYPTO_PAIR_RE.fullmatch(u):
+        return "crypto"
+    # Broker-native crypto pair (no underscore). Require ≥6 chars to avoid
+    # collapsing 4-letter tickers that happen to end in "USD".
+    if len(u) >= 6 and _CRYPTO_QUOTE_TAIL_RE.search(u):
+        return "crypto"
+
+    return None
+
+
 class StrategyBuilder:
     def __init__(self):
         self.market: Optional[str] = DEFAULT_MARKET
@@ -415,15 +537,38 @@ class StrategyBuilder:
         self.timeframe_validation_facts: dict[str, Any] = {}
         self._timeframe_validation_message: Optional[str] = None
         self.sentiment: Optional[str] = None
-        self.experience: Optional[str] = None
-        self.objective: Optional[str] = None
-        self.goal: Optional[str] = None
+        # Backing store for the `experience` property below — the property
+        # setter refreshes tier-derived Phase 10 defaults whenever the value
+        # changes, so callers can keep doing `builder.experience = "..."`.
+        self._experience: Optional[str] = None
+        self._objective: Optional[str] = None
+        self._goal: Optional[str] = None
+        # original_user_prompt holds the *raw* first substantive user message
+        # describing the strategy (e.g. "Buy when price crosses above 20 SMA,
+        # SL below previous candle low, target 3:7 RR"). It is NEVER overwritten
+        # by the agent router's summarized `goal` field, so downstream semantic
+        # extraction always has access to the user's literal phrasing.
+        self.original_user_prompt: Optional[str] = None
         self.daily_loss_cap: Optional[float] = None
         self.max_trade: Optional[str] = None
         self.entry_condition: Optional[str] = None
         self.exit_condition: Optional[str] = None
-        self.stop_loss: Optional[float] = None
-        self.take_profit: Optional[float] = None
+        # Phase 12 — SHORT leg for two-sided ("both") strategies. The engine
+        # runs a separate short pass on these; None for single-direction.
+        self.short_entry_condition: Optional[str] = None
+        self.short_exit_condition: Optional[str] = None
+        # SDL ticket for the current strategy (set by the SDL flow). Kept so a
+        # later "change RSI to 20 / use EMA instead" turn edits THIS ticket via
+        # the SDL modify path instead of the legacy modifier. Persisted across
+        # turns as `sdl_json` in the draft (see to_draft_json / merge_preview).
+        self._sdl: Any = None
+        # stop_loss / take_profit / risk_reward are NOT stored here — they are
+        # read-through @property accessors over the single risk store
+        # `risk_execution_config` (keys stop_loss_pct / take_profit_pct /
+        # risk_reward). This is the WS1 single-source-of-truth: there is no
+        # second mirror to drift out of sync. The backing dict is initialised a
+        # few lines down (self.risk_execution_config = {}); no property is
+        # accessed before then.
         self.user_input_confirmed: bool = False
         self.signal_plan: Optional[dict] = None
         # Optional pinned strategy preset (e.g. "orb", "ema_pullback").
@@ -525,6 +670,74 @@ class StrategyBuilder:
         # Phase 10 — position sizing
         self.position_sizing_mode: Optional[str] = None  # "fixed_fractional" | "risk_based" | "fixed_units"
         self.max_capital_allocation_pct: Optional[float] = None
+        # Tracks which Phase 10 tier-derived fields the user has explicitly set
+        # (so we never clobber them with tier defaults). Populated by callers
+        # via mark_phase10_user_override() whenever they apply a user-supplied
+        # value to one of the tier-derived fields. Persisted in draft JSON so
+        # the set survives across turns.
+        self._phase10_user_overrides: set[str] = set()
+
+    # Field names whose defaults come from risk_tiers.yaml. Listed once here so
+    # apply_tier_execution_defaults() and the override-tracking logic stay in
+    # sync.
+    _TIER_DERIVED_PHASE10_FIELDS: tuple[str, ...] = (
+        "max_consecutive_losses",
+        "cooldown_bars_after_loss",
+        "cooldown_bars_after_profit",
+        "max_spread_bps",
+        "entry_confirmation_bars",
+        "max_capital_allocation_pct",
+        "position_sizing_mode",
+        "gap_filter",
+    )
+
+    def mark_phase10_user_override(self, field_name: str) -> None:
+        """Record that the user explicitly set a tier-derived Phase 10 field.
+
+        Callers (chat_service, agent tool catalog) should call this whenever
+        they apply a user-supplied value to one of the tier-derived fields.
+        Once marked, apply_tier_execution_defaults() will preserve the value
+        even when experience changes.
+        """
+        if field_name in self._TIER_DERIVED_PHASE10_FIELDS:
+            self._phase10_user_overrides.add(field_name)
+
+    @property
+    def experience(self) -> Optional[str]:
+        return self._experience
+
+    @experience.setter
+    def experience(self, value: Optional[str]) -> None:
+        new_val = _normalize_optional_input_text(value, lowercase=True)
+        old_val = self._experience
+        self._experience = new_val
+        # When experience changes, re-pull tier-derived Phase 10 defaults so
+        # the new tier's values flow through. Fields the user has explicitly
+        # set are preserved via the _phase10_user_overrides set.
+        if old_val != new_val:
+            try:
+                self.apply_tier_execution_defaults()
+            except Exception:
+                # apply_tier_execution_defaults imports app.kb lazily; if the
+                # KB isn't loaded yet (very early in process startup) leave
+                # the refresh for the next apply_defaults() call.
+                pass
+
+    @property
+    def objective(self) -> Optional[str]:
+        return self._objective
+
+    @objective.setter
+    def objective(self, value: Optional[str]) -> None:
+        self._objective = _normalize_optional_input_text(value, lowercase=True)
+
+    @property
+    def goal(self) -> Optional[str]:
+        return self._goal
+
+    @goal.setter
+    def goal(self, value: Optional[str]) -> None:
+        self._goal = _normalize_optional_input_text(value)
 
     def _render_validation_message(self, code: Optional[str], facts: dict[str, Any], fallback: Optional[str]) -> Optional[str]:
         if code:
@@ -567,6 +780,57 @@ class StrategyBuilder:
     @timeframe_validation_message.setter
     def timeframe_validation_message(self, value: Optional[str]) -> None:
         self.set_timeframe_validation(None, message=value)
+
+    # ── Risk params: one store, read-through properties (WS1 §6) ──────────────
+    # The single home for SL/TP/RR is `risk_execution_config`. These properties
+    # read and write that dict so legacy call sites doing `builder.stop_loss`
+    # keep working while there is exactly ONE place the value lives — killing
+    # the double-store drift where an edit applied to one mirror and not the
+    # other (and the `if attribute is None` guards that papered over it).
+    def _risk_store(self) -> dict[str, Any]:
+        store = getattr(self, "risk_execution_config", None)
+        if not isinstance(store, dict):
+            store = {}
+            self.risk_execution_config = store
+        return store
+
+    @property
+    def stop_loss(self) -> Optional[float]:
+        v = self._risk_store().get("stop_loss_pct")
+        return float(v) if v is not None else None
+
+    @stop_loss.setter
+    def stop_loss(self, value: Optional[float]) -> None:
+        store = self._risk_store()
+        if value is None:
+            store.pop("stop_loss_pct", None)
+        else:
+            store["stop_loss_pct"] = float(value)
+
+    @property
+    def take_profit(self) -> Optional[float]:
+        v = self._risk_store().get("take_profit_pct")
+        return float(v) if v is not None else None
+
+    @take_profit.setter
+    def take_profit(self, value: Optional[float]) -> None:
+        store = self._risk_store()
+        if value is None:
+            store.pop("take_profit_pct", None)
+        else:
+            store["take_profit_pct"] = float(value)
+
+    @property
+    def risk_reward(self) -> Optional[Any]:
+        return self._risk_store().get("risk_reward")
+
+    @risk_reward.setter
+    def risk_reward(self, value: Optional[Any]) -> None:
+        store = self._risk_store()
+        if value is None:
+            store.pop("risk_reward", None)
+        else:
+            store["risk_reward"] = value
 
     def set_symbol_validation(
         self,
@@ -631,11 +895,11 @@ class StrategyBuilder:
         symbol_ok = bool(self.symbol) or bool(self.discovered_symbol) or self.requires_discovery()
         if not all([
             symbol_ok,
-            self.timeframe,
-            self.sentiment,
-            self.experience,
-            self.objective,
-            self.goal,
+            _normalize_optional_input_text(self.timeframe),
+            _normalize_optional_input_text(self.objective),
+            _normalize_optional_input_text(self.sentiment),
+            _normalize_optional_input_text(self.experience),
+            _normalize_optional_input_text(self.goal),
         ]):
             return False
         return True
@@ -665,15 +929,15 @@ class StrategyBuilder:
         # don't require a user-supplied symbol.
         if not self.symbol and not self.discovered_symbol and not self.requires_discovery():
             fields.append("symbol")
-        if not self.timeframe:
+        if not _normalize_optional_input_text(self.timeframe):
             fields.append("timeframe")
-        if not self.sentiment:
-            fields.append("sentiment")
-        if not self.experience:
-            fields.append("experience")
-        if not self.objective:
+        if not _normalize_optional_input_text(self.objective):
             fields.append("objective")
-        if not self.goal:
+        if not _normalize_optional_input_text(self.sentiment):
+            fields.append("sentiment")
+        if not _normalize_optional_input_text(self.experience):
+            fields.append("experience")
+        if not _normalize_optional_input_text(self.goal):
             fields.append("goal")
         return fields
 
@@ -684,8 +948,23 @@ class StrategyBuilder:
         self.exit_condition = None
         self.daily_loss_cap = None
         self.max_trade = None
-        self.stop_loss = None
-        self.take_profit = None
+        # SL/TP live in the single risk store. Clear only values WE defaulted —
+        # a user-supplied stop/target accumulates across turns and must survive
+        # a regenerate (WS1). With the old double-store this happened implicitly
+        # (the attr was cleared but apply_defaults restored the dict value); we
+        # make it explicit and provenance-aware now.
+        self._clear_defaulted_risk_param("stop_loss_pct")
+        self._clear_defaulted_risk_param("take_profit_pct")
+
+    def _clear_defaulted_risk_param(self, key: str) -> None:
+        """Drop a risk-store value unless it was user-supplied."""
+        store = self._risk_store()
+        sources = store.get("rms_sources")
+        if isinstance(sources, dict) and sources.get(key) == "user":
+            return
+        store.pop(key, None)
+        if isinstance(sources, dict):
+            sources.pop(key, None)
 
     def _clear_core_user_input_field(self, field: str) -> None:
         if field == "symbol":
@@ -862,45 +1141,59 @@ class StrategyBuilder:
         return fields
 
     def apply_tier_execution_defaults(self) -> None:
-        """Fill unset Phase-2 execution fields from risk_tiers.yaml (by experience)."""
+        """Apply Phase-2 execution defaults from risk_tiers.yaml (keyed by experience).
+
+        Each tier-derived field is refreshed from the **current** tier unless
+        the user has explicitly set it (tracked via _phase10_user_overrides).
+        Previously this method only filled None fields, which meant that once
+        a strategy was built with one experience tier and the user later
+        switched to another, the original tier's values stuck around and
+        silently drove the simulator — a stale-defaults leak.
+        """
         from app.kb import kb
 
         tier = kb.get_risk_tier(self.experience)
-        if self.max_consecutive_losses is None:
-            self.max_consecutive_losses = int(tier.max_consecutive_losses)
-        if self.cooldown_bars_after_loss is None:
-            self.cooldown_bars_after_loss = int(tier.cooldown_bars_after_loss)
-        if self.cooldown_bars_after_profit is None:
-            self.cooldown_bars_after_profit = int(tier.cooldown_bars_after_profit)
-        if self.max_spread_bps is None:
-            self.max_spread_bps = float(tier.max_spread_bps)
-        if self.entry_confirmation_bars is None:
-            self.entry_confirmation_bars = int(tier.entry_confirmation_bars)
-        if self.max_capital_allocation_pct is None:
-            self.max_capital_allocation_pct = float(tier.max_capital_allocation_pct)
-        if self.position_sizing_mode is None:
-            self.position_sizing_mode = str(tier.position_sizing_mode)
-        if self.gap_filter is None:
-            self.gap_filter = str(tier.gap_filter)
+
+        def _set_if_not_overridden(name: str, value: Any) -> None:
+            if name not in self._phase10_user_overrides:
+                setattr(self, name, value)
+
+        _set_if_not_overridden("max_consecutive_losses",     int(tier.max_consecutive_losses))
+        _set_if_not_overridden("cooldown_bars_after_loss",   int(tier.cooldown_bars_after_loss))
+        _set_if_not_overridden("cooldown_bars_after_profit", int(tier.cooldown_bars_after_profit))
+        _set_if_not_overridden("max_spread_bps",             float(tier.max_spread_bps))
+        _set_if_not_overridden("entry_confirmation_bars",    int(tier.entry_confirmation_bars))
+        _set_if_not_overridden("max_capital_allocation_pct", float(tier.max_capital_allocation_pct))
+        _set_if_not_overridden("position_sizing_mode",       str(tier.position_sizing_mode))
+        _set_if_not_overridden("gap_filter",                 str(tier.gap_filter))
 
     def apply_defaults(self):
         cfg = MARKET_CONFIG.get(self.market or "", {})
         risk_cfg = self.risk_execution_config or {}
-        from app.kb import kb
+        from app.services.strategy.risk_defaults import (
+            resolve_default_stop_loss,
+            resolve_default_take_profit,
+        )
 
-        tier = kb.get_risk_tier(self.experience)
+        # SL/TP defaults come from the ONE resolver and are tagged `default` in
+        # the risk store's provenance so they (a) never masquerade as user input
+        # and (b) get cleared on a regenerate (see reset_generated_strategy_state).
+        store = self._risk_store()
+        rms_sources = store.get("rms_sources")
+        if not isinstance(rms_sources, dict):
+            rms_sources = {}
+            store["rms_sources"] = rms_sources
+
         if self.stop_loss is None:
-            self.stop_loss = float(
-                risk_cfg.get("stop_loss_pct")
-                or tier.base_sl_pct
-                or cfg.get("default_stop_loss", 2.0)
-            )
+            d = resolve_default_stop_loss(self.objective, self.experience)
+            self.stop_loss = d.value
+            rms_sources.setdefault("stop_loss_pct", d.source)
         if self.take_profit is None:
-            self.take_profit = float(
-                risk_cfg.get("take_profit_pct")
-                or tier.base_tp_pct
-                or cfg.get("default_take_profit", 5.0)
+            d = resolve_default_take_profit(
+                self.objective, self.experience, stop_loss=self.stop_loss
             )
+            self.take_profit = d.value
+            rms_sources.setdefault("take_profit_pct", d.source)
         if self.timeframe is None:
             self.timeframe = cfg.get("default_timeframe", "1d")
         if self.daily_loss_cap is None:
@@ -927,9 +1220,14 @@ class StrategyBuilder:
         stop_loss = self.stop_loss
         take_profit = self.take_profit
         if stop_loss is None or take_profit is None:
-            cfg = MARKET_CONFIG.get(self.market or "", {})
-            stop_loss = cfg.get("default_stop_loss", 2.0)
-            take_profit = cfg.get("default_take_profit", 5.0)
+            from app.services.strategy.risk_defaults import (
+                resolve_default_stop_loss,
+                resolve_default_take_profit,
+            )
+            stop_loss = resolve_default_stop_loss(self.objective, self.experience).value
+            take_profit = resolve_default_take_profit(
+                self.objective, self.experience, stop_loss=stop_loss
+            ).value
         if not stop_loss or stop_loss <= 0:
             return None
         return round(float(take_profit) / float(stop_loss), 2)
@@ -994,6 +1292,21 @@ class StrategyBuilder:
             if risk_cfg.get("max_trades") is not None
             else self._max_trades_per_day()
         )
+        # Trading window display: explicit user bounds > asset-class default >
+        # risk_cfg seed. The seed in app/kb/compat.py hardcodes "9:15 - 15:30"
+        # regardless of asset class, so we override it for known markets.
+        ew_start = self.entry_window_start
+        ew_end   = self.entry_window_end
+        market_label = _default_trading_window_label_for_market(self.market)
+        if ew_start and ew_end:
+            trading_window_display = f"{ew_start} - {ew_end}"
+        elif market_label is not None:
+            trading_window_display = market_label
+        else:
+            trading_window_display = str(
+                risk_cfg.get("trading_window", DEFAULT_RISK_AND_EXECUTION["trading_window"])
+            )
+
         return {
             "daily_loss_cap": f"{daily_loss_cap_pct:.1f}% of capital per day",
             "position_sizing": str(
@@ -1002,9 +1315,7 @@ class StrategyBuilder:
             "execution_mode": str(
                 risk_cfg.get("execution_mode", DEFAULT_RISK_AND_EXECUTION["execution_mode"])
             ),
-            "trading_window": str(
-                risk_cfg.get("trading_window", DEFAULT_RISK_AND_EXECUTION["trading_window"])
-            ),
+            "trading_window": trading_window_display,
             "risk_validation": str(
                 risk_cfg.get("risk_validation", DEFAULT_RISK_AND_EXECUTION["risk_validation"])
             ),
@@ -1013,12 +1324,38 @@ class StrategyBuilder:
             "max_trades": self._format_max_trades_display(max_trades),
         }
 
+    def sync_market_from_symbol(self) -> None:
+        """Re-derive ``self.market`` from the current symbol.
+
+        Symbol is the source-of-truth for asset class inside a session. This
+        method is called from every site that assigns ``self.symbol`` (chat
+        resolution, merge_preview, etc.) so a stale "indian_stocks" default
+        can't survive into a BTC_USDT strategy. If the symbol is ambiguous
+        and we can't infer anything, the prior market value is preserved.
+        """
+        inferred = _infer_market_from_symbol(self.symbol)
+        if inferred:
+            self.market = inferred
+
+    @property
+    def asset_class(self) -> Optional[str]:
+        """KB-style asset class ('equity_cash' | 'crypto_spot') derived from market.
+
+        Surfaced in to_draft_json() so every chat response carries it.
+        """
+        return _MARKET_TO_ASSET_CLASS.get((self.market or "").lower().strip())
+
     def format_symbol(self) -> str:
         if not self.symbol:
             return ""
         raw = self.symbol.upper().strip()
 
         if raw.endswith((".NS", ".BO")):
+            return raw
+
+        # Crypto pairs use the canonical form BASE_QUOTE (e.g. BTC_USDT).
+        # They are already canonical — do not apply the equity .NS/.BO logic.
+        if re.match(r"^[A-Z0-9]+_[A-Z0-9]+$", raw):
             return raw
 
         if ":" in raw:
@@ -1080,6 +1417,109 @@ class StrategyBuilder:
         if changed:
             self.entry_condition = updated_condition
 
+    def modify_signal(
+        self,
+        slot: str,
+        signal_name: str,
+        *,
+        params: dict | None = None,
+        replace_name: str | None = None,
+        action: str = "replace",
+    ) -> dict:
+        """Add, replace, or swap a single signal in the current ``signal_plan``.
+
+        Args:
+            slot: ``"entry"`` or ``"exit"`` — which list to update.
+            signal_name: KB signal name to place (already resolved to an
+                exact name; use ``app.kb.signal_resolver`` for partial input).
+            params: optional params dict for the signal.
+            replace_name: full name of an existing signal to swap out
+                in-place. When set, ``action`` is ignored and the matching
+                entry is replaced (or the new signal is appended if no
+                match is found).
+            action: how to apply when ``replace_name`` is not given.
+                ``"replace"`` (default) wipes the slot and sets it to the
+                new signal — the right behavior for "change entry signal
+                to X" phrasing. ``"add"`` appends without removing existing
+                entries — for "add X" phrasing.
+
+        Returns:
+            The updated ``signal_plan`` dict.
+
+        Raises:
+            SignalPlacementValidationError: if ``signal_name`` cannot legally
+                sit in ``slot`` (e.g. entry-only signal in exit list).
+            ValueError: if ``slot`` is not ``"entry"`` or ``"exit"`` or
+                ``action`` is not ``"replace"`` / ``"add"``.
+        """
+        slot_clean = str(slot or "").strip().lower()
+        if slot_clean not in ("entry", "exit"):
+            raise ValueError(f"slot must be 'entry' or 'exit', got {slot!r}")
+
+        action_clean = str(action or "replace").strip().lower()
+        if action_clean not in ("replace", "add"):
+            raise ValueError(f"action must be 'replace' or 'add', got {action!r}")
+
+        clean_name = str(signal_name or "").strip()
+        if not clean_name:
+            raise ValueError("signal_name must be non-empty.")
+
+        if not isinstance(self.signal_plan, dict):
+            self.signal_plan = {"entry": [], "exit": []}
+        self.signal_plan.setdefault("entry", [])
+        self.signal_plan.setdefault("exit", [])
+
+        # Strict trader-mode validation of just the *new* signal. We do
+        # not re-validate existing entries because planner-generated plans
+        # legitimately mix entry filters into the entry list — re-checking
+        # would surface false positives for prior, already-accepted picks.
+        err = validate_signal_placement(clean_name, slot_clean, mode="strict")
+        if err is not None:
+            raise SignalPlacementValidationError([err])
+
+        # Validation passed — commit the change.
+        entries: list[dict] = self.signal_plan[slot_clean]
+        new_entry = {"name": clean_name, "params": dict(params or {})}
+
+        if replace_name:
+            # Explicit swap — replace the named signal in place.
+            for i, item in enumerate(entries):
+                if isinstance(item, dict) and item.get("name") == replace_name:
+                    entries[i] = new_entry
+                    break
+            else:
+                entries.append(new_entry)
+        elif action_clean == "replace":
+            # No specific target named, but the trader said "change/swap/use".
+            # Wipe the slot so the new signal becomes the sole occupant —
+            # this matches "change entry signal to X" expectations rather
+            # than silently appending to the prior planner-generated set.
+            entries.clear()
+            entries.append(new_entry)
+        else:
+            # action == "add" — append without disturbing existing entries.
+            entries.append(new_entry)
+        return self.signal_plan
+
+    def remove_signal(self, slot: str, signal_name: str) -> dict:
+        """Remove the first occurrence of ``signal_name`` from the ``slot`` list.
+
+        Returns the updated ``signal_plan`` (or an empty plan dict if there was
+        nothing to remove). Silent no-op if the signal is not present.
+        """
+        slot_clean = str(slot or "").strip().lower()
+        if slot_clean not in ("entry", "exit"):
+            raise ValueError(f"slot must be 'entry' or 'exit', got {slot!r}")
+        if not isinstance(self.signal_plan, dict):
+            return {}
+        entries = self.signal_plan.get(slot_clean) or []
+        for i, item in enumerate(entries):
+            if isinstance(item, dict) and item.get("name") == signal_name:
+                entries.pop(i)
+                break
+        self.signal_plan[slot_clean] = entries
+        return self.signal_plan
+
     def apply_signal_plan(self, plan: dict):
         self.signal_plan = {
             key: value
@@ -1132,14 +1572,34 @@ class StrategyBuilder:
 
         if preview.get("market"):
             self.market = self._normalise_market(preview["market"])
+        # A symbol-bound validation error (e.g. "TATAMOTORS not found") is about
+        # ONE symbol. If this merge changes the symbol to a different one, that
+        # error is stale and must NOT be carried over or restored — otherwise a
+        # freshly-chosen INFY inherits the old TATAMOTORS error (WS1 task 5).
+        _incoming_symbol = (self.symbol or "").strip()
+        _preview_symbol = str(preview.get("symbol") or "").strip()
+        _symbol_changed = bool(_preview_symbol) and _preview_symbol != _incoming_symbol
         if preview.get("symbol"):
             self.symbol = preview["symbol"]
-        if preview.get("symbol_validation_code"):
+            # Symbol → market is the canonical direction; always override the
+            # market (or default) we may have just set above. Crypto symbols
+            # accidentally carrying market="indian_stocks" from an earlier
+            # session must NOT inherit the NSE trading window.
+            self.sync_market_from_symbol()
+            if _symbol_changed and _incoming_symbol:
+                # The builder already carried a different symbol this turn; any
+                # validation error it holds was about that prior symbol → clear it.
+                self.set_symbol_validation(None)
+        # Only restore a symbol-bound validation error from the draft when it
+        # still pertains to the symbol now in effect (i.e. the merge didn't swap
+        # the symbol out from under it).
+        _validation_is_stale = _symbol_changed and bool(_incoming_symbol)
+        if preview.get("symbol_validation_code") and not _validation_is_stale:
             self.set_symbol_validation(
                 str(preview["symbol_validation_code"]).strip(),
                 preview.get("symbol_validation_facts") if isinstance(preview.get("symbol_validation_facts"), dict) else {},
             )
-        elif preview.get("symbol_validation_message"):
+        elif preview.get("symbol_validation_message") and not _validation_is_stale:
             self.set_symbol_validation(None, message=str(preview["symbol_validation_message"]).strip())
         if preview.get("input_validation_code"):
             self.set_input_validation(
@@ -1165,6 +1625,12 @@ class StrategyBuilder:
             self.objective = str(preview["objective"]).lower().strip()
         if preview.get("goal"):
             self.goal = " ".join(str(preview["goal"]).split()).strip()
+        # original_user_prompt: never overwrite once set — it's the immutable
+        # record of the user's first substantive message describing the
+        # strategy. The agent router will keep summarizing into `goal` but
+        # this anchor must survive turn boundaries.
+        if preview.get("original_user_prompt") and not self.original_user_prompt:
+            self.original_user_prompt = str(preview["original_user_prompt"]).strip()
         if preview.get("daily_loss_cap_pct") is not None:
             self.daily_loss_cap = float(preview["daily_loss_cap_pct"])
         if preview.get("max_trade"):
@@ -1173,13 +1639,31 @@ class StrategyBuilder:
             self.entry_condition = preview["entry_condition"]
         if preview.get("exit_condition"):
             self.exit_condition = preview["exit_condition"]
+        if preview.get("short_entry_condition"):
+            self.short_entry_condition = preview["short_entry_condition"]
+        if preview.get("short_exit_condition"):
+            self.short_exit_condition = preview["short_exit_condition"]
+        # Restore the SDL ticket so a modify turn edits THIS strategy. Tolerant:
+        # a malformed/legacy draft just leaves _sdl as None (legacy modify path).
+        sdl_json = preview.get("sdl_json")
+        if isinstance(sdl_json, dict) and sdl_json:
+            try:
+                from app.planner.sdl import SDL
+                self._sdl = SDL.model_validate(sdl_json)
+            except Exception:
+                self._sdl = None
+        # Single risk store: restore the whole risk_execution_config FIRST, then
+        # overlay any explicit stop_loss_pct / take_profit_pct from the draft.
+        # (stop_loss/take_profit are read-through properties over this dict, so
+        # the previous order — set SL/TP, then replace the dict — silently wiped
+        # the just-set values whenever the persisted config omitted them.)
+        risk_execution_config = preview.get("risk_execution_config")
+        if isinstance(risk_execution_config, dict):
+            self.set_risk_execution_config(risk_execution_config)
         if preview.get("stop_loss_pct") is not None:
             self.stop_loss = float(preview["stop_loss_pct"])
         if preview.get("take_profit_pct") is not None:
             self.take_profit = float(preview["take_profit_pct"])
-        risk_execution_config = preview.get("risk_execution_config")
-        if isinstance(risk_execution_config, dict):
-            self.set_risk_execution_config(risk_execution_config)
         # Restore structural SL and trailing stop specs persisted in the draft
         stop_loss_spec = preview.get("stop_loss_spec")
         if isinstance(stop_loss_spec, dict) and stop_loss_spec:
@@ -1225,6 +1709,16 @@ class StrategyBuilder:
                     setattr(self, _f, float(v))
                 except (TypeError, ValueError):
                     pass
+
+        # Rehydrate the user-override set so tier refreshes triggered on
+        # subsequent turns continue to honour fields the user already
+        # explicitly set on a prior turn.
+        _overrides = preview.get("_phase10_user_overrides")
+        if isinstance(_overrides, (list, tuple, set)):
+            self._phase10_user_overrides = {
+                str(name) for name in _overrides
+                if str(name) in self._TIER_DERIVED_PHASE10_FIELDS
+            }
 
         if preview.get("user_input_confirmed"):
             self.user_input_confirmed = True
@@ -1327,6 +1821,10 @@ class StrategyBuilder:
         draft = {
             "mode": resolved_mode,
             "market": self.market,
+            # Asset class is derived from market and always surfaced so the UI
+            # (and any downstream consumer) doesn't have to re-infer it from
+            # the symbol. "equity_cash" | "crypto_spot" | None when unknown.
+            "asset_class": self.asset_class,
             "symbol": self.format_symbol(),
             "symbol_validation_code": self.symbol_validation_code,
             "symbol_validation_facts": self.symbol_validation_facts,
@@ -1342,8 +1840,21 @@ class StrategyBuilder:
             "experience": self.experience,
             "objective": self.objective,
             "goal": self.goal,
+            # original_user_prompt MUST be persisted across turns: builder is
+            # rebuilt on every chat turn and merge_preview() restores it from
+            # this draft. Without this serialization, the field resets to
+            # None after the first turn, defeating the fidelity validator.
+            "original_user_prompt": self.original_user_prompt,
             "entry_condition": self.entry_condition,
             "exit_condition": self.exit_condition,
+            "short_entry_condition": self.short_entry_condition,
+            "short_exit_condition": self.short_exit_condition,
+            # SDL ticket (JSON) so the next turn can MODIFY this strategy via the
+            # SDL path. None for legacy-built strategies.
+            "sdl_json": (
+                self._sdl.model_dump(mode="json")
+                if getattr(self, "_sdl", None) is not None else None
+            ),
             "stop_loss_pct": self.stop_loss,
             "take_profit_pct": self.take_profit,
             "indicators": self.extract_indicators(),
@@ -1393,6 +1904,10 @@ class StrategyBuilder:
             "volume_ratio_threshold":        self.volume_ratio_threshold,
             "position_sizing_mode":          self.position_sizing_mode,
             "max_capital_allocation_pct":    self.max_capital_allocation_pct,
+            # Sorted list so the draft JSON is stable across saves (sets
+            # serialise in unspecified order otherwise). The receiver
+            # converts back to a set in from_preview_json.
+            "_phase10_user_overrides":       sorted(self._phase10_user_overrides),
         }
 
         return draft
@@ -1430,6 +1945,19 @@ class StrategyBuilder:
                 exit_signals.append(
                     {"name": sig["name"], "params": dict(sig.get("params") or {})}
                 )
+
+        # Lenient safety net: the entry list legitimately contains filter
+        # signals from the planner output (planner appends entry_filter
+        # matches to entry_signals so the engine evaluates them as AND
+        # filters). Strict trader-mode validation is enforced earlier in
+        # `modify_signal` and `apply_signal_request`. This gate only
+        # catches hand-edited YAML or out-of-band mutations that put an
+        # exit-only signal in entry / vice versa.
+        assert_valid_signal_lists(
+            [sig["name"] for sig in entry_signals],
+            [sig["name"] for sig in exit_signals],
+            mode="lenient",
+        )
 
         strategy_block: dict = {
             "name": f"{self.format_symbol()} {self.timeframe} Strategy",
@@ -1484,12 +2012,29 @@ class StrategyBuilder:
         if self.direction and self.direction != "both":
             strategy_block["direction"] = self.direction
 
-        # Phase 10 — entry window
-        if self.entry_window_start or self.entry_window_end:
+        # Phase 12 — short leg. When the SDL produced a two-sided strategy the
+        # short conditions are formula strings; pass them through so the engine
+        # runs a separate short pass. Force direction=both so both passes run.
+        if self.short_entry_condition:
+            strategy_block["short_entry_condition"] = self.short_entry_condition
+            strategy_block["short_exit_condition"] = (
+                self.short_exit_condition
+                or "PROFIT >= TAKE_PROFIT_TARGET OR LOSS <= -STOP_LOSS_TARGET"
+            )
+            strategy_block["direction"] = "both"
+
+        # Phase 10 — entry window. If the user explicitly set either bound,
+        # those win. Otherwise apply an asset-class default: Indian stocks get
+        # the NSE 09:15–15:30 IST session; crypto gets nothing (24/7 market).
+        ew_start = self.entry_window_start
+        ew_end   = self.entry_window_end
+        if not (ew_start or ew_end):
+            ew_start, ew_end = _default_entry_window_for_market(self.market)
+        if ew_start or ew_end:
             strategy_block["entry_window"] = {
                 k: v for k, v in {
-                    "start": self.entry_window_start,
-                    "end":   self.entry_window_end,
+                    "start": ew_start,
+                    "end":   ew_end,
                     "timezone": "Asia/Kolkata",
                 }.items() if v
             }
@@ -1607,7 +2152,7 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
     # ── Stop loss ─────────────────────────────────────────────────────────────
     # "SL 2%", "stop loss at 1.5%", "stop at 1%", "2% stop"
     sl_match = re.search(
-        r"\b(?:stop[\s\-]*loss|stoploss|sl|stop)\s*[=:@]?\s*(?:at\s+)?"
+        r"\b(?:stop[\s\-]*loss|stoploss|sl|stop)\s*[=:@]?\s*(?:(?:at|to)\s+)?"
         r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
         r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:stop|sl|stop[\s\-]*loss)\b",
         text, re.IGNORECASE,
@@ -1618,11 +2163,14 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             rms["stop_loss_pct"] = {"value": val, "source": "user"}
 
     # ── Take profit ───────────────────────────────────────────────────────────
-    # "TP 5%", "target 3%", "take profit 4%", "3% target"
+    # "TP 5%", "target 3%", "take profit 4%", "3% target", "3% take profit"
     tp_match = re.search(
-        r"\b(?:take[\s\-]*profit|takeprofit|tp|target|tgt)\s*[=:@]?\s*(?:at\s+)?"
+        # Keyword-first: "take profit 3%", "TP 3%", "target 3%"
+        r"\b(?:take[\s\-]*profit|takeprofit|tp|target|tgt)\s*[=:@]?\s*(?:(?:at|to)\s+)?"
         r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
-        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:target|tp|profit)\b",
+        # Digit-first: "3% take profit", "3% TP", "3% target", "3% profit"
+        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+"
+        r"(?:take[\s\-]*profit|takeprofit|target|tp|profit)\b",
         text, re.IGNORECASE,
     )
     if tp_match:
@@ -1631,22 +2179,110 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             rms["take_profit_pct"] = {"value": val, "source": "user"}
 
     # ── Risk:Reward ratio ─────────────────────────────────────────────────────
-    # Matches: "1:2", "1:3 RR", "R:R 1:2", "risk reward 1:3", "minimum 1:2"
-    rr_match = re.search(
-        r"\b(?:r:r|rr|risk[\s:]*(?:to[\s:]*)?reward|reward[\s:]*(?:to[\s:]*)?risk"
-        r"|minimum\s+)?1\s*[:/]\s*(\d+(?:\.\d+)?)\b",
-        text, re.IGNORECASE,
+    # Captures N:M ratios and resolves the order from any nearby keyword.
+    #
+    # Ordering rule:
+    #   * The keyword that is *immediately adjacent* to the digits (within a
+    #     ~25-char window before or after) determines which side is reward and
+    #     which is risk. If the closest keyword starts with "reward" the first
+    #     digit is reward; otherwise it is risk.
+    #   * "3:7 reward risk ratio" → reward=3, risk=7, ratio=3/7≈0.43
+    #   * "5:2 risk to reward"    → risk=5, reward=2, ratio=2/5=0.40
+    #   * "1:3 RR" / "R:R 1:2"    → "rr" is symmetric — assume the legacy
+    #                               1:N convention (first is risk).
+    rr_keyword_re = re.compile(
+        r"\b("
+        r"reward(?:[\s/\-]+to)?[\s/\-]+risk(?:[\s\-]*ratio)?"
+        r"|risk(?:[\s/\-]+to)?[\s/\-]+reward(?:[\s\-]*ratio)?"
+        r"|reward[\s\-]*ratio"
+        r"|risk[\s\-]*ratio"
+        r"|r\s*:?\s*r"
+        r"|rr"
+        r")\b",
+        re.IGNORECASE,
     )
-    if rr_match:
-        val = float(rr_match.group(1))
-        if val > 0:
-            rms["risk_reward"] = {"value": val, "source": "user"}
+
+    def _classify(label: str) -> str:
+        """Return 'reward_first', 'risk_first', or 'symmetric'."""
+        l = re.sub(r"\s+", " ", label.strip().lower())
+        if l in {"rr", "r:r", "r r"}:
+            return "symmetric"
+        # Whichever word appears first names the first digit.
+        ri = l.find("risk")
+        re_ = l.find("reward")
+        if ri == -1:
+            return "reward_first"
+        if re_ == -1:
+            return "risk_first"
+        return "reward_first" if re_ < ri else "risk_first"
+
+    rr_val: float | None = None
+    rr_resolved = False
+    # Walk every N:M occurrence and try to attach the nearest keyword.
+    for digit_match in re.finditer(r"\b(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\b", text):
+        a = float(digit_match.group(1))
+        b = float(digit_match.group(2))
+        if a <= 0 or b <= 0:
+            continue
+        d_start, d_end = digit_match.span()
+        # Look ±25 chars for a keyword
+        window = text[max(0, d_start - 25): min(len(text), d_end + 25)]
+        kw_match = rr_keyword_re.search(window)
+        if kw_match:
+            order = _classify(kw_match.group(1))
+            if order == "reward_first":
+                rr_val = a / b
+            elif order == "risk_first":
+                rr_val = b / a
+            else:  # symmetric ("rr") → legacy 1:N convention (risk first)
+                rr_val = b / a if abs(a - 1.0) < 1e-9 else a / b
+            rr_resolved = True
+            break
+        # No keyword nearby — record as ambiguous if RR keywords exist anywhere
+        if rr_keyword_re.search(text):
+            rms.setdefault("risk_reward_ambiguous", {
+                "raw": f"{a:g}:{b:g}",
+                "candidates": [round(a / b, 4), round(b / a, 4)],
+                "source": "user",
+            })
+
+    # Final legacy fallback: bare "1:N" anywhere
+    if not rr_resolved:
+        m = re.search(r"\b1\s*[:/]\s*(\d+(?:\.\d+)?)\b", text)
+        if m:
+            rr_val = float(m.group(1))
+
+    # Bare-ratio fallback: "2.5 risk-reward", "2 RR", "RR of 1.5", "1.5R reward".
+    # Captures a single float adjacent to a reward/risk keyword (no colon/slash).
+    if rr_val is None:
+        bare = re.search(
+            r"\b(\d+(?:\.\d+)?)\s*(?:r\b|risk[\s\-]*reward|reward[\s\-]*risk|risk[\s:]*reward|r:?r)"
+            r"|(?:rr|risk[\s\-]*reward|reward[\s\-]*risk|risk[\s:]*reward)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)",
+            text, re.IGNORECASE,
+        )
+        if bare:
+            for g in bare.groups():
+                if g:
+                    try:
+                        candidate = float(g)
+                    except (TypeError, ValueError):
+                        continue
+                    # Reasonable RR range to avoid false positives (e.g. timeframe "5m" or year "2025")
+                    if 0.1 <= candidate <= 20.0:
+                        rr_val = candidate
+                        break
+
+    if rr_val is not None and rr_val > 0:
+        rms["risk_reward"] = {"value": round(rr_val, 4), "source": "user"}
+        rms.pop("risk_reward_ambiguous", None)
 
     # ── Per-trade risk ────────────────────────────────────────────────────────
+    # Allow intervening adverbs: "risk only 2%", "risk just 1%", "only risk 1%".
     ptr_match = re.search(
         r"\b(?:risk|per[\s\-]*trade[\s\-]*risk|per\s+trade)\s+"
+        r"(?:only\s+|just\s+|max(?:imum)?\s+|up\s+to\s+|at\s+most\s+)?"
         r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(%|percent|pct)\s*(?:of\s+capital|per\s+trade)?"
-        r"|\brisk\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
+        r"|\brisk\s+(?:only\s+|just\s+|max(?:imum)?\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
         text, re.IGNORECASE,
     )
     if ptr_match:
@@ -1655,10 +2291,12 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             rms["per_trade_risk"] = {"value": val, "source": "user"}
 
     # ── Daily loss cap ────────────────────────────────────────────────────────
+    # Allow optional "of" / "at" / ":" between the keyword and the number.
     dlc_match = re.search(
         r"\b(?:daily[\s\-]*(?:loss[\s\-]*)?(?:cap|limit|sl|stop|loss)"
         r"|max[\s\-]*daily[\s\-]*loss|cap\s+loss(?:es)?|stop\s+trading\s+after)\s+"
-        r"(?:(?:a|an)\s+)?(?:₹\s*)?(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|percent|pct|k)?"
+        r"(?:(?:a|an)\s+)?(?:of\s+|at\s+|to\s+|:\s+)?(?:₹\s*)?"
+        r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|percent|pct|k)?"
         r"|\bdaily\s+(?:sl|stop[\s\-]*loss)\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
         text, re.IGNORECASE,
     )
@@ -1687,34 +2325,318 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             if n_match:
                 rms["max_positions"] = {"value": int(n_match.group(1)), "source": "user"}
 
-    # Explicit "max N trades" pattern
-    max_match = re.search(r"\bmax\s+(\d+)\s+(?:trades?|positions?)\b", text, re.IGNORECASE)
-    if max_match and "max_positions" not in rms:
-        rms["max_positions"] = {"value": int(max_match.group(1)), "source": "user"}
+    # Explicit "max N trades" pattern.
+    # NOTE: This is the user's per-session/per-day cap on OPEN positions — it
+    # maps to the canonical `max_trades` field used by risk_execution_config
+    # (NOT `max_consecutive_losses`, which is a different concept). The legacy
+    # alias `max_positions` is also written for callers that still read it.
+    max_match = re.search(r"\bmax(?:imum)?\s+(\d+)\s+(?:open\s+)?(?:trades?|positions?)\b", text, re.IGNORECASE)
+    if max_match:
+        n = int(max_match.group(1))
+        rms.setdefault("max_trades",   {"value": n, "source": "user"})
+        rms.setdefault("max_positions", {"value": n, "source": "user"})
 
-    # ── Trailing stop ─────────────────────────────────────────────────────────
-    # "trail SL after 2%", "trailing stop 2%", "trail 2%"
-    trail_match = re.search(
-        r"\btrail(?:ing)?[\s\-]*(?:stop|sl|stop[\s\-]*loss|stop\s*loss)?\s*"
-        r"(?:after|of|by|at)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
+    # ── Max consecutive losses ────────────────────────────────────────────────
+    # Distinct from max_trades: this is a session-level circuit breaker.
+    cl_match = re.search(
+        r"\b(?:stop|pause|halt)\s+(?:trading\s+)?after\s+(\d+)\s+(?:consecutive\s+)?(?:losses?|losing\s+trades?)"
+        r"|max(?:imum)?\s+(\d+)\s+consecutive\s+(?:losses?|losing\s+trades?)"
+        r"|(\d+)\s+(?:straight|consecutive)\s+(?:losses?|losing\s+trades?)\s+(?:and\s+)?stop"
+        r"|no\s+more\s+than\s+(\d+)\s+(?:consecutive\s+)?(?:losses?|losing\s+trades?)",
         text, re.IGNORECASE,
     )
-    if trail_match:
-        val = float(trail_match.group(1))
-        if val > 0:
-            rms["trailing_stop_pct"] = {"value": val, "source": "user"}
+    if cl_match:
+        for g in cl_match.groups():
+            if g:
+                rms["max_consecutive_losses"] = {"value": int(g), "source": "user"}
+                break
+
+    # ── Cooldown after loss / profit ──────────────────────────────────────────
+    cd_loss = re.search(
+        r"\b(?:wait|cooldown|rest)\s+(?:for\s+)?(\d+)\s+(?:bars?|candles?)\s+after\s+(?:a\s+)?(?:loss|losing\s+trade|stop)"
+        r"|(\d+)[\s\-]+bar\s+cooldown\s+(?:after|post)[\s\-]+(?:loss|stop|losing)"
+        r"|cooldown\s+of\s+(\d+)\s+bars?\s+after\s+(?:a\s+)?(?:loss|losing)"
+        r"|after\s+(?:a\s+)?(?:loss|stop)\s+wait\s+(\d+)\s+(?:bars?|candles?)",
+        text, re.IGNORECASE,
+    )
+    if cd_loss:
+        for g in cd_loss.groups():
+            if g:
+                rms["cooldown_bars_after_loss"] = {"value": int(g), "source": "user"}
+                break
+    cd_win = re.search(
+        r"\b(?:wait|cooldown|rest)\s+(?:for\s+)?(\d+)\s+(?:bars?|candles?)\s+after\s+(?:a\s+)?(?:win|winning|profit|gain)"
+        r"|(\d+)[\s\-]+bar\s+cooldown\s+(?:after|post)[\s\-]+(?:win|profit|winning|gain)"
+        r"|cooldown\s+of\s+(\d+)\s+bars?\s+after\s+(?:a\s+)?(?:win|profit|winning|gain)"
+        r"|after\s+(?:a\s+)?(?:win|profit)\s+wait\s+(\d+)\s+(?:bars?|candles?)",
+        text, re.IGNORECASE,
+    )
+    if cd_win:
+        for g in cd_win.groups():
+            if g:
+                rms["cooldown_bars_after_profit"] = {"value": int(g), "source": "user"}
+                break
+
+    # ── Max spread (bps) ──────────────────────────────────────────────────────
+    sp_match = re.search(
+        r"\b(?:max(?:imum)?\s+)?spread\s+(?:of\s+|below\s+|under\s+|<\s*|≤\s*)?(\d+(?:\.\d+)?)\s*(?:bps?|basis\s+points?)"
+        r"|spread\s+(?:filter|gate|limit)\s+(\d+(?:\.\d+)?)\s*(?:bps?|basis\s+points?)"
+        r"|(\d+(?:\.\d+)?)\s*(?:bps?|basis\s+points?)\s+(?:max(?:imum)?\s+)?spread",
+        text, re.IGNORECASE,
+    )
+    if sp_match:
+        for g in sp_match.groups():
+            if g:
+                rms["max_spread_bps"] = {"value": float(g), "source": "user"}
+                break
+
+    # ── Entry confirmation bars ───────────────────────────────────────────────
+    cf_match = re.search(
+        r"\b(\d+)[\s\-]+(?:bar|candle)\s+(?:close|confirmation|confirm)"
+        r"|(?:wait\s+for\s+|need\s+)?(\d+)\s+(?:consecutive\s+)?(?:bars?|candles?)\s+(?:to\s+)?confirm"
+        r"|confirmation\s+on\s+(\d+)\s+(?:bars?|candles?)"
+        r"|(\d+)\s+bars?\s+(?:of\s+)?(?:confirmation|signal)",
+        text, re.IGNORECASE,
+    )
+    if cf_match:
+        for g in cf_match.groups():
+            if g:
+                rms["entry_confirmation_bars"] = {"value": int(g), "source": "user"}
+                break
+
+    # ── Max capital allocation per trade ──────────────────────────────────────
+    # Must explicitly mention "allocation" / "max" / "deploy" / "exposure" so
+    # we don't accidentally match generic "risk 2% capital per trade" (that's
+    # `per_trade_risk`, not allocation).
+    ca_match = re.search(
+        # "20% maximum capital allocation per trade"
+        r"\b(\d+(?:\.\d+)?)\s*%\s+(?:max(?:imum)?\s+)?(?:capital\s+)?allocation(?:\s+per\s+trade)?"
+        # "maximum 20% capital allocation"
+        r"|\bmax(?:imum)?\s+(\d+(?:\.\d+)?)\s*%\s+(?:of\s+)?capital(?:\s+allocation)?(?:\s+per\s+trade)?"
+        # "allocate up to 20%" / "deploy 20%"
+        r"|\b(?:allocate|deploy|expose)\s+(?:up\s+to\s+)?(\d+(?:\.\d+)?)\s*%"
+        # "cap position size at 20%", "limit allocation to 20%"
+        r"|\b(?:cap|limit)\s+(?:position\s+|trade\s+)?(?:size|allocation|exposure)\s+(?:to\s+|at\s+)?(\d+(?:\.\d+)?)\s*%"
+        # "20% exposure per trade"
+        r"|\b(\d+(?:\.\d+)?)\s*%\s+exposure(?:\s+per\s+trade)?",
+        text, re.IGNORECASE,
+    )
+    if ca_match:
+        for g in ca_match.groups():
+            if g:
+                rms["max_capital_allocation_pct"] = {"value": float(g), "source": "user"}
+                break
+
+    # ── Position sizing mode ──────────────────────────────────────────────────
+    ps_match_table = (
+        (r"risk[\s\-]+based(?:\s+(?:position\s+)?sizing)?",      "risk_based"),
+        (r"size\s+(?:based\s+on|by)\s+risk",                     "risk_based"),
+        (r"fixed[\s\-]+(?:fractional|fraction)(?:\s+sizing)?",   "fixed_fractional"),
+        (r"(?:fixed|flat)\s+lot\s+size",                         "fixed_units"),
+        (r"fixed\s+units?(?:\s+per\s+trade)?",                   "fixed_units"),
+    )
+    for pat, mode in ps_match_table:
+        if re.search(pat, text, re.IGNORECASE):
+            rms.setdefault("position_sizing_mode", {"value": mode, "source": "user"})
+            break
+
+    # ── Gap filter ────────────────────────────────────────────────────────────
+    # Tolerate intervening words: "avoid trading on big gap-up or gap-down".
+    # The [\s\S]{0,40} window catches phrases like "avoid trading on ... gap".
+    has_avoid_kw = re.search(
+        r"\b(?:ignore|avoid|skip|filter\s+out|no\s+trade(?:s)?\s+on|no\s+entries?\s+on)\b",
+        text, re.IGNORECASE,
+    )
+    if has_avoid_kw:
+        # Detect direction (up/down/both) within a 60-char window after the keyword
+        kw_end = has_avoid_kw.end()
+        window = text[kw_end: kw_end + 100]
+        gap_up   = re.search(r"\bgap(?:s|[\s\-]+up)\b|\bgap[\s\-]+up\b", window, re.IGNORECASE)
+        gap_down = re.search(r"\bgap[\s\-]+down\b", window, re.IGNORECASE)
+        if gap_up and gap_down:
+            rms.setdefault("gap_filter", {"value": "ignore_both", "source": "user"})
+        elif gap_up:
+            rms.setdefault("gap_filter", {"value": "ignore_gap_up", "source": "user"})
+        elif gap_down:
+            rms.setdefault("gap_filter", {"value": "ignore_gap_down", "source": "user"})
+        elif re.search(r"\bgap(?:s|ping)?\b", window, re.IGNORECASE):
+            rms.setdefault("gap_filter", {"value": "ignore_both", "source": "user"})
+
+    # Gap threshold % — captures "gaps above 1%", "gap-up over 0.5%", "more
+    # than 1% gap", "gaps larger than 0.8%".
+    gap_thresh = re.search(
+        r"\bgap(?:s|[\s\-]+up|[\s\-]+down|[\s\-]+open(?:ing)?)?\b"
+        r"[\s\S]{0,30}?"
+        r"(?:above|over|>|>=|≥|larger\s+than|more\s+than|greater\s+than|exceeding)"
+        r"\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)"
+        r"|(?:gap(?:s)?\s+(?:above|over|>=|larger\s+than|more\s+than))\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)"
+        r"|(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+gap(?:s|[\s\-]+up|[\s\-]+down)?",
+        text, re.IGNORECASE,
+    )
+    if gap_thresh:
+        for g in gap_thresh.groups():
+            if g:
+                try:
+                    rms["gap_threshold_pct"] = {"value": float(g), "source": "user"}
+                except (TypeError, ValueError):
+                    pass
+                break
+
+    # ── ATR-based stop loss (drives stop_loss_spec.type = "atr") ──────────────
+    atr_stop_match = re.search(
+        r"\b(?:atr[\s\-]+based|atr)\s+(?:stop|sl|stop[\s\-]*loss)"
+        r"|stop\s+loss\s+(?:based\s+on|of)\s+atr"
+        r"|use\s+atr\s+(?:for\s+)?(?:stop|sl)"
+        r"|(\d+(?:\.\d+)?)\s*x?\s*atr\s+(?:stop|sl|stop[\s\-]*loss)",
+        text, re.IGNORECASE,
+    )
+    if atr_stop_match:
+        multiplier = None
+        for g in atr_stop_match.groups():
+            if g:
+                try:
+                    multiplier = float(g)
+                except (TypeError, ValueError):
+                    pass
+                break
+        rms["atr_stop"] = {
+            "value": True,
+            "source": "user",
+            "type": "atr",
+            "multiplier": multiplier,
+        }
+
+    # ── Square-off / time exit ────────────────────────────────────────────────
+    # Captures "square off before close" / "exit all by 3:15" / "close all
+    # positions at 15:15" — sets a time_exit cutoff that the live execution
+    # layer reads as a hard intraday close.
+    so_match = re.search(
+        # Verb phrase: "square off", "exit", "close" — optionally followed
+        # by "all positions/trades" etc.
+        r"\b(?:square[\s\-]+off|exit|close|flatten)\b"
+        r"[\s\S]{0,40}?"
+        # Cutoff: "market close", "EOD", "by 15:15", "before close"
+        r"(?:before|by|at|prior\s+to)?\s*"
+        r"(?:market[\s\-]+close|eod|end[\s\-]+of[\s\-]+day|(\d{1,2}:\d{2}))",
+        text, re.IGNORECASE,
+    )
+    if so_match:
+        explicit_time = so_match.group(1)
+        # Indian market close default: 15:30 IST. "before close" typically
+        # means a few minutes before (15:15 is the conventional intraday
+        # square-off used by Indian brokers).
+        if explicit_time:
+            parts = explicit_time.split(":")
+            cutoff = f"{int(parts[0]):02d}:{parts[1]}"
+        elif "before" in so_match.group(0).lower():
+            cutoff = "15:15"
+        else:
+            cutoff = "15:30"
+        rms["time_exit"] = {
+            "value": cutoff,
+            "source": "user",
+            "timezone": "Asia/Kolkata",
+        }
+
+    # ── HTF (higher-timeframe) confirmation flag ──────────────────────────────
+    # "higher timeframe confirmation", "HTF filter", "1h confirmation",
+    # "daily trend filter". We capture the FACT that the user wants HTF
+    # gating; the actual rule (TF + condition) is built by the planner.
+    htf_match = re.search(
+        r"\bhigher[\s\-]+timeframe\s+(?:confirmation|filter|trend|alignment)"
+        r"|\bhtf\s+(?:confirmation|filter|trend|alignment)"
+        r"|(\d+[hmd])\s+(?:confirmation|filter|trend|alignment)"
+        r"|daily\s+(?:trend\s+)?(?:filter|alignment)"
+        r"|weekly\s+(?:trend\s+)?(?:filter|alignment)"
+        r"|multi[\s\-]+timeframe(?:\s+confirmation)?",
+        text, re.IGNORECASE,
+    )
+    if htf_match:
+        explicit_tf = None
+        for g in htf_match.groups():
+            if g and re.match(r"\d+[hmd]", g, re.IGNORECASE):
+                explicit_tf = g.lower()
+                break
+        # Default HTF heuristic: one step up from the strategy's chart TF
+        rms["htf_confirmation"] = {
+            "value": True,
+            "source": "user",
+            "explicit_timeframe": explicit_tf,
+        }
+
+    # ── Trailing stop ─────────────────────────────────────────────────────────
+    # Captures:
+    #   - "trail SL after 2%", "trailing stop 2%", "trail 2%" → distance
+    #   - "trailing stop once trade reaches 2% profit" → ACTIVATION %
+    #   - "activate trailing stop after 1% gain" → activation
+    # We try the activation pattern first because "trailing stop … N% profit"
+    # is unambiguous; only fall back to distance interpretation otherwise.
+    activation_match = re.search(
+        r"\btrail(?:ing)?\s+(?:stop|sl|stop[\s\-]*loss)\s*"
+        r"(?:once|after|when)?[\s\S]{0,40}?"
+        r"(?:reach(?:es)?|hit(?:s)?|cross(?:es)?|exceed(?:s)?|gain(?:s)?|profit\s+of|at)\s+"
+        r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s*(?:profit|gain)?"
+        r"|\bactivate\s+trail(?:ing)?\s+(?:stop|sl)?\s*"
+        r"(?:after|when)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)"
+        r"|\btrail(?:ing)?\s+(?:stop|sl)?\s*"
+        r"(?:once|after)\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:profit|gain)",
+        text, re.IGNORECASE,
+    )
+    if activation_match:
+        for g in activation_match.groups():
+            if g:
+                try:
+                    rms["trailing_stop_activate_after_pct"] = {
+                        "value": float(g), "source": "user",
+                    }
+                except (TypeError, ValueError):
+                    pass
+                break
+    else:
+        # Plain distance: "trail SL by 2%", "trailing stop 2%"
+        trail_match = re.search(
+            r"\btrail(?:ing)?[\s\-]*(?:stop|sl|stop[\s\-]*loss|stop\s*loss)?\s*"
+            r"(?:after|of|by|at)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
+            text, re.IGNORECASE,
+        )
+        if trail_match:
+            val = float(trail_match.group(1))
+            if val > 0:
+                rms["trailing_stop_pct"] = {"value": val, "source": "user"}
 
     # ── Trading window ────────────────────────────────────────────────────────
+    # Also accept "only trades between 9:30 AM to 11:30 AM" / "between 9:30 and
+    # 11:30" / "during 9:30-11:30". The "trade/entry" verb prefix is now
+    # optional; instead we anchor on the time-of-day pair near a window keyword.
     tw_match = re.search(
-        r"\b(?:trade|entry|entries|no\s+entries?)\s+(?:only\s+)?(?:from\s+)?"
-        r"(\d{1,2}:\d{2})\s*(?:-|to|–|till|until)\s*(\d{1,2}:\d{2})",
+        # Verb-prefixed: "trade only from 9:30 to 11:30"
+        r"\b(?:trade|entry|entries|no\s+entries?|trades?\s+only)\s+(?:only\s+)?"
+        r"(?:from\s+|between\s+|during\s+)?"
+        r"(\d{1,2}:\d{2})(?:\s*am|\s*pm)?\s*(?:-|to|–|till|until|and)\s*"
+        r"(\d{1,2}:\d{2})(?:\s*am|\s*pm)?"
+        # Bare "between 9:30 AM to 11:30 AM"
+        r"|\bbetween\s+(\d{1,2}:\d{2})(?:\s*am|\s*pm)?\s*"
+        r"(?:-|to|–|till|until|and)\s*(\d{1,2}:\d{2})(?:\s*am|\s*pm)?",
         text, re.IGNORECASE,
     )
     if tw_match:
-        rms["trading_window"] = {
-            "value": f"{tw_match.group(1)}-{tw_match.group(2)}",
-            "source": "user",
-        }
+        groups = tw_match.groups()
+        start = next((g for g in groups[:2] if g), None) or groups[2]
+        end = (groups[1] or groups[3]) if len(groups) >= 4 else groups[1]
+        if start and end:
+            # Zero-pad single-digit hours: "9:30" → "09:30"
+            def _pad(t: str) -> str:
+                parts = t.split(":")
+                if len(parts) == 2 and parts[0].isdigit():
+                    return f"{int(parts[0]):02d}:{parts[1]}"
+                return t
+            start, end = _pad(start), _pad(end)
+            rms["trading_window"] = {
+                "value": f"{start}-{end}",
+                "source": "user",
+            }
+            rms["entry_window_start"] = {"value": start, "source": "user"}
+            rms["entry_window_end"]   = {"value": end,   "source": "user"}
     else:
         cutoff = re.search(
             r"\b(?:no\s+entries?\s+after|exit\s+(?:all\s+)?by|close\s+(?:all\s+)?by)\s+(\d{1,2}:\d{2})\b",
@@ -1725,6 +2647,26 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
                 "value": f"09:15-{cutoff.group(1)}",
                 "source": "user",
             }
+            rms["entry_window_start"] = {"value": "09:15", "source": "user"}
+            rms["entry_window_end"]   = {"value": cutoff.group(1), "source": "user"}
+
+    # ── Volume ratio threshold ────────────────────────────────────────────────
+    # "volume at least 1.5x average", "1.5× the volume", "above-average volume of 2x"
+    vol_match = re.search(
+        r"\bvolume\s+(?:at\s+least\s+|above\s+|over\s+|>\s*|≥\s*)?"
+        r"(\d+(?:\.\d+)?)\s*(?:x|×|times?)\s*(?:the\s+)?(?:avg|average|mean)?"
+        r"|(\d+(?:\.\d+)?)\s*(?:x|×|times?)\s+(?:the\s+)?(?:avg|average|mean)\s+volume"
+        r"|volume\s+(?:spike|surge)\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*(?:x|×)",
+        text, re.IGNORECASE,
+    )
+    if vol_match:
+        for g in vol_match.groups():
+            if g:
+                try:
+                    rms["volume_ratio_threshold"] = {"value": float(g), "source": "user"}
+                except (TypeError, ValueError):
+                    pass
+                break
 
     # ── Structural stop loss ──────────────────────────────────────────────────
     # "opening range low as structural stop loss", "SL at ORB candle low",
@@ -1823,7 +2765,20 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
     ):
         builder.objective = "positional"
 
-    # ── Experience — infer from vocabulary sophistication ────────────────────
+    # ── Experience — direct keyword matches take priority ────────────────────
+    if not builder.experience:
+        direct = re.search(
+            r"\b(beginner|beginner[\s\-]+friendly|beginner[\s\-]+level|novice)\b",
+            text, re.IGNORECASE,
+        )
+        if direct:
+            builder.experience = "beginner"
+        elif re.search(r"\b(intermediate|moderate[\s\-]+level)\b", text, re.IGNORECASE):
+            builder.experience = "intermediate"
+        elif re.search(r"\b(expert|advanced|pro|seasoned|experienced)\b", text, re.IGNORECASE):
+            builder.experience = "expert"
+
+    # ── Experience — infer from vocabulary sophistication (fallback) ─────────
     if not builder.experience:
         expert_cues = re.search(
             r"\b(orb|vwap\s+anchor|swing\s+low|swing\s+high|bos|fvg|fair\s*value\s*gap"
@@ -1834,9 +2789,12 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
             text, re.IGNORECASE,
         )
         beginner_cues = re.search(
-            r"\b(what\s+is|i\s+don.?t\s+know|kuch\s+nahi\s+pata|i.?m\s+new"
+            r"\b(?:what\s+is|i\s+don.?t\s+know|kuch\s+nahi\s+pata|i.?m\s+new"
             r"|explain|how\s+does|beginner|beginner[- ]friendly|beginner[- ]level"
-            r"|simple\s+(?:intraday|swing|strategy|trading)|basic\s+(?:intraday|swing|strategy)"
+            # "simple|basic|easy" followed by a strategy-type word
+            r"|(?:simple|basic|easy)\s+(?:intraday|swing|strategy|trading|rsi|macd"
+            r"|breakout|setup|trade|approach|momentum|trend|reversal|scalp)"
+            r"|easy[\s\-]+to[\s\-]+follow"
             r"|start(?:ing)?\s+(?:with|from\s+scratch)"
             r"|never\s+traded|first\s+time)\b",
             text, re.IGNORECASE,
@@ -1864,11 +2822,9 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
         existing["rms_sources"] = rms_sources
         builder.risk_execution_config = existing
 
-        # Mirror onto builder direct attributes
-        if "stop_loss_pct" in rms and builder.stop_loss is None:
-            builder.stop_loss = rms["stop_loss_pct"]["value"]
-        if "take_profit_pct" in rms and builder.take_profit is None:
-            builder.take_profit = rms["take_profit_pct"]["value"]
+        # stop_loss / take_profit need no mirror: they are read-through
+        # properties over risk_execution_config["stop_loss_pct" / "take_profit_pct"]
+        # which we just wrote above. daily_loss_cap is still a plain attribute.
         if "daily_loss_cap" in rms and builder.daily_loss_cap is None:
             builder.daily_loss_cap = rms["daily_loss_cap"]["value"]
 
@@ -1898,6 +2854,94 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
                 "distance_pct": rms["trailing_stop_pct"]["value"],
                 "source": "user",
             }
+
+        # Trailing-stop activation threshold (no distance given) — the
+        # engine treats `activate_after_pct` as the "kick in once profit
+        # reaches N%" gate. We default distance to 1% if user didn't say.
+        if "trailing_stop_activate_after_pct" in rms:
+            activate = rms["trailing_stop_activate_after_pct"]["value"]
+            if builder.trailing_stop_spec is None:
+                builder.trailing_stop_spec = {
+                    "type": "percent",
+                    "activate_after_pct": activate,
+                    "source": "user",
+                }
+            else:
+                spec = dict(builder.trailing_stop_spec)
+                spec.setdefault("activate_after_pct", activate)
+                builder.trailing_stop_spec = spec
+
+        # ATR-based stop loss → builder.stop_loss_spec
+        if "atr_stop" in rms and builder.stop_loss_spec is None:
+            atr_entry = rms["atr_stop"]
+            spec: dict[str, Any] = {
+                "type": "atr",
+                "source": "user",
+            }
+            if atr_entry.get("multiplier") is not None:
+                spec["multiplier"] = atr_entry["multiplier"]
+            spec["window"] = 14
+            builder.stop_loss_spec = spec
+
+        # Square-off / time_exit → builder.time_exit
+        if "time_exit" in rms and not builder.time_exit:
+            te = rms["time_exit"]
+            builder.time_exit = {
+                "exit_time": te["value"],
+                "timezone": te.get("timezone", "Asia/Kolkata"),
+                "source": "user",
+            }
+
+        # HTF confirmation flag → seed builder.htf_rules with a sensible default
+        # if empty. The orchestrator may refine this with a more specific
+        # condition; we only ensure the user's "higher timeframe confirmation"
+        # intent results in AT LEAST one rule.
+        if "htf_confirmation" in rms and not builder.htf_rules:
+            tf_map = {"5m": "1h", "15m": "1h", "1h": "4h", "1d": "1w", "30m": "1h", "10m": "1h"}
+            explicit_tf = rms["htf_confirmation"].get("explicit_timeframe")
+            chosen_tf = explicit_tf or tf_map.get(builder.timeframe or "", "1h")
+            sentiment_dir = "bullish" if (builder.sentiment or "bullish") == "bullish" else "bearish"
+            builder.htf_rules = [{
+                "timeframe": chosen_tf,
+                "condition": (
+                    f"CLOSE > EMA(50)" if sentiment_dir == "bullish"
+                    else f"CLOSE < EMA(50)"
+                ),
+                "source": "user",
+                "intent": "trend_confirmation",
+            }]
+
+        # Gate fields → direct builder attributes (only fill when empty so the
+        # user's earlier turn isn't overwritten).
+        _gate_attr_fields = (
+            "max_consecutive_losses",
+            "cooldown_bars_after_loss",
+            "cooldown_bars_after_profit",
+            "max_spread_bps",
+            "entry_confirmation_bars",
+            "max_capital_allocation_pct",
+            "gap_filter",
+            "gap_threshold_pct",
+            "position_sizing_mode",
+            "max_trades",
+            "entry_window_start",
+            "entry_window_end",
+            "volume_ratio_threshold",
+        )
+        for fld in _gate_attr_fields:
+            if fld not in rms:
+                continue
+            entry = rms[fld]
+            value = entry.get("value")
+            if value is None:
+                continue
+            # max_trades lives on max_trade (display) + the rms dict; sync both
+            if fld == "max_trades":
+                if builder.max_trade is None:
+                    builder.max_trade = f"{int(value)} trades per day"
+            elif hasattr(builder, fld) and getattr(builder, fld) is None:
+                # Numeric int / float coercion happens implicitly on assignment
+                setattr(builder, fld, value)
 
     # ── Preset detection ──────────────────────────────────────────────────────
     # Always re-detect from the current message so a fresh message can correct

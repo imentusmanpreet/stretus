@@ -2,37 +2,65 @@ name: supertrend_bearish
 category: trend
 direction: bearish
 kind: regime
-roles: [entry_trigger, entry_filter, exit_trigger]
-description: "Supertrend bearish — price below the supertrend line."
-
-works_best_on: [5m, 10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+formula: CLOSE < SUPERTREND({window}, {multiplier})
+roles:
+- entry_trigger
+- entry_filter
+- exit_trigger
+- exit_filter
+description: Supertrend bearish — price below the supertrend line.
+works_best_on:
+- 5m
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when:
-  - sentiment: bullish
-    role: entry_trigger
-  - sentiment: bullish
-    role: entry_filter
-
-pairs_well_with: [adx_bearish_di, adx_strong_trend, ema_below, vwap_bearish]
-contradicts: [supertrend_bullish]
-
+- sentiment: bullish
+  role: entry_trigger
+- sentiment: bullish
+  role: entry_filter
+pairs_well_with:
+- adx_bearish_di
+- adx_strong_trend
+- ema_below
+- vwap_bearish
+contradicts:
+- supertrend_bullish
 params_by_timeframe:
-  1m:   {window: 7, multiplier: 3.0}
-  3m:   {window: 7, multiplier: 3.0}
-  5m:   {window: 10, multiplier: 3.0}
-  10m:  {window: 10, multiplier: 3.0}
-  15m:  {window: 10, multiplier: 3.0}
-  30m:  {window: 10, multiplier: 3.0}
-  1h:   {window: 14, multiplier: 3.0}
-  1d:   {window: 14, multiplier: 3.0}
-
+  1m:
+    window: 7
+    multiplier: 3.0
+  3m:
+    window: 7
+    multiplier: 3.0
+  5m:
+    window: 10
+    multiplier: 3.0
+  10m:
+    window: 10
+    multiplier: 3.0
+  15m:
+    window: 10
+    multiplier: 3.0
+  30m:
+    window: 10
+    multiplier: 3.0
+  1h:
+    window: 14
+    multiplier: 3.0
+  1d:
+    window: 14
+    multiplier: 3.0
 experience_fit:
   beginner: 1.0
   intermediate: 1.0
   expert: 0.9
-
 intent_fit:
   trend: 1.0
   momentum: 0.8
@@ -41,3 +69,10 @@ intent_fit:
   scalping: 0.5
   mean_reversion: 0.0
   confirmation: 1.0
+match_when:
+  phrases:
+  - super[\s\-]*trend\s+(?:turns?\s+|is\s+)?(?:bearish|negative|red|down)
+  - super[\s\-]*trend\s+short
+  - super[\s\-]*trend\s+sell
+  acts_as: entry_trigger
+  mirrors_to: supertrend_bullish

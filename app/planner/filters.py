@@ -28,11 +28,11 @@ def required_direction_for_role(
       "neutral" signals (e.g. inside_bar, volume_spike) are accepted as filters
       but only as a triggers if the user wants confirmation-style intent;
       we permit them universally and let the ranker down-weight as needed.
-    - exit_trigger: must be opposite-direction to entry sentiment, OR neutral.
+    - exit_trigger / exit_filter: must be opposite-direction to entry sentiment, OR neutral.
     """
     if role in {"entry_trigger", "entry_filter"}:
         return {sentiment, "neutral"}
-    if role == "exit_trigger":
+    if role in {"exit_trigger", "exit_filter"}:
         return {opposite_direction(sentiment), "neutral"}
     return {"bullish", "bearish", "neutral"}
 

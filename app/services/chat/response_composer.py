@@ -97,10 +97,43 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
         raise ValueError(f"Unsupported assistant response code: {code}")
 
     if code == "collect_input.welcome":
+        enabled: set[str] = set(facts.get("asset_classes") or [])
+        has_equity = "equity_cash" in enabled
+        has_crypto = "crypto_spot" in enabled
+        # No capabilities supplied \u2192 default to the multi-asset welcome.
+        if not enabled:
+            has_equity = True
+            has_crypto = True
+
+        if has_equity and has_crypto:
+            scope_line = (
+                "Your AI-powered platform for building and backtesting **algorithmic trading strategies** "
+                "across **Indian equities and crypto pairs** \u2014 no coding required."
+            )
+            asset_examples = "TCS, Reliance, HDFC Bank, BTC/USDT, ETH/USDC"
+            trade_types = "Intraday / Positional / Spot"
+            opener = "Which asset would you like to start with?"
+        elif has_crypto and not has_equity:
+            scope_line = (
+                "Your AI-powered platform for building and backtesting **algorithmic trading strategies** "
+                "on **crypto spot pairs** \u2014 no coding required."
+            )
+            asset_examples = "BTC/USDT, ETH/USDC, SOL/USDT"
+            trade_types = "Intraday / Positional / Spot"
+            opener = "Which crypto pair would you like to start with?"
+        else:
+            scope_line = (
+                "Your AI-powered platform for building and backtesting **algorithmic trading strategies** "
+                "on Indian equities \u2014 no coding required."
+            )
+            asset_examples = "TCS, Reliance, HDFC Bank"
+            trade_types = "Intraday / Positional"
+            opener = "Which stock would you like to start with?"
+
         return (
             "## Welcome to Stretus\n\n"
-            "Your AI-powered platform for building and backtesting **algorithmic trading strategies** on Indian equities \u2014 no coding required.\n\n"
-            "Tell me a stock to get started and I\'ll design a data-driven strategy tailored to your style and market outlook.\n\n"
+            f"{scope_line}\n\n"
+            f"Tell me an asset to get started and I\'ll design a data-driven strategy tailored to your style and market outlook.\n\n"
             "**What you\'ll get:**\n"
             "- Ranked entry & exit signal selection from a vetted knowledge base\n"
             "- Risk parameters calibrated to your experience level\n"
@@ -108,13 +141,13 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
             "**I\'ll need these 6 inputs:**\n\n"
             "| Input | Example |\n"
             "|-------|---------|\n"
-            "| Stock | TCS, Reliance, HDFC Bank |\n"
+            f"| Asset | {asset_examples} |\n"
             "| Timeframe | 5m / 15m / 1h / 1d |\n"
-            "| Trade type | Intraday / Positional |\n"
+            f"| Trade type | {trade_types} |\n"
             "| Market view | Bullish / Bearish |\n"
             "| Experience | Beginner / Intermediate / Expert |\n"
             "| Goal | Quick profits / Swing gains / Low-risk income |\n\n"
-            "Which stock would you like to start with?"
+            f"{opener}"
         )
 
     if code == "validation.invalid_input":
@@ -146,11 +179,14 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
         )
 
     if code == "validation.unsupported_stock":
-        supported_stocks_display = _compact_text(facts.get("supported_stocks_display"))
+        # Don't run _compact_text — supported_stocks_display is trusted
+        # multi-line markdown from _display_list() and we want to preserve
+        # the category sub-sections (Indian Equities / Crypto Pairs / etc.).
+        supported_stocks_display = str(facts.get("supported_stocks_display") or "").strip()
         return (
             "That stock isn\'t in my universe yet.\n\n"
-            f"**Currently supported:** {supported_stocks_display}\n\n"
-            "Please select one of these to continue."
+            f"**Currently supported:**\n\n{supported_stocks_display}\n\n"
+            "Please pick one to continue."
         )
 
     if code == "validation.ambiguous_stock":
@@ -205,30 +241,34 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
             asset = _compact_text(facts.get("asset"))
             supported_timeframes = _compact_text(facts.get("supported_timeframes"))
             question = (
-                f"What timeframe for **{asset}**? Supported: `{supported_timeframes}`"
+                f"Next, we need to decide how fast you want to trade. You can choose from **{asset}**? Supported timeframes are: `{supported_timeframes}`"
                 if asset
                 else f"What timeframe? Supported: `{supported_timeframes}`"
             )
         elif code == "collect_input.ask_objective":
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"**{asset}** \u2014 intraday or positional?"
+                f"**{asset}** \u2014 How long do you plan to hold this trade? "
+                "Is it Intraday (buy and sell within the same day) or Positional (holding for a few days)?\n\n"
                 if asset
-                else "Intraday or positional?"
+                else (
+                    "How long do you plan to hold this trade? "
+                    "Is it Intraday (buy and sell within the same day) or Positional (holding for a few days)?\n\n"
+                )
             )
         elif code == "collect_input.ask_sentiment":
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"Market view on **{asset}**: bullish or bearish?"
+                f"Which direction do you think the market is moving for **{asset}**: Are we Bullish (expecting prices to go up) or Bearish (expecting prices to go down)?"
                 if asset
-                else "Market view: bullish or bearish?"
+                else "Are we Bullish (expecting prices to go up) or Bearish (expecting prices to go down)?"
             )
         elif code == "collect_input.ask_experience":
-            question = "Trading experience level: **beginner**, **intermediate**, or **expert**?"
+            question = "To give you the right kind of advice, I need to know your comfort level. Are you a **Beginner**, **Intermediate**, or **Expert**?"
         else:
             asset = _compact_text(facts.get("asset"))
             question = (
-                f"What\'s your trading goal for **{asset}**?\n\n"
+                f"What\'s main target for **{asset}**?\n\n"
                 f"*Examples: {GOAL_EXAMPLES_TEXT}*"
                 if asset
                 else (
@@ -242,26 +282,16 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
 
     if code == "workflow.input_summary_confirmation":
         asset = _compact_text(facts.get("asset"), "this asset")
-        timeframe = _compact_text(facts.get("timeframe"))
-        objective = _compact_text(facts.get("objective"))
-        sentiment = _compact_text(facts.get("sentiment"))
-        experience = _compact_text(facts.get("experience"))
-        goal = _compact_text(facts.get("goal"))
         return (
             f"## Strategy Setup \u2014 {asset}\n\n"
-            f"| Field | Value |\n"
-            f"|-------|-------|\n"
-            f"| Stock | **{asset}** |\n"
-            f"| Timeframe | `{timeframe}` |\n"
-            f"| Trade type | {objective} |\n"
-            f"| Market view | {sentiment} |\n"
-            f"| Experience | {experience} |\n"
-            f"| Goal | {goal} |\n\n"
-            "All inputs locked in. **Confirm to plan the signals**, or tell me what to change."
+            "All six core inputs are captured. See **Stored inputs** below for the summary.\n\n"
+            "**Confirm to plan the signals**, or tell me what to change."
         )
 
     if code == "workflow.signal_plan_ready":
         asset = _compact_text(facts.get("asset"), "this asset")
+        experience = _compact_text(facts.get("experience"), "trader")
+        trade_type = _compact_text(facts.get("trade_type") or facts.get("objective"), "trading")
         reminder = bool(facts.get("reminder"))
         if reminder:
             return (
@@ -269,9 +299,10 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
                 "Confirm to assemble the strategy."
             )
         return (
-            f"## Signal Plan Ready \u2014 {asset}\n\n"
-            "Scanned the knowledge base, ranked the signals, locked in the best fit for your setup.\n\n"
-            "**Confirm to assemble the strategy** \u2014 I\'ll wire up entry, exit, and risk parameters."
+            f"I have scanned the data and prepared the best strategy for an {experience} "
+            f"{trade_type} setup on {asset}.\n\n"
+            "Please confirm: Once you say yes, I will generate the complete strategy "
+            "with exact Entry points, Exit targets, and Risk management details."
         )
 
     if code == "workflow.strategy_ready_for_backtest":
@@ -328,6 +359,14 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
     if code == "workflow.backtest_failed":
         reason = normalize_backtest_failure_reason(facts.get("reason"))
         return f"## Backtest Failed\n\n> \u26a0\ufe0f {reason}\n\nReview the inputs and try again."
+
+    if code == "workflow.backtest_earliest_date_unsupported":
+        earliest = facts.get("earliest_date") or "the earliest supported date"
+        return (
+            "## Backtest date not supported\n\n"
+            f"We currently support backtests from **{earliest}** onward. "
+            "Please choose a start date on or after that date and ask to run the backtest again."
+        )
 
     if code == "workflow.backtest_already_available":
         return (

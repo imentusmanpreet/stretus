@@ -244,6 +244,33 @@ class SemanticInstructions(BaseModel):
     position_sizing_mode: str | None = None         # "risk_based" | "fixed_fractional" | "fixed_units"
     max_capital_allocation_pct: float | None = None
 
+    # Phase 12 — high-precision semantic fields surfaced by the extractor so
+    # the planner can pick the right KB signal without re-parsing the prompt.
+    rsi_thresholds: list[dict] = Field(default_factory=list)
+    # ex: [{"op": "above", "value": 60}, {"op": "above", "value": 65}]
+    macd_states: list[str] = Field(default_factory=list)
+    # ex: ["histogram_positive", "bullish_cross"]
+    vwap_relations: list[str] = Field(default_factory=list)
+    # ex: ["price_above_vwap"]
+    regime_preference: str | None = None
+    # "trending" (avoid sideways) | "ranging" | "volatile" | None
+    sl_type_hint: str | None = None
+    # "atr" | "structural" | "percent" | None — drives planner SL selection
+    partial_exits: list[dict] = Field(default_factory=list)
+    # ex: [{"trigger": "rr_multiple", "value": 1.5, "size_pct": 50}]
+    ma_relations: list[dict] = Field(default_factory=list)
+    # ex: [{"family": "sma", "side": "above", "window": 20, "kind": "cross"},
+    #      {"family": "sma", "side": "below", "window": 20, "kind": "regime"}]
+    exit_on_opposite: bool = False
+    # True when the user wrote "exit on opposite crossover" / "exit when it
+    # reverses" — planner should mirror the entry trigger as the exit.
+
+    # ORB / opening-range duration explicitly stated by the user (minutes).
+    # e.g. "first 1-hour range" → 60, "first 30-minute range" → 30.
+    # The constraint_compiler converts this to opening_bars = minutes / chart_tf.
+    # None = user did not specify a range duration; use card defaults.
+    orb_opening_bars_minutes: int | None = None
+
 
 # ── Execution Configuration (Assembled from SemanticInstructions + Signals) ────
 
@@ -304,7 +331,7 @@ StrategyFamilyType = Literal[
 class CanonicalSignalSpec(BaseModel):
     """Canonical signals for a strategy family."""
     signal_name: str
-    role: Literal["entry_trigger", "entry_filter", "exit_trigger"]
+    role: Literal["entry_trigger", "entry_filter", "exit_trigger", "exit_filter"]
     mandatory: bool = False                 # If True, family isn't valid without it
     description: str | None = None
 

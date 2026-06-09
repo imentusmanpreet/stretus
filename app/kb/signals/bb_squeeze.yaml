@@ -2,33 +2,62 @@ name: bb_squeeze
 category: volatility
 direction: neutral
 kind: pattern
-roles: [entry_filter]
-description: "Bollinger Bands have narrowed below their average width — volatility compression, breakout likely soon."
-
-works_best_on: [10m, 15m, 30m, 1h, 1d]
-weak_on: [1m, 3m]
+# Bollinger band width = upper-lower = 2·nbdev·STDDEV(close, n); the constant
+# factor cancels on both sides of the squeeze inequality, so this is identical to
+# BB_WIDTH < AVG(BB_WIDTH, 50) while using only engine-supported functions.
+formula: STDDEV({window}) < AVG(STDDEV({window}), 50)
+roles:
+- entry_filter
+description: Bollinger Bands have narrowed below their average width — volatility compression, breakout likely soon.
+works_best_on:
+- 10m
+- 15m
+- 30m
+- 1h
+- 1d
+weak_on:
+- 1m
+- 3m
 unsupported_on: []
-
 contraindicated_when: []
-
-pairs_well_with: [n_bar_high_breakout, n_bar_low_breakdown, opening_range_breakout, opening_range_breakdown, keltner_breakout_up, keltner_breakout_down]
-contradicts: [atr_high_volatility]
-
+pairs_well_with:
+- n_bar_high_breakout
+- n_bar_low_breakdown
+- opening_range_breakout
+- opening_range_breakdown
+- keltner_breakout_up
+- keltner_breakout_down
+contradicts:
+- atr_high_volatility
 params_by_timeframe:
-  1m:   {window: 20, window_dev: 2}
-  3m:   {window: 20, window_dev: 2}
-  5m:   {window: 20, window_dev: 2}
-  10m:  {window: 20, window_dev: 2}
-  15m:  {window: 20, window_dev: 2}
-  30m:  {window: 20, window_dev: 2}
-  1h:   {window: 20, window_dev: 2}
-  1d:   {window: 20, window_dev: 2}
-
+  1m:
+    window: 20
+    window_dev: 2
+  3m:
+    window: 20
+    window_dev: 2
+  5m:
+    window: 20
+    window_dev: 2
+  10m:
+    window: 20
+    window_dev: 2
+  15m:
+    window: 20
+    window_dev: 2
+  30m:
+    window: 20
+    window_dev: 2
+  1h:
+    window: 20
+    window_dev: 2
+  1d:
+    window: 20
+    window_dev: 2
 experience_fit:
   beginner: 0.7
   intermediate: 1.0
   expert: 1.0
-
 intent_fit:
   trend: 0.4
   momentum: 0.7
@@ -37,3 +66,10 @@ intent_fit:
   scalping: 0.5
   mean_reversion: 0.4
   confirmation: 1.0
+match_when:
+  phrases:
+  - bollinger\s+(?:band(?:s)?\s+)?squeeze
+  - bb\s+squeeze
+  - band\s+contraction
+  - volatility\s+(?:contraction|squeeze)
+  acts_as: entry_filter
