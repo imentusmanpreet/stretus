@@ -62,8 +62,35 @@ class StopLoss(BaseModel):
         return _as_float(self.value)
 
 
+class TakeProfitTarget(BaseModel):
+    """One rung of a scale-out take-profit ladder.
+
+    ``type`` is how the LEVEL is expressed; ``value`` the magnitude (an R-multiple,
+    a percent, or an ATR multiple). ``exit_fraction`` is the portion of the ORIGINAL
+    position to close at this rung — ``None`` means "share the remainder equally"
+    (resolved at engine/spec time). The engine computes an R-multiple level against
+    the ACTUAL stop distance, so it works with ATR/structural/percent stops alike.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["risk_reward", "percent", "atr"]
+    value: float | str
+    exit_fraction: float | None = Field(default=None, gt=0, le=1)
+    window: int | None = Field(default=None, gt=0)
+    source: Source = "assumed"
+    reason: str = ""
+
+    def numeric(self) -> float | None:
+        return _as_float(self.value)
+
+
 class TakeProfit(BaseModel):
-    """Take-profit intent. The engine consumes a percent; richer types reduce to it."""
+    """Take-profit intent. The engine consumes a percent; richer types reduce to it.
+
+    A single target is expressed via ``type``/``value``. A scale-out ladder (TP1, TP2,
+    …) is expressed via ``targets``; when non-empty it supersedes ``type``/``value``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -72,9 +99,34 @@ class TakeProfit(BaseModel):
     source: Source = "assumed"
     logic: str = ""
     reason: str = ""
+    # Scale-out ladder. Empty ⇒ single-target (type/value) path. When set, the
+    # furthest rung also feeds the legacy percent fallback for old engine paths.
+    targets: list[TakeProfitTarget] = Field(default_factory=list)
+    # 1-based index of the rung after which the remainder's stop moves to break-even.
+    # 0/None ⇒ OFF (default) — never inject a behaviour the user didn't ask for.
+    move_stop_to_breakeven_after: int | None = Field(default=None, ge=0)
 
     def numeric(self) -> float | None:
         return _as_float(self.value)
+
+    def resolved_targets(self) -> list[TakeProfitTarget]:
+        """The ladder with ``exit_fraction`` filled in (equal split of the remainder).
+
+        Any rung that left ``exit_fraction`` unset shares whatever fraction is left
+        after the explicitly-sized rungs, split equally. The final total is clamped
+        to ≤ 1.0; a leftover (<1.0) is closed later by the stop / exit-signal / EOD.
+        """
+        if not self.targets:
+            return []
+        explicit = sum(t.exit_fraction for t in self.targets if t.exit_fraction is not None)
+        unset = [t for t in self.targets if t.exit_fraction is None]
+        remaining = max(0.0, 1.0 - explicit)
+        share = (remaining / len(unset)) if unset else 0.0
+        out: list[TakeProfitTarget] = []
+        for t in self.targets:
+            frac = t.exit_fraction if t.exit_fraction is not None else share
+            out.append(t.model_copy(update={"exit_fraction": round(frac, 6)}))
+        return out
 
 
 class RiskManagement(BaseModel):

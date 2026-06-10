@@ -67,6 +67,37 @@ def _row(label: str, value: Any) -> dict[str, str] | None:
     return {"label": label, "value": text}
 
 
+def _fmt_num(value: Any) -> str:
+    """Format a number without a trailing '.0' (1.0 -> '1', 1.5 -> '1.5')."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def _format_stop_loss_display(spec: Any) -> str | None:
+    """Human-readable stop when a typed engine spec is present, else None.
+
+    A typed stop (ATR / structural) is the user's real intent — render it as such
+    ("1 × ATR(14)") rather than the engine's percent fallback, which would mask it.
+    """
+    if not isinstance(spec, dict):
+        return None
+    stop_type = spec.get("type")
+    if stop_type == "atr":
+        window = spec.get("window", 14)
+        mult = spec.get("multiplier")
+        return f"{_fmt_num(mult)} × ATR({window})" if mult is not None else f"ATR({window})"
+    if stop_type == "structural":
+        anchor = str(spec.get("anchor") or "structure").replace("_", " ")
+        return f"structure ({anchor})"
+    if stop_type == "percent":
+        pct = spec.get("pct")
+        return f"{_fmt_num(pct)}%" if pct is not None else None
+    return None
+
+
 def _working_draft(
     draft: dict[str, Any] | None,
     builder: StrategyBuilder,
@@ -188,8 +219,22 @@ def _summary_rows_from_draft(draft: dict[str, Any]) -> list[dict[str, str]]:
         risk = {}
     sources = risk.get("rms_sources") or {}
 
-    sl = _user_supplied_rms_pct(draft, "stop_loss_pct")
-    tp = _user_supplied_rms_pct(draft, "take_profit_pct")
+    # Stop loss: a typed stop (ATR / structural) is the user's real intent — show it
+    # as such ("1 × ATR(14)") rather than the engine's percent fallback. Fall back to
+    # the percent only when the stop is genuinely percentage-based.
+    sl_display = _format_stop_loss_display(draft.get("stop_loss_spec"))
+    if sl_display is None:
+        sl = _user_supplied_rms_pct(draft, "stop_loss_pct")
+        sl_display = f"{_fmt_num(sl)}%" if sl is not None else None
+
+    # Take profit: prefer the user's risk:reward ("1.5R") over the derived percent.
+    rr = risk.get("risk_reward") if sources.get("risk_reward") in _USER_RMS_SOURCES else None
+    if rr not in (None, 0, 0.0):
+        tp_display = f"{_fmt_num(rr)}R"
+    else:
+        tp = _user_supplied_rms_pct(draft, "take_profit_pct")
+        tp_display = f"{_fmt_num(tp)}%" if tp is not None else None
+
     daily_cap = (
         risk.get("daily_loss_cap_pct") or risk.get("daily_loss_cap")
         if sources.get("daily_loss_cap") in _USER_RMS_SOURCES
@@ -202,8 +247,8 @@ def _summary_rows_from_draft(draft: dict[str, Any]) -> list[dict[str, str]]:
     )
 
     for label, raw in (
-        ("Stop loss", f"{sl}%" if sl is not None else None),
-        ("Take profit", f"{tp}%" if tp is not None else None),
+        ("Stop loss", sl_display),
+        ("Take profit", tp_display),
         ("Daily loss cap", f"{daily_cap}%" if daily_cap not in (None, 0, 0.0) else None),
         ("Max trades / day", str(max_trades) if max_trades not in (None, 0) else None),
     ):

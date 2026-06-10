@@ -30,10 +30,26 @@ HARD RULES (a violation makes the strategy un-runnable and will be rejected):
    the closest faithful approximation from them.
 2. Conditions must be able to evaluate to TRUE on real data — no self-contradictions
    (e.g. requiring the same value to be both above a high threshold and below a low one).
-3. Every strategy needs a stop. Provide `stop_loss`; the engine always needs a
-   positive percent, so for non-percent stop types still pick a sensible value.
-4. `take_profit` is a percent target. If the user thinks in risk:reward, set
-   type="risk_reward" and value=<ratio> (the system computes percent = stop% × ratio).
+3. Every strategy needs a stop. The user may express it on ANY basis and in ANY wording —
+   your job is to detect the BASIS and map it to the matching `stop_loss.type`, preserving
+   it exactly. NEVER convert one basis into another (e.g. an ATR or structural stop must not
+   silently become a percentage). The engine supports exactly these stop bases — pick the one
+   the user's intent fits, whatever words they used:
+     • volatility / ATR basis      → type="atr"          (value = the ATR multiple; window = period, default 14)
+     • chart-structure basis       → type="structure"    (anchor = the level, e.g. a swing/recent low)
+     • fixed-percentage basis      → type="percent"      (value = the percent)
+     • fixed price-distance basis  → type="fixed_points" (value = the point/price distance)
+     • indicator-defined level     → type="indicator_based"
+   Capture the exact number the user gave. The engine also needs a positive percent fallback,
+   so derive a sensible `value` percent too; it uses the typed spec at runtime.
+4. `take_profit` works the same way — detect the BASIS and preserve it on `take_profit.type`:
+     • risk:reward / R-multiple basis → type="risk_reward" (value = the EXACT ratio the user named;
+                                          the system computes percent = stop% × ratio)
+     • fixed-percentage basis         → type="percent"      (value = the percent)
+     • ATR / fixed-points / indicator → the matching type, mirroring rule 3
+   Never substitute a default ratio when the user gave one. The spec carries a SINGLE target, so
+   if the user names several scaled targets (e.g. multiple R-multiples or partial exits), use the
+   furthest as `take_profit` and record the full ladder in intent_summary so nothing is dropped.
 5. timeframe MUST be one of the supported timeframes; market should map to a known
    market id; objective and direction MUST be from their allowed lists.
 6. direction="both" REQUIRES short_entry_condition (and ideally short_exit_condition).

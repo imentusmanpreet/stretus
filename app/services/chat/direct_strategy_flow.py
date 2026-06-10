@@ -233,8 +233,22 @@ def apply_spec_extras_to_builder(builder: Any, spec: StrategySpec) -> None:
     store = getattr(builder, "risk_execution_config", None)
     if isinstance(store, dict):
         rms = store.setdefault("rms_sources", {})
-        rms["stop_loss_pct"] = "user" if spec.stop_loss.source == "user" else "default"
-        rms["take_profit_pct"] = "user" if spec.take_profit.source == "user" else "default"
+        # Only a *percent* stop/target is the user's literal percentage. A typed stop
+        # (ATR/structure) or an R-multiple TP carries the real intent in
+        # stop_loss_spec / risk_reward — the percent is just an engine fallback, so
+        # don't tag that fallback "user" (it would render as "2%" and mask the true
+        # "1 × ATR" / "1.5R" in the readback).
+        sl_user_pct = spec.stop_loss.source == "user" and spec.stop_loss.type == "percent"
+        tp_user_pct = spec.take_profit.source == "user" and spec.take_profit.type == "percent"
+        rms["stop_loss_pct"] = "user" if sl_user_pct else "default"
+        rms["take_profit_pct"] = "user" if tp_user_pct else "default"
+        # Surface a risk:reward target as first-class user intent so the readback
+        # shows "1.5R" instead of a stale/derived percentage.
+        if spec.take_profit.type == "risk_reward":
+            rr = spec.take_profit.numeric()
+            if rr and rr > 0:
+                store["risk_reward"] = rr
+                rms["risk_reward"] = "user" if spec.take_profit.source == "user" else "default"
     if spec.position_sizing_mode:
         builder.position_sizing_mode = spec.position_sizing_mode
     if spec.max_capital_allocation_pct is not None:

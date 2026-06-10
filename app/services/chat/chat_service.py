@@ -3277,10 +3277,20 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 # immutable. (Persisted via to_draft_json/merge_preview.)
                 if getattr(builder, "original_user_prompt", None) is None:
                     raw = re.sub(r"\s+", " ", user_content or "").strip()
+                    word_count = len(raw.split())
+                    # A short ack like "ok create the strategy" is a confirmation,
+                    # not a spec — defer to confirmation detection for those. But a
+                    # long, substantive message IS the user's literal strategy spec
+                    # even when it contains a verb ("create"/"build") that trips
+                    # confirmation detection. We must still capture it, because this
+                    # raw text is what the synthesis LLM reads verbatim — otherwise
+                    # only the agent's lossy `goal` summary survives and details
+                    # (volume, exact ATR multiple, EMA-cross exit, TP1/TP2) are lost.
+                    substantive = word_count >= 15
                     if (
                         not _is_greeting_message(user_content)
-                        and len(raw.split()) >= 6
-                        and not detect_user_confirmation(user_content)
+                        and word_count >= 6
+                        and (substantive or not detect_user_confirmation(user_content))
                     ):
                         builder.original_user_prompt = raw
                         logger.info(
@@ -4376,6 +4386,16 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         and not has_rr
                         and not has_structural_sl
                     )
+
+                    # Direct strategy path owns risk extraction: the spec-generating LLM
+                    # reads the full user prompt, emits typed risk (ATR stop / R-multiple
+                    # TP), and tags any value it had to assume (surfaced to the user as
+                    # notes). So we never force the percentage clarification on that path —
+                    # doing so would interrogate the user for risk they already stated and
+                    # then lock in percentage defaults (the original ATR/R-multiple bug).
+                    if get_settings().use_direct_strategy_path:
+                        sl_missing = False
+                        tp_missing = False
                     user_said_use_defaults = re.search(
                         r"\b(use\s+defaults?|default\s+values?|go\s+with\s+defaults?"
                         r"|ok\s+defaults?|use\s+these\s+defaults?|proceed\s+with\s+defaults?"
