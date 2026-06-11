@@ -41,6 +41,9 @@ class ChatCreateRequest(BaseModel):
 
 class MessageRequest(BaseModel):
     content: str = Field(..., min_length=1, example="I want to trade NIFTY on 15m")
+    # Multi-asset backtest: explicit list of symbols to run sequentially when the
+    # message triggers a backtest. None/empty → single asset from the strategy YAML.
+    symbols: Optional[list[str]] = Field(default=None, example=["SBIN", "TCS", "INFY"])
 
 
 # ── Response models ────────────────────────────────────────────────────────────

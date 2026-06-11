@@ -220,6 +220,26 @@ async def trigger_backtest(
     if not strategy.yaml_path:
         raise HTTPException(status_code=400, detail="Strategy has no YAML file. Confirm first.")
 
+    # Multi-asset note: this endpoint is the asynchronous single-asset path (the
+    # quant engine posts each result back independently via PUT .../result, so
+    # there is no point to assemble the cross-asset wrapper + summary here).
+    # Multi-asset runs go through the chat flow, which runs assets sequentially
+    # and returns the MultiAssetBacktestResult wrapper. A single symbol is
+    # accepted as a convenience override.
+    if body.symbols:
+        _syms = [s.strip() for s in body.symbols if s and s.strip()]
+        if len(_syms) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Multi-asset backtests are run through the chat flow "
+                    "(send 'symbols' with the message). This endpoint supports "
+                    "a single asset per request."
+                ),
+            )
+        if _syms and not body.symbol:
+            body = body.model_copy(update={"symbol": _syms[0]})
+
     backtest = Backtest(
         id=uuid.uuid4(),
         strategy_id=strategy.id,

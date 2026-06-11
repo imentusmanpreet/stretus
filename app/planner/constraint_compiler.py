@@ -483,8 +483,11 @@ def _apply_ema_slope_filter(plan: dict[str, Any], prompt: str) -> bool:
 
 
 def _bars_for_timeframe(target_minutes: int, chart_tf: str) -> int:
-    tf_map = {"1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30, "1h": 60, "1d": 1440}
-    chart_m = tf_map.get(chart_tf, 15)
+    # Parse the chart timeframe generically so any interval (2m, 7m, 45m, 4h, …)
+    # scales correctly, instead of a fixed lookup that fell back to 15.
+    from app.services.strategy.builder import _timeframe_to_minutes
+
+    chart_m = _timeframe_to_minutes(chart_tf) or 0
     if chart_m <= 0:
         return max(1, target_minutes // 15)
     return max(1, round(target_minutes / chart_m))

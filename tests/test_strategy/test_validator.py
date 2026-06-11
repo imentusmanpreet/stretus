@@ -81,7 +81,8 @@ def test_both_direction_requires_short_leg():
 
 @requires_engine
 def test_unsupported_timeframe_is_rejected():
-    result = validator.validate_spec(_spec(timeframe="2m"))
+    # 2m is now valid (range-based 1m..1d). Use an out-of-range timeframe.
+    result = validator.validate_spec(_spec(timeframe="2w"))
     assert any(e.code == "unsupported_timeframe" for e in result.errors)
 
 

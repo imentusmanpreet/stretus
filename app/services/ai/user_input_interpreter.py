@@ -166,6 +166,33 @@ def _clean_text(value: Any) -> str | None:
     return text or None
 
 
+def _clean_backtest_symbols(value: Any) -> list[str] | None:
+    """Normalise the LLM's `backtest_symbols` into a clean list (or None).
+
+    Accepts a JSON array, or a single comma/whitespace-delimited string (the
+    model sometimes returns 'ETH_USDC, BTC_USDC'). Trims, upper-cases and
+    de-duplicates while preserving order. Returns None when nothing usable —
+    callers treat None as "single-asset / use the strategy symbol".
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw_items = re.split(r"[,\s]+", value)
+    elif isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        return None
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        sym = str(item or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            cleaned.append(sym)
+    return cleaned or None
+
+
 def _coerce_float(value: Any) -> float | None:
     try:
         if value is None or value == "":
@@ -519,6 +546,19 @@ async def route_user_message(
         "confidence": "high",
         "backtest_from_utc": None,
         "backtest_to_utc": None,
+        # Multi-asset backtest: the assets to run when the user names more than
+        # one in a run_backtest request. These drive the backtest only — they are
+        # NOT a strategy-symbol change, so they must NOT populate stock_query.
+        "backtest_symbols": None,
+        # Risk-management settings — the LLM is the primary extractor for these.
+        # Each is a number copied verbatim from the user's message, or None when
+        # the user did not state it. Validated downstream before being stored.
+        "stop_loss_pct": None,
+        "take_profit_pct": None,
+        "risk_reward": None,
+        "per_trade_risk": None,
+        "daily_loss_cap": None,
+        "max_trades": None,
     }
 
     llm = LLMService()
@@ -527,7 +567,7 @@ async def route_user_message(
         {
             "role": "system",
             "content": (
-                "You are the first-pass routing brain for Stretus, an Indian stock strategy assistant.\n"
+                "You are the first-pass routing brain for Stretus, an Indian-equity and crypto strategy assistant.\n"
                 "Every user message comes to you before any rule-based logic.\n"
                 "Your job is to understand the user in context first, then decide the best next action.\n\n"
                 "Reason before you route. Do this in two steps inside the JSON output:\n"
@@ -557,7 +597,7 @@ async def route_user_message(
                 "- If the user expresses uncertainty about whether the strategy will be profitable ('will this make profit', 'is this good', 'will it work'), classify as clarification with topic 'next_step' or 'educational' — do NOT classify as user_rejection just because the user is unsure.\n"
                 "- If the user mixes a normal question with field values, still extract the field values.\n"
                 "- Never recommend a stock or give buy/sell advice. Use stock_advice_request for that.\n"
-                "- The ONLY supported stocks are: TCS, Infosys, Reliance, Adani, HDFC Bank, NHPC, Suzlon, GMR Airports, and Vodafone Idea. Never invent or suggest tickers outside this list (for example never mention SBIN, ICICIBANK, ITC, AXISBANK, KOTAKBANK, etc.). If the user asks for examples, use only the supported nine.\n"
+                "- Stretus supports a large universe: 100+ Indian equities on NSE and 100+ crypto spot pairs (for example BTC/USDT, ETH/USDT, SOL/USDC). Do NOT gatekeep symbols yourself. Whenever the user names any stock, company, ticker, or crypto pair — Indian equity OR crypto — capture it verbatim in stock_query and let the backend validate it against the full universe. Never reject, 'correct', or claim a symbol is unsupported on your own; the app handles validation and will tell the user if something is not available. Crypto pairs such as BTC_USDT, BTC/USDT, ETH/USDT are fully supported — always capture them as the symbol. Because you do not give buy/sell advice (see above), never fabricate a specific ticker as a recommendation.\n"
                 "- If the user asks 'what stocks do you support', 'list the stocks', 'which stocks are available', or any equivalent meta-question about the universe, set intent to clarification with clarification_topic = assistant_scope and leave reply_text null. The app will return the canonical supported list directly.\n"
                 "- Use invalid_value only when the message is not a genuine question and does not provide a usable value.\n"
                 "- If you infer some values but still need explicit confirmation before the workflow should continue, set needs_clarification to true.\n"
@@ -571,6 +611,12 @@ async def route_user_message(
                 "If the user requests a backtest but gives no dates, leave both date fields null. "
                 "If they give only a start or only an end date, set that field and leave the other null "
                 "(the backend fills the missing bound with the product default).\n"
+                "- When intent is run_backtest and the user names one or more assets to backtest "
+                "(e.g. 'backtest ETH_USDC and BTC_USDC from ...', 'run it on SBIN, TCS'), put those "
+                "assets in the backtest_symbols array using their canonical symbol form "
+                "(e.g. [\"ETH_USDC\", \"BTC_USDC\"]). These drive the backtest only — they are NOT a "
+                "request to change the strategy's symbol, so leave stock_query null in that case. "
+                "Omit backtest_symbols (null) when the user names no asset or only confirms a re-run.\n"
                 "- At any mode, if the user asks to modify, edit, update, change, revise, or correct previously captured inputs, set intent to modify_input.\n"
                 "- If the user asks for a new, fresh, another, restart, or start-over strategy, set intent to new_strategy.\n"
                 "- If the user gives negative feedback about the current strategy, signal plan, indicators, market view, or backtest result, set intent to user_rejection.\n"
@@ -579,13 +625,21 @@ async def route_user_message(
                 "- Treat compact timeframe units case-insensitively. For example, 15M means 15 minutes and 1D means 1 day.\n"
                 "- Do not use month-based timeframes in the user flow.\n"
                 "- Keep timeframe_input as the raw phrase the user gave. Do not snap, round, or substitute it with a supported value yourself. The app will validate it against the supported list and tell the user clearly when it is not supported.\n"
-                "- Supported timeframes are exactly: 1m, 5m, 10m, 15m, 30m, 1h, 1d. If the user asks for anything else (for example '2 min', '120 seconds', '900 minutes', or '3000 minute'), still pass their phrase verbatim in timeframe_input — never overwrite it with the closest supported value.\n"
+                "- Timeframes are flexible: any interval from 1 minute up to 1 day is supported (for example 1m, 2m, 5m, 7m, 15m, 45m, 1h, 4h, 1d) — NOT just a fixed list. Do not tell the user a timeframe in this range is unsupported. Sub-minute (e.g. '30 seconds') and multi-day/weekly (e.g. '3d', '1w') are out of range. Whatever the user says, pass their phrase verbatim in timeframe_input — never snap or substitute it; the app validates the 1m–1d range and replies if it is out of range.\n"
                 "- The six core fields are: symbol, timeframe, objective, sentiment, experience, and goal.\n"
                 "- Goal is a free-form natural-language summary of what kind of setup the trader wants.\n"
                 "- Capture goal when the user describes intent such as breakout, trend-following, reversal, high conviction, low false signals, confirmation, or controlled risk.\n"
                 "- Keep goal as one short plain-language phrase or sentence.\n"
-                "- Ignore daily loss cap, max trades, and trade duration if the user mentions them.\n"
-                "- Do not ask follow-up questions about daily loss cap, max trades, or trade duration.\n"
+                "- Capture risk-management settings when the user states them, copying the NUMBER exactly as written:\n"
+                "    * stop_loss_pct — stop-loss percent, e.g. 'stop loss 0.5%', 'SL: 1%' → 0.5, 1.\n"
+                "    * take_profit_pct — take-profit/target percent, e.g. 'take profit 1%', 'target 2%' → 1, 2.\n"
+                "    * risk_reward — risk:reward as a single reward-per-risk number; '1:2 RR' or '2R' → 2; '1:3' → 3.\n"
+                "    * per_trade_risk — percent of capital risked per trade, e.g. 'risk 1% per trade', 'Per Trade Risk: 1%' → 1.\n"
+                "    * daily_loss_cap — daily loss cap percent, e.g. 'daily loss cap 4%', 'stop after 3% daily loss' → 4, 3.\n"
+                "    * max_trades — max trades per day as an integer, e.g. 'max 10 trades per day' → 10.\n"
+                "- Copy these numbers verbatim. NEVER infer, round, derive, or fill a default — if the user did not state a field, leave it null. Do not compute take_profit from stop_loss and risk_reward; only capture what is written.\n"
+                "- Do not ask follow-up questions about these risk fields; capture them silently when present.\n"
+                "- Do not ask follow-up questions about trade duration if the user mentions it.\n"
                 "- Map objective to only intraday or positional.\n"
                 "- Map sentiment to only bullish or bearish.\n"
                 "- Map experience to only beginner, intermediate, or expert.\n"
@@ -664,7 +718,13 @@ async def route_user_message(
                 "\"clarification_field\": null,"
                 "\"clarification_topic\": null,"
                 "\"backtest_from_utc\": null,"
-                "\"backtest_to_utc\": null"
+                "\"backtest_to_utc\": null,"
+                "\"stop_loss_pct\": null,"
+                "\"take_profit_pct\": null,"
+                "\"risk_reward\": null,"
+                "\"per_trade_risk\": null,"
+                "\"daily_loss_cap\": null,"
+                "\"max_trades\": null"
                 "}"
             ),
         },
@@ -709,6 +769,37 @@ async def route_user_message(
     result["clarification_topic"] = _normalise_clarification_topic(payload.get("clarification_topic"))
     result["backtest_from_utc"] = _clean_text(payload.get("backtest_from_utc"))
     result["backtest_to_utc"] = _clean_text(payload.get("backtest_to_utc"))
+    result["backtest_symbols"] = _clean_backtest_symbols(payload.get("backtest_symbols"))
+
+    # Safety net (legacy/fallback path): if the model lumped multiple backtest
+    # assets into stock_query (comma-separated) for a run_backtest request instead
+    # of using backtest_symbols, recover them here so the run isn't misread as a
+    # single-symbol change and reset to collect_user_input. Conservative: only
+    # fires for run_backtest with a comma-delimited multi-symbol stock_query.
+    if (
+        result["intent"] == "run_backtest"
+        and not result["backtest_symbols"]
+        and result["stock_query"]
+        and "," in result["stock_query"]
+    ):
+        recovered = _clean_backtest_symbols(result["stock_query"])
+        if recovered and len(recovered) > 1:
+            result["backtest_symbols"] = recovered
+            result["stock_query"] = None
+
+    # Risk-management numbers — coerce defensively (the LLM may echo "1%" or
+    # "1.0" as a string). Stays None when absent; validated before storage.
+    for _rms_key in ("stop_loss_pct", "take_profit_pct", "risk_reward",
+                     "per_trade_risk", "daily_loss_cap"):
+        raw = payload.get(_rms_key)
+        if isinstance(raw, str):
+            raw = raw.strip().rstrip("%").strip()
+        result[_rms_key] = _coerce_float(raw)
+    _max_trades = payload.get("max_trades")
+    if isinstance(_max_trades, str):
+        _max_trades = _max_trades.strip()
+    _max_trades = _coerce_float(_max_trades)
+    result["max_trades"] = int(_max_trades) if _max_trades is not None else None
 
     recognized_fields: list[str] = []
     if result["stock_query"]:

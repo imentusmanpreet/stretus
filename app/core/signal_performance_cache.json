@@ -1250,5 +1250,51 @@
     "win_rate": 0.0366,
     "total_trades": 10945,
     "last_updated": "2026-06-02"
+  },
+  "ema_above:BTC_USDC:5m": {
+    "signal_name": "ema_above",
+    "symbol": "BTC_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.1441,
+    "total_trades": 16188,
+    "last_updated": "2026-06-10"
+  },
+  "price_below_ema:BTC_USDC:5m": {
+    "signal_name": "price_below_ema",
+    "symbol": "BTC_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20
+    },
+    "win_rate": 0.1441,
+    "total_trades": 16188,
+    "last_updated": "2026-06-10"
+  },
+  "ema_above:ETH_USDC:5m": {
+    "signal_name": "ema_above",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 21
+    },
+    "win_rate": 0.0781,
+    "total_trades": 21169,
+    "last_updated": "2026-06-10"
+  },
+  "price_below_ema:ETH_USDC:5m": {
+    "signal_name": "price_below_ema",
+    "symbol": "ETH_USDC",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 200
+    },
+    "win_rate": 0.0781,
+    "total_trades": 21169,
+    "last_updated": "2026-06-10"
   }
 }

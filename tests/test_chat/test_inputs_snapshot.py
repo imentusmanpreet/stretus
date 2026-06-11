@@ -135,7 +135,7 @@ def test_append_adds_snapshot_even_for_strategy_setup_heading():
     builder = StrategyBuilder()
     builder.symbol = "TCS.NS"
     builder.timeframe = "15m"
-    text = "## Strategy Setup  TCS\n\nSee stored inputs below."
+    text = "## Strategy Setup ï¿½ TCS\n\nSee stored inputs below."
     out, draft = append_inputs_snapshot(text, builder, state="collect_user_input", draft={})
     assert "### Stored inputs" in out
     assert draft["inputs_snapshot"]["summary_rows"]

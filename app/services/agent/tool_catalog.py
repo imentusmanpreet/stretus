@@ -283,6 +283,17 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Optional UTC ISO end of backtest window.",
                 },
+                "symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Multi-asset backtest: the list of asset symbols when the user "
+                        "names more than one asset to backtest (e.g. 'backtest ETH USDC "
+                        "and BTC USDC from ...'). Use canonical underscore form, e.g. "
+                        "[\"ETH_USDC\", \"BTC_USDC\"]. Omit entirely for a single-asset "
+                        "run (the strategy's own symbol is used)."
+                    ),
+                },
                 "starting_balance": {"type": "number"},
                 "slippage_bps": {"type": "number"},
                 "commission_bps": {"type": "number"},

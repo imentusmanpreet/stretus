@@ -4,6 +4,7 @@ ChatService — the main orchestration layer for the strategy chat flow.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -46,7 +47,12 @@ from app.services.backtest.market_data import (
     StrategyMarketDataRequest,
     _normalize_symbol_for_market_data,
 )
-from app.schemas.backtest import BacktestTriggerRequest
+from app.core.signal_param_estimator import resample_records
+from app.schemas.backtest import (
+    AssetBacktestSummary,
+    BacktestTriggerRequest,
+    MultiAssetBacktestResult,
+)
 from app.services.chat.strategy_flow import (
     build_assemble_strategy_reply,
     build_backtest_error_reply,
@@ -101,7 +107,6 @@ from app.services.strategy.builder import (
     MARKET_CONFIG,
     StrategyBuilder,
     UNSUPPORTED_USER_TIMEFRAME_CODE,
-    extract_company_name_query,
     extract_exchange_hint,
     extract_goal_text,
     extract_strategy_details,
@@ -144,10 +149,6 @@ async def cancel_ai_processing(session_id: str) -> bool:
     return True
 
 _GREETING_ONLY_RE = re.compile(r"^\s*(hi+|hello+|hey+|hii+|namaste)\s*[!.]*\s*$", re.IGNORECASE)
-_EXPLICIT_STOCK_CUE_RE = re.compile(
-    r"\b(?:NSE|BSE)\s*[:\-]|\b[A-Za-z][A-Za-z0-9&-]{1,19}\.(?:NS|BO)\b",
-    re.IGNORECASE,
-)
 _IGNORED_OPTIONAL_INPUT_RE = re.compile(
     r"\b(?:daily\s+loss\s+cap|max\s+daily\s+loss|risk\s+per\s+day|max\s+trades?|"
     r"trade\s+duration|max\s+trade(?:\s+duration)?)\b",
@@ -432,6 +433,111 @@ def _apply_risk_config_to_builder(builder: "StrategyBuilder", config: dict[str, 
         builder.daily_loss_cap = float(config["daily_loss_cap"])
     if config.get("max_trades") is not None:
         builder.max_trade = str(int(config["max_trades"]))
+
+
+# RMS fields the LLM router extracts (route key == risk_execution_config key).
+_LLM_RMS_ROUTE_KEYS: tuple[str, ...] = (
+    "stop_loss_pct",
+    "take_profit_pct",
+    "risk_reward",
+    "per_trade_risk",
+    "daily_loss_cap",
+    "max_trades",
+)
+
+
+def _store_user_rms(builder: "StrategyBuilder", field: str, value: float | int) -> None:
+    """Write one user-supplied RMS value onto the builder's risk config."""
+    existing = dict(builder.risk_execution_config or {})
+    sources = dict(existing.get("rms_sources", {}))
+    existing[field] = value
+    sources[field] = "user"
+    existing["rms_sources"] = sources
+    builder.risk_execution_config = existing
+    if field == "daily_loss_cap":
+        builder.daily_loss_cap = float(value)
+    elif field == "max_trades":
+        builder.max_trade = str(int(value))
+
+
+def _apply_validated_llm_rms(
+    builder: "StrategyBuilder",
+    route: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Capture RMS values the LLM router extracted, validate each, and store the
+    in-range ones (first-write-wins, ``source="user"``).
+
+    Returns a list of ``{field, value, reason}`` for values that parsed but fell
+    outside the sane range — these are NOT stored; the caller surfaces them for
+    explicit user confirmation.
+    """
+    from app.services.strategy.rms_validator import validate_rms
+
+    sources = dict((builder.risk_execution_config or {}).get("rms_sources", {}))
+    pending: list[dict[str, Any]] = []
+    for field in _LLM_RMS_ROUTE_KEYS:
+        raw = route.get(field)
+        if raw is None:
+            continue
+        if sources.get(field) == "user":  # first-write-wins — never clobber a prior user value
+            continue
+        verdict = validate_rms(field, raw)
+        if verdict.status == "invalid":
+            logger.info("chat|rms|llm_value_invalid|field=%s|raw=%r|reason=%s", field, raw, verdict.reason)
+            continue
+        if verdict.needs_confirmation:
+            pending.append({"field": field, "value": verdict.value, "reason": verdict.reason})
+            continue
+        _store_user_rms(builder, field, verdict.value)
+    return pending
+
+
+def _commit_pending_rms_confirmations(
+    builder: "StrategyBuilder",
+    prior_pending: list[Any] | None,
+) -> bool:
+    """Commit RMS values the user was previously asked to confirm and just did.
+
+    These already failed the range check, so confirmation bypasses the gate —
+    the user explicitly accepted the unusual value. Returns True if anything was
+    committed."""
+    if not isinstance(prior_pending, list) or not prior_pending:
+        return False
+    sources = dict((builder.risk_execution_config or {}).get("rms_sources", {}))
+    committed = False
+    for item in prior_pending:
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field")
+        value = item.get("value")
+        if field in _LLM_RMS_ROUTE_KEYS and value is not None and sources.get(field) != "user":
+            _store_user_rms(builder, field, value)
+            committed = True
+    return committed
+
+
+def _build_rms_confirmation_note(pending: list[dict[str, Any]]) -> str:
+    """One short prompt asking the user to confirm out-of-range risk values."""
+    labels = {
+        "stop_loss_pct": "stop loss",
+        "take_profit_pct": "take profit",
+        "risk_reward": "risk:reward",
+        "per_trade_risk": "per-trade risk",
+        "daily_loss_cap": "daily loss cap",
+        "max_trades": "max trades/day",
+    }
+    lines = []
+    for item in pending:
+        label = labels.get(item.get("field"), item.get("field"))
+        value = item.get("value")
+        suffix = "" if item.get("field") in {"max_trades", "risk_reward"} else "%"
+        lines.append(f"- {label}: {value}{suffix} — {item.get('reason')}")
+    body = "\n".join(lines)
+    return (
+        "⚠️ Some risk values look unusual and I have not saved them yet:\n"
+        f"{body}\n\n"
+        "Reply 'confirm' to keep them as-is, or send corrected values."
+    )
 
 
 def _build_risk_update_reply(
@@ -1082,10 +1188,6 @@ def _build_capture_acknowledgement(
     )
 
 
-def _has_explicit_stock_cue(message: str) -> bool:
-    return bool(_EXPLICIT_STOCK_CUE_RE.search(message or ""))
-
-
 def _contains_ignored_optional_input(message: str) -> bool:
     return bool(_IGNORED_OPTIONAL_INPUT_RE.search(message or ""))
 
@@ -1208,33 +1310,6 @@ def _extract_latest_backtest_result(messages: list[ChatMessage]) -> Optional[dic
     strategy_json = message.strategy_json if isinstance(message.strategy_json, dict) else {}
     backtest_result = strategy_json.get("backtest_result")
     return backtest_result if isinstance(backtest_result, dict) else None
-
-
-# Phase 9g — generic English words that must NEVER be treated as
-# tickers. They show up in natural-language discovery prompts like
-# "create a strategy on NSE stock..." and would otherwise short-
-# circuit the chat flow with a spurious "unsupported stock" error
-# before discovery dispatches.
-_NON_TICKER_WORDS = frozenset({
-    "strategy", "strategies", "stock", "stocks", "share", "shares",
-    "trade", "trades", "trading", "company", "companies", "equity",
-    "equities", "security", "securities", "market", "markets",
-    "setup", "system", "position", "intraday", "swing", "scalp",
-    "scalping", "future", "futures", "option", "options",
-    "any", "some", "all", "the", "this", "that", "these", "those",
-    "investment", "investments", "portfolio", "asset", "assets",
-    "anything", "something", "everything", "an",
-})
-
-
-# Generic nouns that follow "NSE"/"BSE" when the user is describing
-# market scope, not a specific ticker (e.g. "...on NSE stock", "...in
-# BSE company"). Used to suppress the natural-exchange regex match.
-_NSE_SCOPE_NOUN_RE = re.compile(
-    r"\s+(?:stock|stocks|share|shares|equity|equities|securit\w*|company|"
-    r"companies|listed|firm|firms|ticker|tickers)\b",
-    re.IGNORECASE,
-)
 
 
 # Phase 9k — primitive extractors for compositional discovery. Each
@@ -1918,41 +1993,6 @@ def _apply_overrides_to_llm_conditions(
     return out
 
 
-def _extract_explicit_stock_query(message: str) -> Optional[str]:
-    if not message:
-        return None
-
-    explicit_suffix = re.search(r"\b([A-Za-z][A-Za-z0-9&-]{1,19})\.(?:NS|BO)\b", message, re.IGNORECASE)
-    if explicit_suffix:
-        return explicit_suffix.group(1).upper()
-
-    explicit_exchange = re.search(r"\b(?:NSE|BSE)\s*[:\-]\s*([A-Za-z][A-Za-z0-9&-]{1,19})\b", message, re.IGNORECASE)
-    if explicit_exchange:
-        return explicit_exchange.group(1).upper()
-
-    natural_exchange = re.search(
-        r"\b([A-Za-z][A-Za-z0-9&-]{1,19})\s+(?:on|in)\s+(?:NSE|BSE)\b",
-        message,
-        re.IGNORECASE,
-    )
-    if natural_exchange:
-        candidate = natural_exchange.group(1)
-        # Phase 9g — generic English words ("strategy", "stock", etc.)
-        # are never tickers. Reject so discovery prompts like "create
-        # strategy on NSE stock..." don't get misparsed.
-        if candidate.lower() in _NON_TICKER_WORDS:
-            return None
-        # Phase 9g — if NSE/BSE is followed by a generic noun ("NSE
-        # stock", "BSE company"), the user is describing scope, not a
-        # specific ticker. Drop the match.
-        tail = message[natural_exchange.end():]
-        if _NSE_SCOPE_NOUN_RE.match(tail):
-            return None
-        return candidate.upper()
-
-    return None
-
-
 def _stock_choice_key(value: Any) -> str:
     text = str(value or "").strip()
     if ":" in text:
@@ -2015,7 +2055,266 @@ async def accept_message(db: AsyncSession, session_id: str, user_content: str) -
     return user_msg
 
 
-async def run_ai_processing(session_id: str, user_message_id: str, user_content: str) -> None:
+def _summary_row_from_result(symbol: str | None, backtest_result: dict) -> AssetBacktestSummary:
+    """Build one comparison row from a single-asset backtest result.
+
+    The four metrics are lifted verbatim from the result's metrics block — no new
+    computation. Symbol falls back to the run config's symbol when not supplied
+    (single-asset / None case).
+    """
+    m = (backtest_result or {}).get("metrics") or {}
+    return AssetBacktestSummary(
+        symbol=str(
+            symbol
+            or (backtest_result.get("config") or {}).get("symbol")
+            or ""
+        ),
+        backtest_ref_id=str(backtest_result.get("backtest_ref_id") or ""),
+        total_return_pct=float(
+            m.get("net_return_pct", m.get("total_return_pct", 0.0)) or 0.0
+        ),
+        annual_return=float(m.get("annual_return", 0.0) or 0.0),
+        volatility_pct=float(m.get("volatility_pct", 0.0) or 0.0),
+        max_drawdown=float(m.get("max_drawdown", 0.0) or 0.0),
+        failure_reason=str(backtest_result.get("failure_reason") or ""),
+        **{"pass": bool(backtest_result.get("pass"))},
+    )
+
+
+async def _run_single_asset_backtest(
+    *,
+    symbol: str | None,
+    base_run_request: BacktestTriggerRequest,
+    builder,
+    base_yaml_path: str,
+    session_id: str,
+    db,
+) -> tuple[dict, dict]:
+    """Run one single-asset backtest end-to-end; return (backtest_result, result_summary).
+
+    `symbol` overrides the strategy YAML's own symbol (None → use the YAML symbol,
+    preserving the legacy single-asset path). Signal enrichment, auxiliary/HTF
+    fetches, 1-minute execution and the perf-cache feedback all run exactly as the
+    single-asset flow did — just scoped to this one asset.
+
+    The caller resets ``builder.signal_plan`` to a clean baseline before each call
+    so sequential multi-asset runs don't inherit the previous asset's calibrated
+    params (contamination).
+    """
+    run_request = base_run_request.model_copy(update={"symbol": symbol} if symbol else {})
+    yaml_path = base_yaml_path
+    market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
+    run_request = run_request.model_copy(
+        update={
+            "from_utc": market_data_request.from_utc,
+            "to_utc": market_data_request.to_utc,
+        }
+    )
+    # Phase 11 — 1-minute execution. AUTO-on for any non-1m strategy. When on, we
+    # fetch the 1m series ONCE and feed it to the engine (it resamples to the
+    # strategy timeframe for signals and walks minutes for fills/SL/TP). Signal
+    # enrichment needs the strategy-timeframe bars too, but instead of fetching
+    # them over the network a second time we resample the 1m series in-process
+    # (resample_records mirrors the engine's binning), so enrichment stays
+    # calibrated to the exact bars the engine evaluates signals on. The resolved
+    # decision is written back onto run_request so the engine run_config gets a
+    # definite bool (never the AUTO sentinel).
+    intrabar_execution = resolve_intrabar_execution(
+        run_request, signal_interval=market_data_request.interval,
+    )
+    run_request = run_request.model_copy(update={"intrabar_execution": intrabar_execution})
+    main_fetch_request = build_main_fetch_request(
+        market_data_request, intrabar_execution=intrabar_execution,
+    )
+    logger.info(
+        "📡 chat_flow|event=market_data_fetching|session_id=%s"
+        "|symbol=%s|interval=%s|fetch_interval=%s|from=%s|to=%s",
+        session_id,
+        market_data_request.symbol,
+        market_data_request.interval,
+        main_fetch_request.interval,
+        market_data_request.from_utc,
+        market_data_request.to_utc,
+    )
+    # Release the DB connection for the duration of the long network calls below
+    # (fetch_ohlcv_records, fetch_auxiliary_ohlcv, run_quant_backtest_sync — up to
+    # ~3 minutes for big crypto runs). SQLAlchemy auto-reacquires on the next db op
+    # (insert_chat_backtest_row in the caller). Prevents pool starvation.
+    await db.commit()
+    await db.close()
+    # Single network fetch: 1m when intrabar execution is on, else the strategy
+    # timeframe (which is 1m anyway for 1m strategies). This is the series sent to
+    # the engine. Enrichment derives its strategy-timeframe view from it below.
+    engine_ohlcv = await fetch_ohlcv_records(main_fetch_request)
+    if intrabar_execution:
+        ohlcv_data = resample_records(engine_ohlcv, market_data_request.interval)
+    else:
+        ohlcv_data = engine_ohlcv
+    logger.info(
+        "📡 chat_flow|event=market_data_ready|session_id=%s"
+        "|symbol=%s|interval=%s|candles=%d|engine_candles=%d",
+        session_id,
+        market_data_request.symbol,
+        market_data_request.interval,
+        len(ohlcv_data),
+        len(engine_ohlcv),
+    )
+
+    # Enrich signal parameters using actual price/volume statistics before running
+    # the backtest. Replaces universal YAML defaults with values calibrated to this
+    # specific stock and timeframe. Requires >= 60 bars; falls back to YAML defaults
+    # silently on any error.
+    if builder.signal_plan and len(ohlcv_data) >= 60:
+        logger.info(
+            "✨ chat_flow|event=signal_enrichment_start|session_id=%s"
+            "|bars=%d|signals=%s|objective=%s|timeframe=%s",
+            session_id,
+            len(ohlcv_data),
+            (builder.signal_plan or {}).get("signals_used", []),
+            builder.objective or "intraday",
+            builder.timeframe or "15m",
+        )
+        try:
+            enriched_plan = enrich_plan_with_ohlcv(
+                plan=builder.signal_plan,
+                ohlcv_records=ohlcv_data,
+                objective=builder.objective or "intraday",
+                timeframe=builder.timeframe or "15m",
+            )
+            builder.signal_plan = enriched_plan
+            builder.entry_condition = enriched_plan.get("entry_condition")
+            builder.exit_condition = enriched_plan.get("exit_condition")
+            # SDL path: use artifact_to_yaml so the engine receives the exact
+            # contract the SDL compiled.
+            _bt_artifact = getattr(builder, "_sdl_artifact", None)
+            if _bt_artifact is not None:
+                try:
+                    from app.planner.evaluator import artifact_to_yaml as _a2y
+                    import tempfile, os as _os
+                    _yaml_str = _a2y(_bt_artifact)
+                    _tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".yaml", delete=False
+                    )
+                    _tmp.write(_yaml_str)
+                    _tmp.close()
+                    yaml_path = _tmp.name
+                    logger.info(
+                        "📦 chat_flow|event=sdl_yaml_written|session_id=%s"
+                        "|artifact=%.8s|path=%s",
+                        session_id, _bt_artifact.artifact_id, yaml_path,
+                    )
+                except Exception as _y_err:
+                    logger.warning(
+                        "⚠️ chat_flow|event=sdl_yaml_fallback|err=%s",
+                        _y_err,
+                    )
+                    yaml_path = generate_yaml(builder)
+            else:
+                yaml_path = generate_yaml(builder)
+            logger.info(
+                "✅ chat_flow|event=signal_params_enriched|session_id=%s"
+                "|bars=%d|yaml_path=%s|entry=%r|exit=%r",
+                session_id,
+                len(ohlcv_data),
+                yaml_path,
+                (enriched_plan.get("entry_condition") or "")[:80],
+                (enriched_plan.get("exit_condition") or "")[:80],
+            )
+        except Exception:
+            logger.warning(
+                "⚠️ chat_flow|event=signal_enrichment_failed|session_id=%s"
+                " — falling back to YAML defaults",
+                session_id,
+                exc_info=True,
+            )
+    elif builder.signal_plan:
+        logger.info(
+            "⚠️ chat_flow|event=signal_enrichment_skipped|session_id=%s"
+            "|reason=insufficient_bars|bars=%d|min_required=60",
+            session_id,
+            len(ohlcv_data),
+        )
+
+    logger.info(
+        "📈 chat_flow|event=backtest_running|session_id=%s|yaml=%s",
+        session_id,
+        yaml_path,
+    )
+    # Phase 7 — fetch reference / HTF OHLCV when the strategy declares them
+    # (Phases 4 / 5). Both are None for legacy strategies, so this is additive.
+    reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(
+        market_data_request,
+        main_fetch_interval=INTRABAR_EXECUTION_INTERVAL if intrabar_execution else None,
+    )
+    # `engine_ohlcv` (the 1m series under intrabar execution, else the strategy
+    # timeframe) was fetched once above; enrichment ran on the strategy-timeframe
+    # view resampled from it. No second network fetch.
+    backtest_result = await run_quant_backtest_sync(
+        yaml_path=yaml_path,
+        ohlcv_data=engine_ohlcv,
+        run_config=run_request,
+        market_data_request={
+            "symbol": market_data_request.symbol,
+            "interval": market_data_request.interval,
+            "from_utc": market_data_request.from_utc,
+            "to_utc": market_data_request.to_utc,
+        },
+        reference_ohlcv=reference_ohlcv,
+        htf_ohlcv=htf_ohlcv,
+    )
+    m = (backtest_result or {}).get("metrics") or {}
+    logger.info(
+        "🎯 chat_flow|event=backtest_complete|session_id=%s|symbol=%s|engine_ref=%s"
+        "|pass=%s|total_trades=%s|win_rate=%s%%|total_return=%s%%",
+        session_id,
+        market_data_request.symbol,
+        (backtest_result or {}).get("backtest_ref_id"),
+        (backtest_result or {}).get("pass"),
+        m.get("total_trades") if isinstance(m, dict) else None,
+        round(float(m.get("win_rate", 0) or 0), 1) if isinstance(m, dict) else None,
+        round(float(m.get("total_return_pct", 0) or 0), 2) if isinstance(m, dict) else None,
+    )
+    result_summary = summarize_backtest_for_db(backtest_result) or {}
+
+    # Feed backtest outcome back into the performance cache so future signal
+    # planning can use real win-rate data instead of YAML defaults.
+    if builder.signal_plan:
+        _bm = (backtest_result or {}).get("metrics") or {}
+        _wr = float(_bm.get("win_rate", 0) or 0) / 100.0
+        _tt = int(_bm.get("total_trades", 0) or 0)
+        _sym = symbol or builder.format_symbol() or ""
+        _tf = builder.timeframe or ""
+        for _sig in (
+            builder.signal_plan.get("entry", [])
+            + builder.signal_plan.get("exit", [])
+        ):
+            record_performance(
+                signal_name=_sig.get("name", ""),
+                symbol=_sym,
+                timeframe=_tf,
+                params=_sig.get("params", {}),
+                win_rate=_wr,
+                total_trades=_tt,
+            )
+        logger.info(
+            "💾 chat_flow|event=signal_perf_recorded|session_id=%s"
+            "|symbol=%s|tf=%s|win_rate=%.1f%%|total_trades=%d|signals=%s",
+            session_id, _sym, _tf, _wr * 100, _tt,
+            [s.get("name") for s in (
+                builder.signal_plan.get("entry", [])
+                + builder.signal_plan.get("exit", [])
+            )],
+        )
+
+    return backtest_result, result_summary
+
+
+async def run_ai_processing(
+    session_id: str,
+    user_message_id: str,
+    user_content: str,
+    request_symbols: list[str] | None = None,
+) -> None:
     session_uuid = uuid.UUID(session_id)
     user_msg_uuid = uuid.UUID(user_message_id)
     logger.info(
@@ -2060,6 +2359,9 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 (message.strategy_draft for message in reversed(all_messages) if message.strategy_draft),
                 None,
             )
+            # Out-of-range RMS values captured this turn that await user
+            # confirmation (surfaced at the end of the turn, not stored).
+            rms_pending_confirmation: list[dict[str, Any]] = []
             latest_strategy_message = _find_latest_strategy_payload_message(all_messages)
             latest_strategy_context = (
                 _strategy_context(latest_strategy_message.strategy_json)
@@ -2202,6 +2504,12 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
             route = agent_decision.to_legacy_route()
             route_intent = route.get("intent", "collect_input")
             route_reply_text = (route.get("reply_text") or "").strip() or None
+            # Multi-asset: an explicit symbols list on the request bypasses LLM
+            # extraction — it always wins over whatever the agent inferred.
+            if request_symbols:
+                _clean_symbols = [str(s).strip() for s in request_symbols if str(s).strip()]
+                if _clean_symbols:
+                    route["backtest_symbols"] = _clean_symbols
             logger.info(
                 "🧭 chat_flow|event=agent_decision|session_id=%s|intent=%s"
                 "|tool=%s|source=%s|recognized_fields=%s|needs_clarification=%s",
@@ -3131,10 +3439,20 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                 modification_value_fields = list(builder.pending_input_modification_fields)
 
             if not skip_field_extraction:
-                explicit_stock_query = _extract_explicit_stock_query(user_content)
-                stock_query = explicit_stock_query
-                if not stock_query and ("symbol" in recognized_fields or route_intent == "collect_input"):
-                    stock_query = route.get("stock_query")
+                # Symbol extraction is LLM-primary: the router captures any equity
+                # or crypto symbol the user names (verbatim) in `stock_query`, and
+                # the KB-backed `resolve_supported_stock` below is the single
+                # validator against the full universe. There is no regex extractor
+                # — when the LLM returns nothing the symbol simply stays unset and
+                # the normal "which symbol?" collect prompt asks the user.
+                stock_query = route.get("stock_query")
+                # Multi-asset backtest: the named assets drive the backtest only
+                # (they flow through route["backtest_symbols"] to the run_backtest
+                # loop) and are NOT a strategy-symbol change. Skip stock validation
+                # so an unrecognised multi-symbol phrase can't fail resolution and
+                # reset the session to collect_user_input.
+                if route.get("backtest_symbols"):
+                    stock_query = None
                 if (
                     not stock_query
                     and builder.input_modification_requested
@@ -3142,8 +3460,6 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     and route_intent not in {"general_chat", "clarification"}
                 ):
                     stock_query = user_content
-                if not stock_query and _has_explicit_stock_cue(user_content):
-                    stock_query = extract_company_name_query(user_content)
                 if pending_stock_choice:
                     stock_query = None
                 if stock_query:
@@ -3321,18 +3637,52 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                     builder.strategy_preset = parsed_builder.strategy_preset
                     relevant_message = True
 
+                # ── RMS capture — LLM-primary, regex fallback ──────────────────
+                # The LLM router is the primary extractor for risk numbers; the
+                # regex (_extract_rms_from_text) below is a fallback that only
+                # fills fields the LLM missed (first-write-wins on source="user").
+                #
+                # 1. If the user is confirming values we previously flagged as
+                #    out-of-range, commit them now (they explicitly accepted).
+                if user_confirmed and isinstance(last_draft, dict):
+                    if _commit_pending_rms_confirmations(builder, last_draft.get("rms_needs_confirmation")):
+                        relevant_message = True
+                # 2. Capture + validate this turn's LLM-extracted RMS values.
+                _llm_rms_pending = _apply_validated_llm_rms(builder, route)
+                if _llm_rms_pending:
+                    rms_pending_confirmation.extend(_llm_rms_pending)
+                if any(route.get(_k) is not None for _k in _LLM_RMS_ROUTE_KEYS):
+                    relevant_message = True
+
                 # Propagate RMS fields extracted by _extract_rms_from_text.
                 # First-write-wins per field: a user-supplied value in a prior
                 # turn (source="user") is never overwritten by a new extraction.
                 parsed_rms = dict(parsed_builder.risk_execution_config or {})
                 parsed_sources = dict(parsed_rms.pop("rms_sources", {}))
                 if parsed_rms:
+                    from app.services.strategy.rms_validator import RMS_FIELDS, validate_rms
+
                     existing_rms = dict(builder.risk_execution_config or {})
                     existing_sources = dict(existing_rms.get("rms_sources", {}))
+                    _already_pending = {p["field"] for p in rms_pending_confirmation}
                     changed = False
                     for field, val in parsed_rms.items():
                         if existing_sources.get(field) == "user":
                             continue
+                        # Validate the validatable RMS numbers; pass other config
+                        # keys (max_positions, cooldowns, …) through unchanged.
+                        if field in RMS_FIELDS:
+                            verdict = validate_rms(field, val)
+                            if verdict.status == "invalid":
+                                continue
+                            if verdict.needs_confirmation:
+                                if field not in _already_pending:
+                                    rms_pending_confirmation.append(
+                                        {"field": field, "value": verdict.value, "reason": verdict.reason}
+                                    )
+                                    _already_pending.add(field)
+                                continue
+                            val = verdict.value
                         existing_rms[field] = val
                         existing_sources[field] = parsed_sources.get(field, "user")
                         changed = True
@@ -3342,9 +3692,11 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         # stop_loss / take_profit are read-through properties over
                         # risk_execution_config — writing the dict above is the
                         # single source of truth, no mirror needed. daily_loss_cap
-                        # is still a plain attribute.
-                        if "daily_loss_cap" in parsed_rms and builder.daily_loss_cap is None:
-                            builder.daily_loss_cap = parsed_rms["daily_loss_cap"]
+                        # is still a plain attribute. Read from existing_rms (the
+                        # validated/stored value) so a flagged-out-of-range cap
+                        # that was held back does not leak onto the builder.
+                        if existing_rms.get("daily_loss_cap") is not None and builder.daily_loss_cap is None:
+                            builder.daily_loss_cap = float(existing_rms["daily_loss_cap"])
                         relevant_message = True
 
                 # ── Phase 2 — apply execution parameter overrides ───────────────
@@ -3636,238 +3988,130 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         _to_utc,
                         yaml_path,
                     )
-                    backtest_started_at = datetime.now(timezone.utc)
-                    market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
-                    run_request = run_request.model_copy(
-                        update={
-                            "from_utc": market_data_request.from_utc,
-                            "to_utc": market_data_request.to_utc,
-                        }
+                    # Multi-asset: run one backtest per symbol, sequentially.
+                    # Empty/None symbols → a single run using the strategy YAML's
+                    # own symbol (length-1 wrapper — fully back-compatible).
+                    _symbols = route.get("backtest_symbols") or [None]
+                    # Snapshot the clean signal plan so each asset enriches from the
+                    # same baseline; sequential runs must not inherit the previous
+                    # asset's calibrated params (contamination — see helper docstring).
+                    _base_signal_plan = (
+                        copy.deepcopy(builder.signal_plan) if builder.signal_plan else None
                     )
-                    # Phase 11 — 1-minute execution. AUTO-on for any non-1m
-                    # strategy. The main series fed to the engine is fetched at
-                    # 1m below; signal enrichment further down stays on the
-                    # strategy-timeframe series so its stats remain calibrated to
-                    # the strategy's own bars. The resolved decision is written
-                    # back onto run_request so the engine run_config gets a
-                    # definite bool (never the AUTO sentinel).
-                    intrabar_execution = resolve_intrabar_execution(
-                        run_request, signal_interval=market_data_request.interval,
-                    )
-                    run_request = run_request.model_copy(update={"intrabar_execution": intrabar_execution})
-                    logger.info(
-                        "📡 chat_flow|event=market_data_fetching|session_id=%s"
-                        "|symbol=%s|interval=%s|from=%s|to=%s",
-                        session_id,
-                        market_data_request.symbol,
-                        market_data_request.interval,
-                        market_data_request.from_utc,
-                        market_data_request.to_utc,
-                    )
-                    # Release the DB connection for the duration of the long network
-                    # calls below (fetch_ohlcv_records, fetch_auxiliary_ohlcv,
-                    # run_quant_backtest_sync — up to ~3 minutes for big crypto runs).
-                    # SQLAlchemy auto-reacquires when the next db op runs at
-                    # insert_chat_backtest_row(...) below. Prevents pool starvation
-                    # under concurrent load.
-                    await db.commit()
-                    await db.close()
-                    ohlcv_data = await fetch_ohlcv_records(market_data_request)
-                    logger.info(
-                        "📡 chat_flow|event=market_data_ready|session_id=%s"
-                        "|symbol=%s|interval=%s|candles=%d",
-                        session_id,
-                        market_data_request.symbol,
-                        market_data_request.interval,
-                        len(ohlcv_data),
-                    )
-
-                    # Enrich signal parameters using actual price/volume statistics
-                    # before running the backtest. This replaces universal YAML defaults
-                    # with values calibrated to this specific stock and timeframe.
-                    # Requires >= 60 bars; falls back to YAML defaults silently on any error.
-                    if builder.signal_plan and len(ohlcv_data) >= 60:
-                        logger.info(
-                            "✨ chat_flow|event=signal_enrichment_start|session_id=%s"
-                            "|bars=%d|signals=%s|objective=%s|timeframe=%s",
-                            session_id,
-                            len(ohlcv_data),
-                            (builder.signal_plan or {}).get("signals_used", []),
-                            builder.objective or "intraday",
-                            builder.timeframe or "15m",
-                        )
+                    _base_yaml_path = yaml_path
+                    multi_results: list[dict] = []
+                    multi_summary: list[AssetBacktestSummary] = []
+                    for _sym in _symbols:
+                        if _base_signal_plan is not None:
+                            builder.signal_plan = copy.deepcopy(_base_signal_plan)
+                        backtest_started_at = datetime.now(timezone.utc)
                         try:
-                            enriched_plan = enrich_plan_with_ohlcv(
-                                plan=builder.signal_plan,
-                                ohlcv_records=ohlcv_data,
-                                objective=builder.objective or "intraday",
-                                timeframe=builder.timeframe or "15m",
-                            )
-                            builder.signal_plan = enriched_plan
-                            builder.entry_condition = enriched_plan.get("entry_condition")
-                            builder.exit_condition = enriched_plan.get("exit_condition")
-                            # SDL path: use artifact_to_yaml so the engine
-                            # receives the exact contract the SDL compiled.
-                            _bt_artifact = getattr(builder, "_sdl_artifact", None)
-                            if _bt_artifact is not None:
-                                try:
-                                    from app.planner.evaluator import artifact_to_yaml as _a2y
-                                    import tempfile, os as _os
-                                    _yaml_str = _a2y(_bt_artifact)
-                                    _tmp = tempfile.NamedTemporaryFile(
-                                        mode="w", suffix=".yaml", delete=False
-                                    )
-                                    _tmp.write(_yaml_str)
-                                    _tmp.close()
-                                    yaml_path = _tmp.name
-                                    logger.info(
-                                        "📦 chat_flow|event=sdl_yaml_written|session_id=%s"
-                                        "|artifact=%.8s|path=%s",
-                                        session_id, _bt_artifact.artifact_id, yaml_path,
-                                    )
-                                except Exception as _y_err:
-                                    logger.warning(
-                                        "⚠️ chat_flow|event=sdl_yaml_fallback|err=%s",
-                                        _y_err,
-                                    )
-                                    yaml_path = generate_yaml(builder)
-                            else:
-                                yaml_path = generate_yaml(builder)
-                            logger.info(
-                                "✅ chat_flow|event=signal_params_enriched|session_id=%s"
-                                "|bars=%d|yaml_path=%s|entry=%r|exit=%r",
-                                session_id,
-                                len(ohlcv_data),
-                                yaml_path,
-                                (enriched_plan.get("entry_condition") or "")[:80],
-                                (enriched_plan.get("exit_condition") or "")[:80],
-                            )
-                        except Exception:
-                            logger.warning(
-                                "⚠️ chat_flow|event=signal_enrichment_failed|session_id=%s"
-                                " — falling back to YAML defaults",
-                                session_id,
-                                exc_info=True,
-                            )
-                    elif builder.signal_plan:
-                        logger.info(
-                            "⚠️ chat_flow|event=signal_enrichment_skipped|session_id=%s"
-                            "|reason=insufficient_bars|bars=%d|min_required=60",
-                            session_id,
-                            len(ohlcv_data),
-                        )
-
-                    logger.info(
-                        "📈 chat_flow|event=backtest_running|session_id=%s|yaml=%s",
-                        session_id,
-                        yaml_path,
-                    )
-                    # Phase 7 — fetch reference / HTF OHLCV when the strategy
-                    # declares them (Phases 4 / 5). Both are None for legacy
-                    # strategies, so this is purely additive.
-                    reference_ohlcv, htf_ohlcv = await fetch_auxiliary_ohlcv(
-                        market_data_request,
-                        main_fetch_interval=INTRABAR_EXECUTION_INTERVAL if intrabar_execution else None,
-                    )
-                    # Phase 11 — when 1-minute execution is on, fetch the 1m
-                    # series for the engine (it resamples to the strategy
-                    # timeframe for signals and walks minutes for fills/SL/TP).
-                    # Enrichment above already ran on the strategy-timeframe
-                    # `ohlcv_data`, so its calibration is unaffected.
-                    if intrabar_execution:
-                        engine_ohlcv = await fetch_ohlcv_records(
-                            build_main_fetch_request(market_data_request, intrabar_execution=True)
-                        )
-                    else:
-                        engine_ohlcv = ohlcv_data
-                    backtest_result = await run_quant_backtest_sync(
-                        yaml_path=yaml_path,
-                        ohlcv_data=engine_ohlcv,
-                        run_config=run_request,
-                        market_data_request={
-                            "symbol": market_data_request.symbol,
-                            "interval": market_data_request.interval,
-                            "from_utc": market_data_request.from_utc,
-                            "to_utc": market_data_request.to_utc,
-                        },
-                        reference_ohlcv=reference_ohlcv,
-                        htf_ohlcv=htf_ohlcv,
-                    )
-                    m = (backtest_result or {}).get("metrics") or {}
-                    logger.info(
-                        "🎯 chat_flow|event=backtest_complete|session_id=%s|engine_ref=%s"
-                        "|pass=%s|total_trades=%s|win_rate=%s%%|total_return=%s%%",
-                        session_id,
-                        (backtest_result or {}).get("backtest_ref_id"),
-                        (backtest_result or {}).get("pass"),
-                        m.get("total_trades") if isinstance(m, dict) else None,
-                        round(float(m.get("win_rate", 0) or 0), 1) if isinstance(m, dict) else None,
-                        round(float(m.get("total_return_pct", 0) or 0), 2) if isinstance(m, dict) else None,
-                    )
-                    result_summary = summarize_backtest_for_db(backtest_result) or {}
-
-                    # Feed backtest outcome back into the performance cache so future
-                    # signal planning can use real win-rate data instead of YAML defaults.
-                    if builder.signal_plan:
-                        _bm = (backtest_result or {}).get("metrics") or {}
-                        _wr = float(_bm.get("win_rate", 0) or 0) / 100.0
-                        _tt = int(_bm.get("total_trades", 0) or 0)
-                        _sym = builder.format_symbol() or ""
-                        _tf  = builder.timeframe or ""
-                        for _sig in (
-                            builder.signal_plan.get("entry", [])
-                            + builder.signal_plan.get("exit", [])
-                        ):
-                            record_performance(
-                                signal_name=_sig.get("name", ""),
+                            backtest_result, result_summary = await _run_single_asset_backtest(
                                 symbol=_sym,
-                                timeframe=_tf,
-                                params=_sig.get("params", {}),
-                                win_rate=_wr,
-                                total_trades=_tt,
+                                base_run_request=run_request,
+                                builder=builder,
+                                base_yaml_path=_base_yaml_path,
+                                session_id=session_id,
+                                db=db,
                             )
-                        logger.info(
-                            "💾 chat_flow|event=signal_perf_recorded|session_id=%s"
-                            "|symbol=%s|tf=%s|win_rate=%.1f%%|total_trades=%d|signals=%s",
-                            session_id, _sym, _tf, _wr * 100, _tt,
-                            [s.get("name") for s in (
-                                builder.signal_plan.get("entry", [])
-                                + builder.signal_plan.get("exit", [])
-                            )],
-                        )
+                        except Exception as _asset_exc:
+                            # One bad symbol shouldn't abort the whole batch — record
+                            # a failed summary row and continue with the rest.
+                            logger.error(
+                                "❌ chat_flow|event=asset_backtest_failed|session_id=%s"
+                                "|symbol=%s|error=%s",
+                                session_id, _sym, str(_asset_exc)[:200], exc_info=True,
+                            )
+                            if _sid:
+                                try:
+                                    await insert_failed_chat_backtest(
+                                        db,
+                                        strategy_id=uuid.UUID(str(_sid)),
+                                        error_message=str(_asset_exc),
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "❌ chat_flow|event=asset_failure_row_failed"
+                                        "|session_id=%s|symbol=%s",
+                                        session_id, _sym,
+                                    )
+                            multi_summary.append(AssetBacktestSummary(
+                                symbol=str(_sym or ""),
+                                backtest_ref_id="",
+                                failure_reason=str(_asset_exc),
+                                **{"pass": False},
+                            ))
+                            continue
 
-                    if _sid:
-                        try:
-                            strategy_uuid = uuid.UUID(str(_sid))
-                            persisted_backtest_uuid = await insert_chat_backtest_row(
-                                db,
-                                strategy_id=strategy_uuid,
-                                summary=result_summary,
-                                started_at=backtest_started_at,
-                            )
-                            logger.info(
-                                "💾 chat_flow|event=backtest_db_saved|session_id=%s"
-                                "|backtest_id=%s|strategy_id=%s",
+                        multi_results.append(backtest_result)
+                        multi_summary.append(_summary_row_from_result(_sym, backtest_result))
+
+                        # Persist one DB row per asset — each keeps its own ref id.
+                        if _sid:
+                            try:
+                                strategy_uuid = uuid.UUID(str(_sid))
+                                persisted_backtest_uuid = await insert_chat_backtest_row(
+                                    db,
+                                    strategy_id=strategy_uuid,
+                                    summary=result_summary,
+                                    started_at=backtest_started_at,
+                                )
+                                logger.info(
+                                    "💾 chat_flow|event=backtest_db_saved|session_id=%s"
+                                    "|backtest_id=%s|strategy_id=%s|symbol=%s",
+                                    session_id,
+                                    persisted_backtest_uuid,
+                                    strategy_uuid,
+                                    _sym,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "❌ chat_flow|event=backtest_db_save_failed"
+                                    "|session_id=%s|strategy_id=%s",
+                                    session_id,
+                                    _sid,
+                                )
+                        else:
+                            logger.warning(
+                                "⚠️ chat_flow|event=backtest_db_skipped"
+                                "|reason=no_strategy_id|session_id=%s",
                                 session_id,
-                                persisted_backtest_uuid,
-                                strategy_uuid,
                             )
-                        except Exception:
-                            logger.exception(
-                                "❌ chat_flow|event=backtest_db_save_failed|session_id=%s|strategy_id=%s",
-                                session_id,
-                                _sid,
-                            )
+
+                    if not multi_results:
+                        # Every asset failed — surface the first failure reason so the
+                        # outer handler produces an error reply.
+                        raise RuntimeError(next(
+                            (s.failure_reason for s in multi_summary if s.failure_reason),
+                            "All asset backtests failed.",
+                        ))
+
+                    # Single asset → store/reply exactly as before (no wrapper) so
+                    # existing clients are unaffected. Multiple assets → store the
+                    # full wrapper: the Go backend persists one row per asset from
+                    # results[] and serves the lightweight summary (symbol →
+                    # backtest_ref_id + key metrics) so the frontend can fetch each
+                    # asset's detail by ref id.
+                    _is_multi = len(_symbols) > 1
+                    if _is_multi:
+                        multi_asset_result = MultiAssetBacktestResult(
+                            strategy_name=(multi_results[0] or {}).get("strategy_name"),
+                            backtest_date_range=(multi_results[0] or {}).get("backtest_date_range"),
+                            num_assets=len(multi_results),
+                            results=multi_results,
+                            summary=multi_summary,
+                        )
+                        assistant_text = build_backtest_result_reply(
+                            builder, multi_results[0], multi_result=multi_asset_result,
+                        )
+                        strategy_json_to_save = {
+                            "backtest_result": multi_asset_result.model_dump(by_alias=True)
+                        }
                     else:
-                        logger.warning(
-                            "⚠️ chat_flow|event=backtest_db_skipped|reason=no_strategy_id|session_id=%s",
-                            session_id,
-                        )
-
-                    assistant_text = build_backtest_result_reply(builder, backtest_result)
+                        backtest_result = multi_results[0]
+                        assistant_text = build_backtest_result_reply(builder, backtest_result)
+                        strategy_json_to_save = {"backtest_result": backtest_result}
                     assistant_state = "backtest_complete"
-                    # Full result (incl. metrics.backtest_trades) for API/clients; DB row uses result_summary only
-                    strategy_json_to_save = {"backtest_result": backtest_result}
                     draft = builder.to_draft_json(
                         mode_override="backtest_complete",
                         processing_status="complete",
@@ -3876,10 +4120,13 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
                         "from_utc": _from_utc,
                         "to_utc": _to_utc,
                     }
-                    ref_backtest_id = str(backtest_result.get("backtest_ref_id") or "")
+                    ref_backtest_id = str((multi_results[0] or {}).get("backtest_ref_id") or "")
                     if ref_backtest_id:
                         draft["backtest_ref_id"] = ref_backtest_id
-                    
+                    _ref_ids = [s.backtest_ref_id for s in multi_summary if s.backtest_ref_id]
+                    if _ref_ids:
+                        draft["backtest_ref_ids"] = _ref_ids
+
                     # Log token usage summary at backtest completion
                     log_token_summary(session_id, "backtest_complete")
                 except BacktestWindowError as window_exc:
@@ -5040,6 +5287,15 @@ async def run_ai_processing(session_id: str, user_message_id: str, user_content:
 
             if user_msg:
                 user_msg.status = MessageStatus.completed
+
+            # Surface any out-of-range RMS values for explicit confirmation. They
+            # are persisted on the draft so the next turn can commit them if the
+            # user confirms (see _commit_pending_rms_confirmations).
+            if rms_pending_confirmation:
+                note = _build_rms_confirmation_note(rms_pending_confirmation)
+                assistant_text = f"{note}\n\n{assistant_text}" if assistant_text else note
+                if isinstance(draft, dict):
+                    draft["rms_needs_confirmation"] = rms_pending_confirmation
 
             from app.services.chat.inputs_snapshot import append_inputs_snapshot
 

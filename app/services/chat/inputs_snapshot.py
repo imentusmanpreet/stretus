@@ -235,6 +235,11 @@ def _summary_rows_from_draft(draft: dict[str, Any]) -> list[dict[str, str]]:
         tp = _user_supplied_rms_pct(draft, "take_profit_pct")
         tp_display = f"{_fmt_num(tp)}%" if tp is not None else None
 
+    per_trade_risk = (
+        risk.get("per_trade_risk")
+        if sources.get("per_trade_risk") in _USER_RMS_SOURCES
+        else None
+    )
     daily_cap = (
         risk.get("daily_loss_cap_pct") or risk.get("daily_loss_cap")
         if sources.get("daily_loss_cap") in _USER_RMS_SOURCES
@@ -249,7 +254,8 @@ def _summary_rows_from_draft(draft: dict[str, Any]) -> list[dict[str, str]]:
     for label, raw in (
         ("Stop loss", sl_display),
         ("Take profit", tp_display),
-        ("Daily loss cap", f"{daily_cap}%" if daily_cap not in (None, 0, 0.0) else None),
+        ("Per-trade risk", f"{_fmt_num(per_trade_risk)}%" if per_trade_risk not in (None, 0, 0.0) else None),
+        ("Daily loss cap", f"{_fmt_num(daily_cap)}%" if daily_cap not in (None, 0, 0.0) else None),
         ("Max trades / day", str(max_trades) if max_trades not in (None, 0) else None),
     ):
         row = _row(label, raw)

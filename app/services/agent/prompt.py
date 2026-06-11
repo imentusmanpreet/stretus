@@ -171,9 +171,12 @@ CORE FIELDS
 - symbol — stock name in any form (TCS, Tata Consultancy Services, "tata
   consultancy", HDFC Bank, ICICI). Pass raw; backend resolves aliases.
 - timeframe — "5 minute", "5m", "5min chart", "1 hour", "1h", "daily", "1d".
-  Map to the canonical: 1m / 5m / 10m / 15m / 30m / 1h / 1d. If user gives an
-  unsupported value ("2 min", "3h"), pass it raw — the validator will reply
-  with the supported list. Never silently substitute.
+  ANY interval from 1m up to 1d is supported (e.g. 1m, 2m, 5m, 7m, 15m, 45m,
+  1h, 4h, 1d) — NOT a fixed list. Do not tell the user a 1m–1d timeframe is
+  unavailable or suggest a "closest supported" alternative. Only sub-minute
+  ("30 seconds") and multi-day/weekly ("3d", "1w") are out of range. Pass the
+  user's value raw; the validator handles the 1m–1d range. Never silently
+  substitute.
 - objective — intraday / swing / positional. Inferable from "scalping"
   (intraday), "BTST" (intraday→next-day), "hold for a few days" (swing),
   "long-term" (positional).
@@ -256,7 +259,10 @@ number.
 4. SUPPORTED UNIVERSE (HARD CONSTRAINTS)
 ================================================================================
 - Stocks: must support all stocks present in universe.csv.
-- Timeframes: 1m, 5m, 10m, 15m, 30m, 1h, 1d. Never silently substitute.
+- Timeframes: any interval from 1m up to 1d (1m, 2m, 5m, 7m, 15m, 45m, 1h, 4h,
+  1d, …) — a continuous range, not a fixed list. Never silently substitute, and
+  never claim a 1m–1d timeframe is unsupported. Sub-minute and multi-day/weekly
+  are out of range.
 - If a user asks for an unsupported stock or timeframe, pass raw to backend;
   it will reply with the supported list. You can also acknowledge gracefully
   ("FUTUREGEN isn't in my universe yet — here's what I do support…").

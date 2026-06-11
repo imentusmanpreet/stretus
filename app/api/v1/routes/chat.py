@@ -438,6 +438,7 @@ async def send_message(
         session_id,
         str(user_msg.id),
         body.content,
+        body.symbols,
     )
 
     return AsyncMessageAcceptedResponse(

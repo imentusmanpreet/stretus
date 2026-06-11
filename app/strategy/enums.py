@@ -10,12 +10,21 @@ Market strings are normalised through the engine itself rather than enumerated.
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
 from app.strategy import engine_bridge
+
+# Range-based timeframe acceptance: the backtest fetches 1-minute data and the
+# engine resamples up to any timeframe, so any well-formed 1m..1d interval is
+# valid — not just the curated presets in timeframes.yaml.
+_TF_RANGE_RE = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$", re.IGNORECASE)
+_TF_UNIT_MINUTES = {"m": 1, "h": 60, "d": 1440, "w": 10080}
+_TF_MIN_MINUTES = 1
+_TF_MAX_MINUTES = 1440
 
 # The engine's two objective outputs and three direction outputs. These match the
 # literals in engine.loader (StrategyConfig.objective / .direction) and are kept
@@ -50,8 +59,22 @@ def supported_timeframes() -> tuple[str, ...]:
 
 
 def is_supported_timeframe(timeframe: str) -> bool:
-    tfs = supported_timeframes()
-    return bool(tfs) and str(timeframe).strip() in tfs
+    """True for any well-formed timeframe within the accepted range (1m..1d).
+
+    Curated presets in timeframes.yaml match exactly; everything else is range-
+    checked, so arbitrary intervals (2m, 7m, 45m, 4h) are accepted because the
+    engine resamples them from 1-minute data.
+    """
+    raw = str(timeframe).strip()
+    if not raw:
+        return False
+    if raw in supported_timeframes():
+        return True
+    match = _TF_RANGE_RE.match(raw)
+    if not match:
+        return False
+    minutes = int(match.group(1)) * _TF_UNIT_MINUTES[match.group(2).lower()]
+    return _TF_MIN_MINUTES <= minutes <= _TF_MAX_MINUTES
 
 
 def normalise_market(market: str) -> str:

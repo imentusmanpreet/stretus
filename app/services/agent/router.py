@@ -58,6 +58,15 @@ class AgentDecision:
             "agent_tool": self.tool_name,
             "agent_tool_parameters": params,
             "agent_source": self.source,
+            # RMS shape parity with the legacy router. Values for tool decisions
+            # travel inside agent_tool_parameters and are merged downstream; the
+            # top-level keys stay None unless explicitly mapped below.
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "risk_reward": None,
+            "per_trade_risk": None,
+            "daily_loss_cap": None,
+            "max_trades": None,
         }
 
         if self.tool_name in {
@@ -110,6 +119,8 @@ class AgentDecision:
                 route["backtest_from_utc"] = params["from_utc"]
             if params.get("to_utc"):
                 route["backtest_to_utc"] = params["to_utc"]
+            if params.get("symbols"):
+                route["backtest_symbols"] = params["symbols"]
             return route
 
         if self.tool_name == AgentToolName.MODIFY_SIGNAL_SELECTION.value:
@@ -353,6 +364,8 @@ def _decision_from_legacy_route(route: dict[str, Any], state: dict[str, Any]) ->
             params["from_utc"] = route["backtest_from_utc"]
         if route.get("backtest_to_utc"):
             params["to_utc"] = route["backtest_to_utc"]
+        if route.get("backtest_symbols"):
+            params["symbols"] = route["backtest_symbols"]
     elif intent == "confirmation" and route.get("is_confirmation"):
         mode = str(state.get("mode") or "")
         if mode == "plan_signals" and state.get("has_signal_plan"):

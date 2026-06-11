@@ -16,6 +16,11 @@ class BacktestTriggerRequest(BaseModel):
     to_utc: Optional[str] = None
     interval: Optional[str] = None
     symbol: Optional[str] = None
+    # Multi-asset: explicit list of symbols to backtest sequentially. When
+    # non-empty, one backtest runs per symbol (each overriding the YAML symbol)
+    # and the response is the MultiAssetBacktestResult wrapper. When empty/None,
+    # falls back to [symbol or YAML symbol] — still wrapped as a length-1 result.
+    symbols: Optional[list[str]] = None
     starting_balance: float = 10_000.0
     slippage_bps: float = 5.0
     commission_bps: float = 2.0
@@ -301,6 +306,42 @@ class BacktestResultPayload(BaseModel):
     # Diagnostic internals (engine debugging)
     condition_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     diagnostic_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Multi-asset summary + wrapper ─────────────────────────────────────────────
+
+class AssetBacktestSummary(BaseModel):
+    """One comparison row per asset for the multi-asset summary.
+
+    The four metrics are lifted verbatim from each asset's BacktestMetrics; no
+    new computation happens here.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    symbol: str
+    backtest_ref_id: str
+    total_return_pct: float = 0.0   # metrics.net_return_pct (a.k.a. total_return_pct)
+    annual_return: float = 0.0      # metrics.annual_return
+    volatility_pct: float = 0.0     # metrics.volatility_pct
+    max_drawdown: float = 0.0       # metrics.max_drawdown
+    pass_: bool = Field(default=False, alias="pass")
+    failure_reason: str = ""
+
+
+class MultiAssetBacktestResult(BaseModel):
+    """Always-returned wrapper around one-or-more single-asset backtests.
+
+    `results[i]` is the unchanged single-asset BacktestResultPayload, so a single
+    element renders exactly like today's standalone result. `summary` holds one
+    AssetBacktestSummary row per asset for side-by-side comparison.
+    """
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    strategy_name: Optional[str] = None
+    backtest_date_range: Optional[dict[str, Any]] = None
+    num_assets: int = 0
+    results: list[BacktestResultPayload] = Field(default_factory=list)
+    summary: list[AssetBacktestSummary] = Field(default_factory=list)
 
 
 # ── API response wrapper ──────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.core.timing import time_step
 from app.schemas.backtest import BacktestTriggerRequest
 from app.services.backtest.market_data_grpc import (
+    GRPC_OHLCV_INTERVALS,
     fetch_ohlcv_chunk_grpc,
     open_grpc_channel,
     use_grpc_transport,
@@ -30,6 +31,7 @@ from app.services.backtest.ohlcv_cache import (
 from app.services.strategy.builder import (
     SUPPORTED_USER_TIMEFRAMES,
     UNSUPPORTED_USER_TIMEFRAME_MESSAGE,
+    _timeframe_to_minutes,
     resolve_supported_user_timeframe,
 )
 logger = logging.getLogger(__name__)
@@ -61,29 +63,38 @@ class OhlcvFetchSlot:
 
 # ── Lookback computation ───────────────────────────────────────────────────────
 
-# Bars per calendar day for NSE/BSE.
-# Indian market session: 9:15 AM – 3:30 PM IST = 375 minutes (NOT 390 which is the US market).
-_BARS_PER_CALENDAR_DAY: dict[str, float] = {
-    "1m":  375.0,   # 375 one-minute bars per NSE session
-    "5m":  75.0,    # 375 / 5
-    "10m": 37.0,    # 375 / 10 = 37.5 → floor
-    "15m": 25.0,    # 375 / 15
-    "30m": 12.0,    # 375 / 30 = 12.5 → floor
-    "1h":  6.25,    # 375 / 60 = 6.25
-    "1d":  1.0,
-}
+# Bars per calendar day for NSE/BSE, computed from the timeframe rather than a
+# fixed lookup so ANY interval (2m, 7m, 45m, 4h, …) gets a correct value.
+# Indian market session: 9:15 AM – 3:30 PM IST = 375 minutes (NOT 390 = US).
+_NSE_SESSION_MINUTES = 375.0
 
-# Extra calendar-day buffer beyond indicator warm-up:
-# 1d bars have fewer bars per day so we add a large buffer
-_INTERVAL_BUFFER_DAYS: dict[str, int] = {
-    "1m":  7,
-    "5m":  7,
-    "10m": 7,
-    "15m": 14,
-    "30m": 14,
-    "1h":  21,
-    "1d":  90,  # monthly-style buffer for daily strategies
-}
+
+def _bars_per_calendar_day(interval: str) -> float:
+    """Approx. number of bars one NSE trading day yields at ``interval``.
+
+    Intraday: session_minutes / timeframe_minutes (e.g. 5m → 75, 45m → 8.33).
+    Daily-or-coarser: 1 bar per day. Defensive fallback for unparseable input.
+    """
+    minutes = _timeframe_to_minutes(interval) or 0
+    if minutes <= 0:
+        return 26.0
+    if minutes >= 1440:
+        return 1.0
+    return _NSE_SESSION_MINUTES / minutes
+
+
+def _interval_buffer_days(interval: str, *, daily_default: int = 90) -> int:
+    """Extra calendar-day warm-up buffer; coarser timeframes need a wider window
+    because each day yields fewer bars. Monotonic in the timeframe so arbitrary
+    intervals slot in sensibly (e.g. 45m → 21, 7m → 7)."""
+    minutes = _timeframe_to_minutes(interval) or 0
+    if minutes >= 1440:
+        return daily_default
+    if minutes >= 60:
+        return 21
+    if minutes >= 15:
+        return 14
+    return 7
 
 # Warm-up safety multiplier: we want 2× the indicator warm-up as eligible candles
 _WARMUP_SAFETY_FACTOR = 2
@@ -140,8 +151,8 @@ def _compute_user_range_padding_days(
     del objective
     strategy_payload = strategy or {}
     max_period = _max_warmup_bars(strategy_payload, indicators)
-    bars_per_day = _BARS_PER_CALENDAR_DAY.get(interval, 26.0)
-    buffer_days = _INTERVAL_BUFFER_DAYS.get(interval, 7)
+    bars_per_day = _bars_per_calendar_day(interval)
+    buffer_days = _interval_buffer_days(interval)
     min_pad = max(7, settings.backtest_user_range_min_padding_days)
     max_pad = max(min_pad, settings.backtest_user_range_max_padding_days)
 
@@ -175,8 +186,8 @@ def _compute_required_lookback_days(
     ``_compute_user_range_padding_days`` for user-specified windows.
     """
     max_period = _extract_max_indicator_period(indicators)
-    bars_per_day = _BARS_PER_CALENDAR_DAY.get(interval, 26.0)
-    buffer_days = _INTERVAL_BUFFER_DAYS.get(interval, 30)
+    bars_per_day = _bars_per_calendar_day(interval)
+    buffer_days = _interval_buffer_days(interval)
 
     if max_period <= 0:
         return max(settings.backtest_default_lookback_days, 90)
@@ -462,13 +473,27 @@ def resolve_intrabar_execution(
     elif isinstance(overrides, dict):
         explicit = overrides.get("intrabar_execution")
 
+    interval_norm = str(signal_interval or "").strip().lower()
+
+    # Safety: an arbitrary timeframe (e.g. 2m, 7m, 45m) cannot be fetched
+    # natively from the data provider — only 1m can, and the engine resamples
+    # it up. So even if the caller explicitly disabled intrabar execution, force
+    # it on whenever the interval is neither 1m nor a provider-native interval;
+    # otherwise the raw interval would be sent to the provider and rejected.
+    natively_fetchable = (
+        interval_norm == INTRABAR_EXECUTION_INTERVAL
+        or interval_norm in GRPC_OHLCV_INTERVALS
+    )
+    if interval_norm and interval_norm != INTRABAR_EXECUTION_INTERVAL and not natively_fetchable:
+        return True
+
     if explicit is not None:
         return bool(explicit)
 
     # AUTO: anything coarser than 1m executes on 1m for accuracy.
     if not signal_interval:
         return False
-    return str(signal_interval).strip().lower() != INTRABAR_EXECUTION_INTERVAL
+    return interval_norm != INTRABAR_EXECUTION_INTERVAL
 
 
 def build_main_fetch_request(

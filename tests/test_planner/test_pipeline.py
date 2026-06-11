@@ -74,8 +74,9 @@ async def test_unknown_stock_raises():
 @pytest.mark.asyncio
 async def test_unknown_timeframe_raises():
     pipe = _pipeline_with_intent({})
+    # 13m is now valid (range-based 1m..1d). Use an out-of-range timeframe.
     with pytest.raises(UnsupportedTimeframe):
-        await pipe.plan(_builder(timeframe="13m"))
+        await pipe.plan(_builder(timeframe="2w"))
 
 
 @pytest.mark.asyncio

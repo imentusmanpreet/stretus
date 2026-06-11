@@ -299,7 +299,19 @@ def build_backtest_ready_reminder() -> str:
     return compose_response("workflow.strategy_ready_for_backtest")
 
 
-def build_backtest_result_reply(builder: StrategyBuilder, backtest_result: dict) -> str:
+def build_backtest_result_reply(
+    builder: StrategyBuilder,
+    backtest_result: dict,
+    *,
+    multi_result: Any = None,
+) -> str:
+    # Multi-asset: when more than one asset ran, lead with a side-by-side
+    # comparison table. `multi_result` is a MultiAssetBacktestResult (duck-typed
+    # here to avoid a circular import).
+    summary = getattr(multi_result, "summary", None)
+    if summary and len(summary) > 1:
+        return _build_multi_asset_reply(multi_result)
+
     metrics = backtest_result.get("metrics") if isinstance(backtest_result, dict) else {}
     assessment = backtest_result.get("assessment") if isinstance(backtest_result, dict) else {}
 
@@ -313,6 +325,39 @@ def build_backtest_result_reply(builder: StrategyBuilder, backtest_result: dict)
         overall_grade=(assessment or {}).get("overall_grade"),
         failure_reason=backtest_result.get("failure_reason"),
     )
+
+
+def _build_multi_asset_reply(multi_result: Any) -> str:
+    """Compact markdown comparison of per-asset key metrics.
+
+    One row per asset: total return, annualized return, volatility, max drawdown —
+    the four metrics requested for cross-asset comparison.
+    """
+    def _pct(value: float | None) -> str:
+        try:
+            return f"{float(value):.2f}%"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    rows = [
+        "| Asset | Total Return | Annualized | Volatility | Max Drawdown | Result |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in multi_result.summary:
+        if row.failure_reason and not row.backtest_ref_id:
+            rows.append(
+                f"| {row.symbol} | — | — | — | — | ❌ {row.failure_reason[:40]} |"
+            )
+            continue
+        rows.append(
+            f"| {row.symbol} | {_pct(row.total_return_pct)} | {_pct(row.annual_return)} "
+            f"| {_pct(row.volatility_pct)} | {_pct(row.max_drawdown)} "
+            f"| {'✅ Pass' if row.pass_ else '⚠️ Fail'} |"
+        )
+
+    num = getattr(multi_result, "num_assets", len(multi_result.summary))
+    header = f"Backtest complete for {num} asset(s). Here's how they compare:"
+    return "\n".join([header, "", *rows])
 
 
 def build_backtest_error_reply(reason: str) -> str:

@@ -19,7 +19,7 @@ USER-FACING OPENING RULE
 SUPPORTED USER INPUTS
 - Collect only: {asset_word} name or symbol, timeframe, objective, sentiment, experience, and goal.
 - Do not ask for daily loss cap, max trade duration, max trades, entry conditions, or exit conditions during input collection.
-- Supported timeframes are exactly: 1m, 5m, 10m, 15m, 30m, 1h, 1d.
+- Supported timeframes: any interval from 1m up to 1d (e.g. 1m, 2m, 5m, 7m, 15m, 45m, 1h, 4h, 1d) — a continuous range, not a fixed list. Do not tell the user a 1m–1d timeframe is unsupported. Sub-minute and multi-day/weekly are out of range.
 
 OUTPUT CONTRACT
 - Backend actions must be represented as structured tool calls.

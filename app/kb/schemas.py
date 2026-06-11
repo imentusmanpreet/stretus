@@ -7,6 +7,7 @@ startup instead of corrupting a runtime plan.
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -337,6 +338,13 @@ class Stock(BaseModel):
 
 # ── Timeframes / markets / risk tiers ─────────────────────────────────────────
 
+# Range-based timeframe acceptance: backtests fetch 1-minute data and the engine
+# resamples up to any timeframe, so any well-formed 1m..1d interval is valid.
+_TF_RANGE_RE = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$", re.IGNORECASE)
+_TF_UNIT_MINUTES = {"m": 1, "h": 60, "d": 1440, "w": 10080}
+_TF_MIN_MINUTES = 1
+_TF_MAX_MINUTES = 1440
+
 
 class TimeframeConfig(BaseModel):
     supported: list[str]
@@ -344,11 +352,25 @@ class TimeframeConfig(BaseModel):
     synonyms: dict[str, str] = Field(default_factory=dict)
 
     def normalize(self, raw: str) -> str | None:
-        """Map a free-text timeframe to a canonical supported one. Returns None if unknown."""
+        """Map a free-text timeframe to its canonical form.
+
+        Returns the canonical timeframe for any well-formed interval within the
+        accepted range (1m..1d), not just the curated ``supported`` presets —
+        the presets win as exact matches, everything else is range-checked.
+        Returns None for malformed or out-of-range input.
+        """
         if not raw:
             return None
         canonical = self.synonyms.get(raw.strip().lower(), raw.strip().lower())
-        return canonical if canonical in self.supported else None
+        if canonical in self.supported:
+            return canonical
+        match = _TF_RANGE_RE.match(canonical)
+        if not match:
+            return None
+        minutes = int(match.group(1)) * _TF_UNIT_MINUTES[match.group(2).lower()]
+        if _TF_MIN_MINUTES <= minutes <= _TF_MAX_MINUTES:
+            return canonical
+        return None
 
     def bucket_of(self, timeframe: str) -> str | None:
         for name, members in self.buckets.items():

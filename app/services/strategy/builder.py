@@ -69,6 +69,11 @@ VALID_TIMEFRAMES = {
     "1d", "3d", "1w",
 }
 
+# Curated presets shown to the user (chips / examples). NOT a validation
+# allowlist — validation is range-based (see resolve_supported_user_timeframe).
+# Any timeframe from TIMEFRAME_MIN_MINUTES to TIMEFRAME_MAX_MINUTES is accepted,
+# because backtests fetch 1-minute data and the engine resamples it up to any
+# timeframe (quant_engine/engine/resample.py).
 SUPPORTED_USER_TIMEFRAMES = (
     "1m",
     "5m",
@@ -79,15 +84,20 @@ SUPPORTED_USER_TIMEFRAMES = (
     "1d",
 )
 
-SUPPORTED_USER_TIMEFRAME_TEXT = "1m, 5m, 10m, 15m, 30m, 1h, 1d"
+# Inclusive bounds for an accepted timeframe, in minutes.
+#   floor = 1m  — we only have 1-minute source data; nothing finer can be built.
+#   cap   = 1d  — resampling a full day (1440 bars) from 1m is the practical
+#                 ceiling; anything coarser (multi-day / weekly) is rejected.
+TIMEFRAME_MIN_MINUTES = 1
+TIMEFRAME_MAX_MINUTES = 1440
+
+SUPPORTED_USER_TIMEFRAME_TEXT = (
+    "any timeframe from 1m up to 1d (for example 1m, 5m, 15m, 30m, 1h, 4h, 1d)"
+)
 UNSUPPORTED_USER_TIMEFRAME_CODE = "validation.unsupported_timeframe"
 UNSUPPORTED_USER_TIMEFRAME_MESSAGE = build_unsupported_timeframe_message(
     SUPPORTED_USER_TIMEFRAME_TEXT
 )
-# Only accept exact equivalents (e.g. "60 minute" → 1h). Anything that does not
-# canonicalize to a supported value is rejected and reported back to the user
-# instead of being silently snapped to the nearest supported timeframe.
-MAX_TIMEFRAME_SNAP_GAP_MINUTES = 0
 
 
 def unsupported_user_timeframe_validation_facts() -> dict[str, Any]:
@@ -389,34 +399,30 @@ def _timeframe_to_minutes(timeframe: str) -> Optional[int]:
 
 
 def resolve_supported_user_timeframe(timeframe: str) -> tuple[Optional[str], Optional[str]]:
-    """Resolve a user-provided timeframe to a supported value.
+    """Resolve a user-provided timeframe to its canonical form.
 
-    Returns (resolved, None) on success, otherwise (None, validation_message).
-    Never silently snaps unsupported timeframes to a different value: the user
-    must pick from the supported list explicitly.
+    Returns (canonical, None) on success, otherwise (None, validation_message).
+
+    Validation is RANGE-BASED, not allowlist-based: any well-formed timeframe
+    whose duration is within [TIMEFRAME_MIN_MINUTES, TIMEFRAME_MAX_MINUTES] is
+    accepted (e.g. 2m, 7m, 45m, 4h), because the backtest fetches 1-minute data
+    and the engine resamples it up to the requested timeframe. The user's value
+    is canonicalised (e.g. "60 minute" → "1h") but never snapped to a different
+    duration — what they ask for is what they get.
     """
     raw = (timeframe or "").strip()
     if not raw:
         return None, UNSUPPORTED_USER_TIMEFRAME_MESSAGE
 
-    canonical = normalise_timeframe(raw) or raw
-    requested_minutes = _timeframe_to_minutes(canonical)
-    if requested_minutes is None:
+    canonical = normalise_timeframe(raw)
+    if not canonical:
         return None, UNSUPPORTED_USER_TIMEFRAME_MESSAGE
 
-    nearest_timeframe = min(
-        SUPPORTED_USER_TIMEFRAMES,
-        key=lambda candidate: (
-            abs((_timeframe_to_minutes(candidate) or 0) - requested_minutes),
-            (_timeframe_to_minutes(candidate) or 0),
-        ),
-    )
-    nearest_minutes = _timeframe_to_minutes(nearest_timeframe) or 0
+    minutes = _timeframe_to_minutes(canonical)
+    if minutes is None or minutes < TIMEFRAME_MIN_MINUTES or minutes > TIMEFRAME_MAX_MINUTES:
+        return None, UNSUPPORTED_USER_TIMEFRAME_MESSAGE
 
-    if abs(nearest_minutes - requested_minutes) <= MAX_TIMEFRAME_SNAP_GAP_MINUTES:
-        return nearest_timeframe, None
-
-    return None, UNSUPPORTED_USER_TIMEFRAME_MESSAGE
+    return canonical, None
 
 
 _TF_RE = re.compile(
@@ -2156,31 +2162,37 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
     rms: dict[str, Any] = {}
 
     # ── Stop loss ─────────────────────────────────────────────────────────────
-    # "SL 2%", "stop loss at 1.5%", "stop at 1%", "2% stop"
+    # "SL 2%", "stop loss at 1.5%", "stop at 1%", "2% stop".
+    # Keyword-first is tried before digit-first so that in "Stop Loss: 0.50%
+    # Take Profit: 1.00%" the keyword-anchored "0.50%" wins and the digit-first
+    # alternative can't grab the take-profit number that follows a later keyword.
     sl_match = re.search(
         r"\b(?:stop[\s\-]*loss|stoploss|sl|stop)\s*[=:@]?\s*(?:(?:at|to)\s+)?"
-        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
-        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:stop|sl|stop[\s\-]*loss)\b",
+        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
+        text, re.IGNORECASE,
+    ) or re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:stop|sl|stop[\s\-]*loss)\b",
         text, re.IGNORECASE,
     )
     if sl_match:
-        val = float(sl_match.group(1) or sl_match.group(2) or 0)
+        val = float(sl_match.group(1) or 0)
         if val > 0:
             rms["stop_loss_pct"] = {"value": val, "source": "user"}
 
     # ── Take profit ───────────────────────────────────────────────────────────
-    # "TP 5%", "target 3%", "take profit 4%", "3% target", "3% take profit"
+    # "TP 5%", "target 3%", "take profit 4%", "3% target", "3% take profit".
+    # Same keyword-first precedence as stop loss above.
     tp_match = re.search(
-        # Keyword-first: "take profit 3%", "TP 3%", "target 3%"
         r"\b(?:take[\s\-]*profit|takeprofit|tp|target|tgt)\s*[=:@]?\s*(?:(?:at|to)\s+)?"
-        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?"
-        # Digit-first: "3% take profit", "3% TP", "3% target", "3% profit"
-        r"|\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+"
+        r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
+        text, re.IGNORECASE,
+    ) or re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+"
         r"(?:take[\s\-]*profit|takeprofit|target|tp|profit)\b",
         text, re.IGNORECASE,
     )
     if tp_match:
-        val = float(tp_match.group(1) or tp_match.group(2) or 0)
+        val = float(tp_match.group(1) or 0)
         if val > 0:
             rms["take_profit_pct"] = {"value": val, "source": "user"}
 
@@ -2284,11 +2296,14 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
 
     # ── Per-trade risk ────────────────────────────────────────────────────────
     # Allow intervening adverbs: "risk only 2%", "risk just 1%", "only risk 1%".
+    # The "\s*[=:@]?\s*" after the keyword lets "Per Trade Risk: 1%" match — the
+    # "Label: value" form was previously dropped because only whitespace was
+    # allowed between the keyword and the number.
     ptr_match = re.search(
-        r"\b(?:risk|per[\s\-]*trade[\s\-]*risk|per\s+trade)\s+"
+        r"\b(?:risk|per[\s\-]*trade[\s\-]*risk|per\s+trade)\s*[=:@]?\s*"
         r"(?:only\s+|just\s+|max(?:imum)?\s+|up\s+to\s+|at\s+most\s+)?"
         r"(?:₹\s*)?(\d+(?:\.\d+)?)\s*(%|percent|pct)\s*(?:of\s+capital|per\s+trade)?"
-        r"|\brisk\s+(?:only\s+|just\s+|max(?:imum)?\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
+        r"|\brisk\s*[=:@]?\s*(?:only\s+|just\s+|max(?:imum)?\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
         text, re.IGNORECASE,
     )
     if ptr_match:
@@ -2300,8 +2315,8 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
     # Allow optional "of" / "at" / ":" between the keyword and the number.
     dlc_match = re.search(
         r"\b(?:daily[\s\-]*(?:loss[\s\-]*)?(?:cap|limit|sl|stop|loss)"
-        r"|max[\s\-]*daily[\s\-]*loss|cap\s+loss(?:es)?|stop\s+trading\s+after)\s+"
-        r"(?:(?:a|an)\s+)?(?:of\s+|at\s+|to\s+|:\s+)?(?:₹\s*)?"
+        r"|max[\s\-]*daily[\s\-]*loss|cap\s+loss(?:es)?|stop\s+trading\s+after)\s*[=:@]?\s*"
+        r"(?:(?:a|an)\s+)?(?:of\s+|at\s+|to\s+)?(?:₹\s*)?"
         r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|percent|pct|k)?"
         r"|\bdaily\s+(?:sl|stop[\s\-]*loss)\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\b",
         text, re.IGNORECASE,

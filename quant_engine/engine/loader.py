@@ -363,17 +363,26 @@ def _infer_max_holding_candles(objective: str, timeframe: str) -> int | None:
     tf = str(timeframe or "1d").lower().strip()
     obj = str(objective or "positional").lower()
 
+    # Minutes for this timeframe, parsed generically so ANY interval (2m, 7m,
+    # 45m, 4h, …) yields a correct cap instead of a fixed-table fallback.
+    from engine.htf import timeframe_to_timedelta
+    try:
+        tf_minutes = int(timeframe_to_timedelta(tf).total_seconds() // 60)
+    except ValueError:
+        tf_minutes = 0
+
     if obj == "intraday":
-        _bars_per_session = {
-            "1m": 375, "5m": 75, "10m": 37, "15m": 25,
-            "30m": 12, "1h": 6, "1d": 1,
-        }
-        return _bars_per_session.get(tf, 25)
+        if tf_minutes <= 0:
+            return 25
+        if tf_minutes >= 1440:  # daily-or-coarser intraday cap = 1 bar
+            return 1
+        # Full NSE session (375 min) divided by the bar size, at least 1.
+        return max(1, int(375 // tf_minutes))
 
     # Positional
-    if tf == "1d":
-        return 20   # ~1 calendar month
-    if tf in ("1h", "2h", "4h"):
+    if tf_minutes >= 1440:
+        return 20   # ~1 calendar month of daily bars
+    if tf_minutes >= 60:
         return 40   # ~1 week of hourly bars
     # Sub-hour positional: no hard cap, rely on stop/TP
     return None

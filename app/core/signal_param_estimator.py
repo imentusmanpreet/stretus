@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from typing import Any
 
 import numpy as np
@@ -100,6 +101,89 @@ def ohlcv_to_df(records: list[dict[str, Any]]) -> pd.DataFrame:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df = df.set_index("timestamp").sort_index()
     return df
+
+
+# ── 1-minute → strategy-timeframe resampling ──────────────────────────────────
+# Phase 11: the chat flow fetches a single 1-minute series and feeds it to the
+# engine (which resamples to the strategy timeframe internally). Signal-parameter
+# enrichment needs the SAME strategy-timeframe bars the engine evaluates signals
+# on, so we resample the 1m series here in-process instead of fetching the
+# strategy timeframe over the network a second time. The binning convention
+# (origin="epoch", label="left", closed="left", open=first/high=max/low=min/
+# close=last/volume=sum) is kept identical to the engine's resample_ohlcv
+# (quant_engine/engine/resample.py) so enrichment sees the engine's exact bars.
+
+_TF_PATTERN = re.compile(r"^\s*(\d+)\s*(m|h|d|w)\s*$", re.IGNORECASE)
+_TF_UNIT_MAP = {"m": "min", "h": "h", "d": "d", "w": "w"}
+
+_RESAMPLE_AGG = {
+    "open": "first",
+    "high": "max",
+    "low": "min",
+    "close": "last",
+    "volume": "sum",
+}
+
+
+def _timeframe_to_timedelta(timeframe: str) -> pd.Timedelta:
+    """Convert "5m" / "1h" / "1d" / "1w" to a pandas Timedelta.
+
+    Mirrors quant_engine/engine/htf.timeframe_to_timedelta so resampled bars
+    align bit-for-bit with the engine's. Raises ValueError on bad input."""
+    m = _TF_PATTERN.match(str(timeframe or ""))
+    if not m:
+        raise ValueError(f"unsupported timeframe: {timeframe!r}")
+    n, unit = int(m.group(1)), m.group(2).lower()
+    return pd.Timedelta(f"{n}{_TF_UNIT_MAP[unit]}")
+
+
+def resample_records(
+    records_1m: list[dict[str, Any]], timeframe: str
+) -> list[dict[str, Any]]:
+    """Aggregate a 1-minute OHLCV record list up to ``timeframe``.
+
+    Input/output shape matches fetch_ohlcv_records(): a list of dicts with
+    ISO-8601 UTC ``timestamp`` strings plus open/high/low/close/volume floats.
+    Empty bins (gaps/weekends/holidays) are dropped, matching the dense frames
+    the provider used to deliver pre-aggregated. When ``timeframe`` is "1m" the
+    records are returned unchanged (no work to do)."""
+    if not records_1m:
+        return records_1m
+    if str(timeframe or "").strip().lower() == "1m":
+        return records_1m
+
+    df = ohlcv_to_df(records_1m)
+    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return records_1m
+
+    td = _timeframe_to_timedelta(timeframe)
+    cols = [c for c in _RESAMPLE_AGG if c in df.columns]
+    if "open" not in cols or "close" not in cols:
+        return records_1m
+    agg = {c: _RESAMPLE_AGG[c] for c in cols}
+
+    out = (
+        df.resample(td, label="left", closed="left", origin="epoch")
+        .agg(agg)
+        .dropna(subset=["open", "close"], how="any")
+    )
+    if out.empty:
+        return []
+
+    resampled: list[dict[str, Any]] = []
+    for ts, row in out.iterrows():
+        rec: dict[str, Any] = {
+            "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        for col in cols:
+            rec[col] = float(row[col])
+        resampled.append(rec)
+
+    logger.info(
+        "🪄 resample_records | timeframe=%s in_rows=%d out_rows=%d",
+        timeframe, len(records_1m), len(resampled),
+    )
+    return resampled
 
 
 # ── RSI parameter estimation ──────────────────────────────────────────────────
