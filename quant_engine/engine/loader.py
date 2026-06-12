@@ -711,32 +711,49 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     # other markets stay None too. The new strategy_assembler also writes this
     # default into the YAML, but applying it again here keeps older strategies
     # working without a re-assemble.
+    #
+    # Crypto trades 24/7 with no IST session, so its entry-window times are UTC
+    # (matching the live execution path). The assembler still stamps the YAML
+    # block with timezone="Asia/Kolkata" (a stale equity default), so for crypto
+    # we force UTC here — otherwise a benign window like 00:00–22:00 is shifted
+    # by −5:30, wraps past midnight (start_utc > end_utc), and the gate below
+    # ends up blocking the entire day.
+    market_norm = _normalise_market(str(strategy.get("market") or ""))
+    asset_class_norm = str(strategy.get("asset_class") or "").strip().lower()
+    is_crypto = market_norm == "crypto" or asset_class_norm.startswith("crypto")
+
+    def _window_tz(raw_block: dict) -> str:
+        if is_crypto:
+            return "UTC"
+        return raw_block.get("timezone", "Asia/Kolkata")
+
     entry_window_raw = strategy.get("entry_window") or {}
     entry_window_start_utc: int | None = None
     entry_window_end_utc:   int | None = None
     if isinstance(entry_window_raw, dict):
+        _ew_tz = _window_tz(entry_window_raw)
         entry_window_start_utc = _parse_time_to_utc_minutes(
             entry_window_raw.get("start") or entry_window_raw.get("start_time"),
-            entry_window_raw.get("timezone", "Asia/Kolkata"),
+            _ew_tz,
         )
         entry_window_end_utc = _parse_time_to_utc_minutes(
             entry_window_raw.get("end") or entry_window_raw.get("end_time"),
-            entry_window_raw.get("timezone", "Asia/Kolkata"),
+            _ew_tz,
         )
     if entry_window_start_utc is None and entry_window_end_utc is None:
-        market_for_default = _normalise_market(str(strategy.get("market") or ""))
-        if market_for_default == "indian_stocks":
+        if market_norm == "indian_stocks":
             entry_window_start_utc = _parse_time_to_utc_minutes("09:15", "Asia/Kolkata")
             entry_window_end_utc   = _parse_time_to_utc_minutes("15:30", "Asia/Kolkata")
 
     # Phase 2 — lunch-lull skip. Block new entries inside a midday window where
     # liquidity/edge typically dries up. lunch_lull: {start: "12:00", end:
     # "13:00", timezone: "Asia/Kolkata"}. Both bounds required to activate.
+    # Crypto times are UTC for the same reason as the entry window above.
     lunch_lull_start_utc: int | None = None
     lunch_lull_end_utc:   int | None = None
     lunch_raw = strategy.get("lunch_lull")
     if isinstance(lunch_raw, dict):
-        _ltz = lunch_raw.get("timezone", "Asia/Kolkata")
+        _ltz = _window_tz(lunch_raw)
         lunch_lull_start_utc = _parse_time_to_utc_minutes(lunch_raw.get("start") or lunch_raw.get("start_time"), _ltz)
         lunch_lull_end_utc = _parse_time_to_utc_minutes(lunch_raw.get("end") or lunch_raw.get("end_time"), _ltz)
         if lunch_lull_start_utc is None or lunch_lull_end_utc is None:

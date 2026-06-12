@@ -141,6 +141,27 @@ class RuleEngine:
             messages.append(f"  ⚠️  {label}: missing rule type — treating as False.")
             return False, messages
 
+        # Formula-string trigger synthesised by the Go scheduler when a strategy
+        # has only an entry_condition / exit_condition and no structured KB signal.
+        # The formula is evaluated via the same engine used by the backtest simulator
+        # so live execution stays consistent with backtested results.
+        if rule_type == "condition":
+            formula = str(params.get("formula", "")).strip()
+            if not formula:
+                messages.append(f"  ⚠️  {label} [condition]: no formula param — treating as False.")
+                return False, messages
+            try:
+                from engine.conditions import evaluate_condition  # noqa: PLC0415
+                result = bool(evaluate_condition(formula, df, len(df) - 1))
+                icon   = "✅" if result else "❌"
+                status = "PASS" if result else "FAIL"
+                messages.append(f"  {icon} {label} [condition] → {status}  (formula={formula!r})")
+                return result, messages
+            except Exception as exc:
+                messages.append(f"  💥 {label} [condition]: formula evaluation error — {exc}")
+                logger.error("Error evaluating condition formula %r: %s", formula, exc, exc_info=True)
+                return False, messages
+
         try:
             result = RuleRegistry.evaluate(
                 {"name": rule_type, "params": params},

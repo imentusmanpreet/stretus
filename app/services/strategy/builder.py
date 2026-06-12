@@ -2043,11 +2043,16 @@ class StrategyBuilder:
         if not (ew_start or ew_end):
             ew_start, ew_end = _default_entry_window_for_market(self.market)
         if ew_start or ew_end:
+            # Crypto trades 24/7 with no IST session — its window times are UTC.
+            # Equity (and unknown markets) keep IST. Emitting the right timezone
+            # here keeps the YAML self-consistent (the engine also coerces crypto
+            # to UTC, but a correct YAML matters for the live path / readability).
+            ew_tz = "UTC" if (self.market or "").strip().lower() == "crypto" else "Asia/Kolkata"
             strategy_block["entry_window"] = {
                 k: v for k, v in {
                     "start": ew_start,
                     "end":   ew_end,
-                    "timezone": "Asia/Kolkata",
+                    "timezone": ew_tz,
                 }.items() if v
             }
 

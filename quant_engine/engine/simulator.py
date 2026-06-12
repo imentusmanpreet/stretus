@@ -1212,10 +1212,24 @@ def simulate_trades(
                 entry_window_blocked = False
                 if entry_window_start_utc is not None or entry_window_end_utc is not None:
                     bar_min = int(bar_utc_minutes[i])
-                    if entry_window_start_utc is not None and bar_min < entry_window_start_utc:
-                        entry_window_blocked = True
-                    if entry_window_end_utc is not None and bar_min > entry_window_end_utc:
-                        entry_window_blocked = True
+                    if (
+                        entry_window_start_utc is not None
+                        and entry_window_end_utc is not None
+                        and entry_window_start_utc > entry_window_end_utc
+                    ):
+                        # Window crosses midnight (e.g. 22:00–06:00 UTC): allowed when
+                        # the bar is at/after start OR at/before end; blocked only in
+                        # the gap between end and start. Without this, a wrap-around
+                        # window blocks the entire day.
+                        entry_window_blocked = (
+                            bar_min < entry_window_start_utc
+                            and bar_min > entry_window_end_utc
+                        )
+                    else:
+                        if entry_window_start_utc is not None and bar_min < entry_window_start_utc:
+                            entry_window_blocked = True
+                        if entry_window_end_utc is not None and bar_min > entry_window_end_utc:
+                            entry_window_blocked = True
 
                 # Phase 10: consecutive-loss circuit breaker — bar-pause model.
                 # Trigger and pause length are set when a losing trade pushes
