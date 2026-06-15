@@ -324,6 +324,13 @@ def _exit_trigger_clause(exit_reason: str, trigger: dict[str, Any], side: str = 
             f"{tp_extreme[0]} {tp_extreme[1]} reached the take-profit target at "
             f"{trigger.get('take_profit_price')}"
         )
+    if ttype == "trailing_take_profit":
+        # The give-back line is on the SAME side a stop would be (price reverses
+        # into it), so it triggers on the stop_extreme of this side.
+        return (
+            f"{stop_extreme[0]} {stop_extreme[1]} pulled back to the trailing "
+            f"take-profit at {trigger.get('trailing_take_profit_line')}"
+        )
     if ttype == "exit_signal":
         return f"exit signal [{trigger.get('condition')}] became true"
     if ttype == "max_holding":
@@ -654,6 +661,44 @@ def _compute_trailing_ceiling_short(
     return float("inf")
 
 
+def _resolve_protective_level(
+    *,
+    is_short: bool,
+    initial_stop: float,
+    trailing_floor: float,
+    trailing_tp_line: float,
+) -> tuple[float, str]:
+    """Collapse the three protective levels into the one price reversal hits first.
+
+    A position is defended on its losing side by up to three levels:
+      • the initial stop (locked at entry),
+      • a trailing-stop floor/ceiling that ratchets toward profit, and
+      • a trailing take-profit give-back line.
+    For a LONG all three sit *below* price, so the **highest** (tightest) is the
+    one a falling price reaches first. For a SHORT they sit *above* price, so the
+    **lowest** wins. trailing_floor and trailing_tp_line are mutually exclusive
+    (the loader rejects configuring both), so at most one trailing line is ever
+    in play — but the merge is written to be correct even if both were present.
+
+    Returns (level_price, kind) where kind ∈
+    {"stop_loss", "trailing_stop", "trailing_take_profit"} and drives the exit
+    code / rationale. Inactive trailing lines carry their ±inf sentinel and so
+    never win the comparison.
+    """
+    level, kind = initial_stop, "stop_loss"
+    if is_short:
+        if trailing_floor < level:
+            level, kind = trailing_floor, "trailing_stop"
+        if trailing_tp_line < level:
+            level, kind = trailing_tp_line, "trailing_take_profit"
+    else:
+        if trailing_floor > level:
+            level, kind = trailing_floor, "trailing_stop"
+        if trailing_tp_line > level:
+            level, kind = trailing_tp_line, "trailing_take_profit"
+    return level, kind
+
+
 # ─── Session-day helpers ───────────────────────────────────────────────────────
 
 def _bar_session_date(df: pd.DataFrame, i: int) -> date | None:
@@ -745,6 +790,14 @@ def simulate_trades(
     # and additive: omitting them yields the legacy behavior exactly.
     stop_loss_spec: dict[str, Any] | None = None,
     trailing_stop_spec: dict[str, Any] | None = None,
+    # Phase 1 trailing take-profit — a ratcheting give-back line on the PROFIT
+    # side. It reuses the same ratchet primitive as trailing_stop_spec, but is
+    # framed as profit capture: once the trade is `activate_after_pct` in profit
+    # the line trails `distance_pct` behind the running peak (long) / trough
+    # (short) and fires on the pull-back, booking the exit as TRAILING_TAKE_PROFIT.
+    # Mutually exclusive with trailing_stop_spec (the loader enforces this); when
+    # omitted the take-profit is the static `take_profit_pct` alone.
+    trailing_take_profit_spec: dict[str, Any] | None = None,
     # Phase 5 — higher-timeframe entry gates. When non-empty, every gate's
     # condition must pass on its most recently *closed* HTF bar before an
     # LTF entry signal is allowed to fill. Empty list = no HTF gating.
@@ -820,8 +873,13 @@ def simulate_trades(
     """
     if stop_loss_pct <= 0:
         raise ValueError("stop_loss_pct must be greater than zero.")
-    if take_profit_pct <= 0:
-        raise ValueError("take_profit_pct must be greater than zero.")
+    # The static take-profit is OPTIONAL when a trailing take-profit supplies the
+    # profit exit. Otherwise it is required (a strategy needs some target).
+    has_static_tp = take_profit_pct > 0
+    if not has_static_tp and trailing_take_profit_spec is None:
+        raise ValueError(
+            "take_profit_pct must be greater than zero (or provide a trailing_take_profit)."
+        )
 
     is_intraday = str(objective).lower() == "intraday"
 
@@ -997,6 +1055,11 @@ def simulate_trades(
     # used unchanged.
     _initial_stop_price: float = 0.0
     _trailing_floor:     float = float("-inf")
+    # Phase 1 trailing take-profit line. Same ratchet shape as _trailing_floor:
+    # for a LONG it rises with the peak (sentinel -inf = not active yet), for a
+    # SHORT it falls with the trough (sentinel +inf). When the spec is absent it
+    # stays at its sentinel and never participates in the exit decision.
+    _trailing_tp_line:   float = float("-inf")
 
     # Per-day state (for intraday circuit-breakers).
     # Day key is an int ordinal (days since epoch) — way faster than `date` objects.
@@ -1370,8 +1433,11 @@ def simulate_trades(
                             day_ordinals=day_ordinals,
                         )
                         # SHORT: the trailing stop is a ceiling that ratchets
-                        # DOWN, so it starts at +inf (no constraint yet).
-                        _trailing_floor = float("inf")
+                        # DOWN, so it starts at +inf (no constraint yet). The
+                        # trailing take-profit (also a ceiling for a short) starts
+                        # at +inf too.
+                        _trailing_floor   = float("inf")
+                        _trailing_tp_line = float("inf")
                     else:
                         _initial_stop_price = _compute_initial_stop_long(
                             stop_loss_spec,
@@ -1382,12 +1448,24 @@ def simulate_trades(
                             low_arr=low_arr,
                             day_ordinals=day_ordinals,
                         )
-                        _trailing_floor = float("-inf")
+                        _trailing_floor   = float("-inf")
+                        _trailing_tp_line = float("-inf")
 
                     # ── Capture the structured entry rationale ────────────────
                     signal_indicators = _snapshot_indicators(arrays, i, compiled_entry)
                     signal_close = float(close_arr[i])
                     ind_str = _fmt_indicator_values(signal_indicators)
+                    # A trailing take-profit changes the exit story enough to call
+                    # out at entry, so the per-trade log explains it up front.
+                    trailing_tp_note = ""
+                    if trailing_take_profit_spec is not None:
+                        _ttp_dist = trailing_take_profit_spec.get("distance_pct")
+                        _ttp_act  = trailing_take_profit_spec.get("activate_after_pct", 0.0)
+                        trailing_tp_note = (
+                            f" Trailing take-profit armed: trail {_ttp_dist}% behind the "
+                            f"{'trough' if is_short else 'peak'}"
+                            + (f", active after {_ttp_act}% profit." if _ttp_act else ", active immediately.")
+                        )
                     entry_summary = (
                         f"Entered {side.upper()} at {entry_price:.4f} on {timestamps_iso[entry_index]} "
                         f"(bar #{entry_index}). Entry signal [{entry_condition_text}] became "
@@ -1397,7 +1475,7 @@ def simulate_trades(
                         f"confirmation bar(s). Filled at next bar open {next_open:.4f} plus costs "
                         f"(slippage {slippage_bps:.1f}bps, commission {commission_bps:.1f}bps, "
                         f"STT {eff_entry_stt:.3f}%) = {entry_price:.4f}. "
-                        f"Initial stop at {_initial_stop_price:.4f}."
+                        f"Initial stop at {_initial_stop_price:.4f}.{trailing_tp_note}"
                     )
                     entry_reason_payload = {
                         "summary":          entry_summary,
@@ -1422,6 +1500,8 @@ def simulate_trades(
                         "initial_stop_price": round(_initial_stop_price, 6),
                         "gates_passed":       list(active_entry_gates),
                     }
+                    if trailing_take_profit_spec is not None:
+                        entry_reason_payload["trailing_take_profit"] = dict(trailing_take_profit_spec)
                     if entry_evaluation_mode == "registry":
                         entry_reason_payload["entry_signal_rules"] = entry_signal_rules or []
 
@@ -1441,10 +1521,16 @@ def simulate_trades(
         holding_candles = i - entry_index
 
         # SHORT takes profit when price FALLS, so its target sits below entry.
-        take_profit_price = (
-            entry_price * (1 - take_profit_pct / 100.0) if is_short
-            else entry_price * (1 + take_profit_pct / 100.0)
-        )
+        # With no static target (trailing TP supplies the exit) the price is pushed
+        # to an unreachable sentinel so `take_profit_hit` can never fire — the
+        # trailing give-back line becomes the sole profit exit.
+        if has_static_tp:
+            take_profit_price = (
+                entry_price * (1 - take_profit_pct / 100.0) if is_short
+                else entry_price * (1 + take_profit_pct / 100.0)
+            )
+        else:
+            take_profit_price = float("-inf") if is_short else float("inf")
 
         # Timestamp the price-path exit fills at. Defaults to the strategy bar;
         # in 1-minute execution it is refined to the exact minute the stop or
@@ -1462,7 +1548,7 @@ def simulate_trades(
             # ATR/EMA reference for trailing stays on the strategy timeframe
             # (current_index=i) since that is the timeframe the strategy trades.
             stop_hit = take_profit_hit = False
-            is_trailing_exit = False
+            protective_kind = "stop_loss"
             stop_price = min(_initial_stop_price, _trailing_floor) if is_short else max(_initial_stop_price, _trailing_floor)
             for m in range(int(subbar_starts[i]), int(subbar_ends[i])):
                 m_h = float(m_high[m]); m_l = float(m_low[m]); m_c = float(m_close[m])
@@ -1470,10 +1556,13 @@ def simulate_trades(
                 if m_h > _trade_max_high: _trade_max_high = m_h
 
                 if is_short:
-                    # SHORT: trailing is a ceiling that ratchets DOWN with the
-                    # lowest low; effective stop = min(initial, ceiling); the
-                    # stop fires when a high pierces it, the target when a low
-                    # reaches the (below-entry) take-profit.
+                    # SHORT: trailing lines are ceilings that ratchet DOWN with the
+                    # lowest low. The trailing stop and the trailing take-profit
+                    # share the same ratchet primitive; _resolve_protective_level
+                    # picks the tightest (lowest) of {initial stop, trailing stop,
+                    # trailing TP} and labels it. The protective level fires when a
+                    # high pierces it; the static target when a low reaches the
+                    # (below-entry) take-profit.
                     candidate_floor = _compute_trailing_ceiling_short(
                         trailing_stop_spec,
                         entry_price=entry_price,
@@ -1484,10 +1573,24 @@ def simulate_trades(
                     )
                     if candidate_floor < _trailing_floor:
                         _trailing_floor = candidate_floor
-                    stop_price = min(_initial_stop_price, _trailing_floor)
+                    candidate_tp = _compute_trailing_ceiling_short(
+                        trailing_take_profit_spec,
+                        entry_price=entry_price,
+                        current_index=i,
+                        arrays=arrays,
+                        lowest_low_since_entry=_trade_min_low,
+                        current_close=m_c,
+                    )
+                    if candidate_tp < _trailing_tp_line:
+                        _trailing_tp_line = candidate_tp
+                    stop_price, m_protective_kind = _resolve_protective_level(
+                        is_short=True,
+                        initial_stop=_initial_stop_price,
+                        trailing_floor=_trailing_floor,
+                        trailing_tp_line=_trailing_tp_line,
+                    )
                     m_stop_hit = m_h >= stop_price
                     m_tp_hit   = m_l <= take_profit_price
-                    trailing_active = _trailing_floor < _initial_stop_price
                 else:
                     candidate_floor = _compute_trailing_floor_long(
                         trailing_stop_spec,
@@ -1499,15 +1602,29 @@ def simulate_trades(
                     )
                     if candidate_floor > _trailing_floor:
                         _trailing_floor = candidate_floor
-                    stop_price = max(_initial_stop_price, _trailing_floor)
+                    candidate_tp = _compute_trailing_floor_long(
+                        trailing_take_profit_spec,
+                        entry_price=entry_price,
+                        current_index=i,
+                        arrays=arrays,
+                        highest_high_since_entry=_trade_max_high,
+                        current_close=m_c,
+                    )
+                    if candidate_tp > _trailing_tp_line:
+                        _trailing_tp_line = candidate_tp
+                    stop_price, m_protective_kind = _resolve_protective_level(
+                        is_short=False,
+                        initial_stop=_initial_stop_price,
+                        trailing_floor=_trailing_floor,
+                        trailing_tp_line=_trailing_tp_line,
+                    )
                     m_stop_hit = m_l <= stop_price
                     m_tp_hit   = m_h >= take_profit_price
-                    trailing_active = _trailing_floor > _initial_stop_price
 
                 if m_stop_hit or m_tp_hit:
-                    stop_hit         = m_stop_hit
-                    take_profit_hit  = m_tp_hit
-                    is_trailing_exit = m_stop_hit and trailing_active
+                    stop_hit        = m_stop_hit
+                    take_profit_hit = m_tp_hit
+                    protective_kind = m_protective_kind
                     # Trigger payloads and the exit timestamp reflect the firing
                     # minute, not the coarse strategy bar.
                     low_price  = m_l
@@ -1538,10 +1655,24 @@ def simulate_trades(
                 )
                 if candidate_floor < _trailing_floor:
                     _trailing_floor = candidate_floor
-                stop_price = min(_initial_stop_price, _trailing_floor)
+                candidate_tp = _compute_trailing_ceiling_short(
+                    trailing_take_profit_spec,
+                    entry_price=entry_price,
+                    current_index=i,
+                    arrays=arrays,
+                    lowest_low_since_entry=_trade_min_low,
+                    current_close=close_price,
+                )
+                if candidate_tp < _trailing_tp_line:
+                    _trailing_tp_line = candidate_tp
+                stop_price, protective_kind = _resolve_protective_level(
+                    is_short=True,
+                    initial_stop=_initial_stop_price,
+                    trailing_floor=_trailing_floor,
+                    trailing_tp_line=_trailing_tp_line,
+                )
                 stop_hit        = high_price >= stop_price
                 take_profit_hit = low_price  <= take_profit_price
-                is_trailing_exit = stop_hit and _trailing_floor < _initial_stop_price
             else:
                 candidate_floor = _compute_trailing_floor_long(
                     trailing_stop_spec,
@@ -1553,18 +1684,30 @@ def simulate_trades(
                 )
                 if candidate_floor > _trailing_floor:
                     _trailing_floor = candidate_floor
+                candidate_tp = _compute_trailing_floor_long(
+                    trailing_take_profit_spec,
+                    entry_price=entry_price,
+                    current_index=i,
+                    arrays=arrays,
+                    highest_high_since_entry=_trade_max_high,
+                    current_close=close_price,
+                )
+                if candidate_tp > _trailing_tp_line:
+                    _trailing_tp_line = candidate_tp
 
-                # Effective stop is the higher of the initial SL and the trailing
-                # floor. Trailing-floor candidates use intra-bar highs, so the floor
-                # can legitimately sit between the current bar's low and the bar's
-                # high — in that case the stop fires *this* bar at the floor price
-                # (worst-case fill, mirrors the static-SL code path below).
-                stop_price = max(_initial_stop_price, _trailing_floor)
+                # The operative protective level is the tightest of the initial SL,
+                # the trailing-stop floor, and the trailing take-profit line.
+                # Candidates use intra-bar extremes, so the level can sit between
+                # this bar's low and high — in that case it fires *this* bar at the
+                # level price (worst-case fill, mirrors the static-SL path below).
+                stop_price, protective_kind = _resolve_protective_level(
+                    is_short=False,
+                    initial_stop=_initial_stop_price,
+                    trailing_floor=_trailing_floor,
+                    trailing_tp_line=_trailing_tp_line,
+                )
                 stop_hit        = low_price  <= stop_price
                 take_profit_hit = high_price >= take_profit_price
-                # A trailing-stop exit and a static-SL exit are functionally the same
-                # mechanic, but the user wants to know which one fired in the report.
-                is_trailing_exit = stop_hit and _trailing_floor > _initial_stop_price
 
         diag.stop_hit = stop_hit
         diag.tp_hit   = take_profit_hit
@@ -1577,35 +1720,69 @@ def simulate_trades(
         raw_exit_price: float | None = None
         exit_trigger: dict[str, Any] | None = None
 
-        # ── Worst-case rule: if both stop AND TP touched on the same bar ──────
-        # We assume the stop was hit first (conservative for the trader).
+        # The protective level that price reaches first on its losing side. It is
+        # one of three kinds, decided by _resolve_protective_level above:
+        #   stop_loss            — the fixed initial stop
+        #   trailing_stop        — a trailing stop that ratcheted past the initial
+        #   trailing_take_profit — a trailing give-back line (profit capture)
+        # The trailing take-profit is a profit exit, so it gets its own codes;
+        # the two stop kinds keep the legacy pessimistic same-bar handling.
+        is_trailing_tp = protective_kind == "trailing_take_profit"
+        is_trailing_stop = protective_kind == "trailing_stop"
+
+        # ── Worst-case rule: if both the protective level AND the static target ──
+        # were touched on the same bar, the protective level is assumed to fill
+        # first (conservative — the smaller/worse outcome for the trader).
         if stop_hit and take_profit_hit:
             raw_exit_price = stop_price
             exit_price  = _exit_fill(stop_price)
-            exit_reason = "TRAILING_STOP_AND_TAKE_PROFIT_SAME_BAR" if is_trailing_exit else "STOP_LOSS_AND_TAKE_PROFIT_SAME_BAR"
-            exit_trigger = {
-                "type":              "stop_and_take_profit_same_bar",
-                "stop_price":        round(stop_price, 6),
-                "take_profit_price": round(take_profit_price, 6),
-                "bar_low":           round(low_price, 4),
-                "bar_high":          round(high_price, 4),
-                "is_trailing_stop":  bool(is_trailing_exit),
-                "resolution":        "pessimistic — stop assumed filled before target",
-            }
+            if is_trailing_tp:
+                exit_reason = "TRAILING_TAKE_PROFIT"
+                exit_trigger = {
+                    "type":                      "trailing_take_profit",
+                    "trailing_take_profit_line": round(stop_price, 6),
+                    "static_take_profit_price":  round(take_profit_price, 6),
+                    "bar_low":                   round(low_price, 4),
+                    "bar_high":                  round(high_price, 4),
+                    "activate_after_pct":        float((trailing_take_profit_spec or {}).get("activate_after_pct", 0.0)),
+                    "resolution":                "trailing give-back and static target both touched; trailing line assumed first (conservative)",
+                }
+            else:
+                exit_reason = "TRAILING_STOP_AND_TAKE_PROFIT_SAME_BAR" if is_trailing_stop else "STOP_LOSS_AND_TAKE_PROFIT_SAME_BAR"
+                exit_trigger = {
+                    "type":              "stop_and_take_profit_same_bar",
+                    "stop_price":        round(stop_price, 6),
+                    "take_profit_price": round(take_profit_price, 6),
+                    "bar_low":           round(low_price, 4),
+                    "bar_high":          round(high_price, 4),
+                    "is_trailing_stop":  bool(is_trailing_stop),
+                    "resolution":        "pessimistic — stop assumed filled before target",
+                }
 
         elif stop_hit:
             raw_exit_price = stop_price
             exit_price  = _exit_fill(stop_price)
-            exit_reason = "TRAILING_STOP" if is_trailing_exit else "STOP_LOSS"
-            exit_trigger = {
-                "type":               "trailing_stop" if is_trailing_exit else "stop_loss",
-                "stop_price":         round(stop_price, 6),
-                "bar_low":            round(low_price, 4),
-                "bar_high":           round(high_price, 4),
-                "is_trailing_stop":   bool(is_trailing_exit),
-                "initial_stop_price": round(_initial_stop_price, 6),
-                "trailing_floor":     round(_trailing_floor, 6) if _trailing_floor not in (float("-inf"), float("inf")) else None,
-            }
+            if is_trailing_tp:
+                exit_reason = "TRAILING_TAKE_PROFIT"
+                exit_trigger = {
+                    "type":                      "trailing_take_profit",
+                    "trailing_take_profit_line": round(stop_price, 6),
+                    "bar_low":                   round(low_price, 4),
+                    "bar_high":                  round(high_price, 4),
+                    "initial_stop_price":        round(_initial_stop_price, 6),
+                    "activate_after_pct":        float((trailing_take_profit_spec or {}).get("activate_after_pct", 0.0)),
+                }
+            else:
+                exit_reason = "TRAILING_STOP" if is_trailing_stop else "STOP_LOSS"
+                exit_trigger = {
+                    "type":               "trailing_stop" if is_trailing_stop else "stop_loss",
+                    "stop_price":         round(stop_price, 6),
+                    "bar_low":            round(low_price, 4),
+                    "bar_high":           round(high_price, 4),
+                    "is_trailing_stop":   bool(is_trailing_stop),
+                    "initial_stop_price": round(_initial_stop_price, 6),
+                    "trailing_floor":     round(_trailing_floor, 6) if _trailing_floor not in (float("-inf"), float("inf")) else None,
+                }
 
         elif take_profit_hit:
             raw_exit_price = take_profit_price

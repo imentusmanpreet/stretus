@@ -587,6 +587,11 @@ class StrategyBuilder:
         # the generated strategy YAML so the simulator picks them up.
         self.stop_loss_spec: Optional[dict[str, Any]] = None
         self.trailing_stop_spec: Optional[dict[str, Any]] = None
+        # Phase 1 trailing take-profit — a ratcheting give-back line on the profit
+        # side. Written to the strategy YAML as `trailing_take_profit` so the
+        # simulator/loader pick it up. Mutually exclusive with trailing_stop_spec
+        # (the loader enforces this); both default to None.
+        self.trailing_take_profit_spec: Optional[dict[str, Any]] = None
         # Phase 4 — reference benchmark symbol (e.g. ^NSEI). When set, the API
         # layer fetches its OHLCV alongside the trade symbol and the simulator
         # exposes REF_CLOSE / RS(n) / reference_above_sma to the conditions.
@@ -878,6 +883,22 @@ class StrategyBuilder:
 
     def set_risk_execution_config(self, config: Optional[dict[str, Any]]) -> None:
         self.risk_execution_config = dict(config or {})
+        self._apply_market_trading_window()
+
+    def _apply_market_trading_window(self) -> None:
+        """Correct the stored ``trading_window`` label to match the market when the
+        user hasn't set an explicit entry window. The seed / DB snapshot hardcodes
+        the NSE session ("9:15 - 15:30") regardless of asset class, so without this
+        a crypto strategy would carry that stale label (crypto is 24/7). No-op when
+        the market is unknown or the user supplied an explicit window."""
+        cfg = self.risk_execution_config
+        if not isinstance(cfg, dict) or not cfg:
+            return
+        if self.entry_window_start and self.entry_window_end:
+            return  # explicit user/agent window — keep it
+        label = _default_trading_window_label_for_market(self.market)
+        if label is not None:
+            cfg["trading_window"] = label
 
     def has_any_data(self) -> bool:
         return any([
@@ -1551,6 +1572,9 @@ class StrategyBuilder:
         ts_spec = plan.get("_trailing_stop_spec")
         if isinstance(ts_spec, dict) and ts_spec:
             self.trailing_stop_spec = dict(ts_spec)
+        ttp_spec = plan.get("_trailing_take_profit_spec")
+        if isinstance(ttp_spec, dict) and ttp_spec:
+            self.trailing_take_profit_spec = dict(ttp_spec)
         ref_sym = plan.get("_reference_symbol")
         if isinstance(ref_sym, str) and ref_sym.strip():
             self.reference_symbol = ref_sym.strip().upper()
@@ -1683,6 +1707,9 @@ class StrategyBuilder:
         trailing_stop_spec = preview.get("trailing_stop_spec")
         if isinstance(trailing_stop_spec, dict) and trailing_stop_spec:
             self.trailing_stop_spec = trailing_stop_spec
+        trailing_take_profit_spec = preview.get("trailing_take_profit_spec")
+        if isinstance(trailing_take_profit_spec, dict) and trailing_take_profit_spec:
+            self.trailing_take_profit_spec = trailing_take_profit_spec
         semantic_intent = preview.get("semantic_intent")
         if isinstance(semantic_intent, dict) and semantic_intent:
             self.semantic_intent = semantic_intent
@@ -1830,6 +1857,9 @@ class StrategyBuilder:
         processing_status: Optional[str] = None,
     ) -> dict:
         resolved_mode = mode_override or self.get_mode()
+        # Market is confirmed by draft time — correct the trading-window label so a
+        # crypto strategy doesn't serialize the stale NSE-session seed.
+        self._apply_market_trading_window()
         draft = {
             "mode": resolved_mode,
             "market": self.market,
@@ -1876,6 +1906,7 @@ class StrategyBuilder:
             "risk_execution_config": self.risk_execution_config or {},
             "stop_loss_spec": self.stop_loss_spec,
             "trailing_stop_spec": self.trailing_stop_spec,
+            "trailing_take_profit_spec": self.trailing_take_profit_spec,
             "input_modification_requested": self.input_modification_requested,
             "pending_input_modification_fields": self.pending_input_modification_fields,
             "processing_status": processing_status or ("complete" if self.signal_plan else "in_progress"),
@@ -2007,6 +2038,8 @@ class StrategyBuilder:
             strategy_block["stop_loss"] = dict(self.stop_loss_spec)
         if isinstance(self.trailing_stop_spec, dict) and self.trailing_stop_spec:
             strategy_block["trailing_stop"] = dict(self.trailing_stop_spec)
+        if isinstance(self.trailing_take_profit_spec, dict) and self.trailing_take_profit_spec:
+            strategy_block["trailing_take_profit"] = dict(self.trailing_take_profit_spec)
         if isinstance(self.reference_symbol, str) and self.reference_symbol:
             strategy_block["reference_symbol"] = self.reference_symbol
         if isinstance(self.htf_rules, list) and self.htf_rules:

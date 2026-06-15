@@ -167,7 +167,11 @@ def _check_safety_and_coherence(spec: StrategySpec, result: ValidationResult) ->
                 message="A positive stop-loss is required; none could be resolved.",
             )
         )
-    if spec.resolved_take_profit_pct() <= 0:
+    # A positive static target is required UNLESS a trailing take-profit supplies
+    # the profit exit (then the static target is intentionally absent so it can't
+    # fire before the trail engages). The "no profit exit at all" case is caught
+    # separately as `missing_profit_exit`.
+    if spec.resolved_take_profit_pct() <= 0 and spec.trailing_take_profit is None:
         result.errors.append(
             ValidationError(
                 field="take_profit",
@@ -246,6 +250,42 @@ def _check_enums_and_risk_vocab(spec: StrategySpec, result: ValidationResult) ->
                 f"({', '.join(sorted(vocab.trailing_stop_types()))}).",
             )
         )
+    if (
+        spec.trailing_take_profit is not None
+        and spec.trailing_take_profit.type not in vocab.trailing_take_profit_types()
+    ):
+        result.errors.append(
+            ValidationError(
+                field="trailing_take_profit.type",
+                code="unsupported_trailing_take_profit_type",
+                message=f"trailing-take-profit type {spec.trailing_take_profit.type!r} is not "
+                f"engine-legal ({', '.join(sorted(vocab.trailing_take_profit_types()))}).",
+            )
+        )
+    # A position trails EITHER its stop OR its take-profit — never both (two
+    # ratcheting lines chasing the same peak collide). Mirror the engine loader's
+    # guard here so the chat surfaces it as a friendly error before compile.
+    if spec.trailing_stop is not None and spec.trailing_take_profit is not None:
+        result.errors.append(
+            ValidationError(
+                field="trailing_take_profit",
+                code="trailing_stop_and_take_profit_conflict",
+                message="A strategy can trail the stop OR the take-profit, not both. "
+                "Keep a trailing stop (protect against reversals) or a trailing "
+                "take-profit (let a winner run and capture the pull-back) — not both.",
+            )
+        )
+    # Every strategy needs SOME profit exit: a static take_profit OR a trailing
+    # take-profit. take_profit may be omitted only when the trailing one supplies it.
+    if spec.take_profit is None and spec.trailing_take_profit is None:
+        result.errors.append(
+            ValidationError(
+                field="take_profit",
+                code="missing_profit_exit",
+                message="A strategy needs a profit exit: set a static take_profit, or a "
+                "trailing_take_profit (omit take_profit only when trailing provides it).",
+            )
+        )
 
 
 def _collect_assumption_notes(spec: StrategySpec, result: ValidationResult) -> None:
@@ -260,7 +300,7 @@ def _collect_assumption_notes(spec: StrategySpec, result: ValidationResult) -> N
                 severity="warning",
             )
         )
-    if spec.take_profit.source == "assumed":
+    if spec.take_profit is not None and spec.take_profit.source == "assumed":
         result.notes.append(
             ValidationError(
                 field="take_profit",
@@ -282,7 +322,7 @@ def _collect_assumption_notes(spec: StrategySpec, result: ValidationResult) -> N
                 severity="warning",
             )
         )
-    if spec.take_profit.type in ("atr", "fixed_points", "indicator_based"):
+    if spec.take_profit is not None and spec.take_profit.type in ("atr", "fixed_points", "indicator_based"):
         result.notes.append(
             ValidationError(
                 field="take_profit",

@@ -1490,8 +1490,16 @@ def _hydrate_builder_metadata(
         builder.time_exit = dict(plan["_time_exit"])
 
 
-def _semantic_sl_to_loader_spec(sl: Any) -> dict[str, Any]:
-    """Map SemanticInstructions.stop_loss to quant_engine loader shape."""
+def _semantic_sl_to_loader_spec(sl: Any) -> dict[str, Any] | None:
+    """Map SemanticInstructions.stop_loss to quant_engine loader shape.
+
+    Returns None when the semantic stop carries no recognisable BASIS — i.e. the
+    user merely mentioned "stop loss" without naming a structure (swing/ORB low) or
+    ATR. In that case we do NOT fabricate a typed (ATR) stop; returning None lets
+    the caller fall back to the plain percent `stop_loss_pct` (the tier/objective
+    default). A vague mention should become a simple percent stop, not an invented
+    ATR one.
+    """
     padding = sl.padding
     if padding and padding.method == "atr":
         return {
@@ -1513,13 +1521,15 @@ def _semantic_sl_to_loader_spec(sl: Any) -> dict[str, Any]:
         if padding and padding.method == "percent" and padding.percent:
             spec["padding_pct"] = float(padding.percent)
         return spec
-    # Plain ATR stop phrasing without structural anchor
+    # Plain ATR stop phrasing without structural anchor.
     if re.search(r"atr", (sl.description or sl.type or ""), re.IGNORECASE):
         mult = 1.5
         if padding and padding.atr_multiple:
             mult = float(padding.atr_multiple)
         return {"type": "atr", "multiplier": mult, "window": 14}
-    return {"type": "atr", "multiplier": 1.5, "window": 14}
+    # No structure, no ATR → default to a plain percent stop (caller uses
+    # stop_loss_pct), instead of inventing an ATR stop the user never asked for.
+    return None
 
 
 def _semantic_ts_to_loader_spec(ts: Any) -> dict[str, Any]:

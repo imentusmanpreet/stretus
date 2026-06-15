@@ -169,10 +169,12 @@ try:  # pragma: no cover - exercised in the co-located app test suite
         STOP_LOSS_ANCHORS as _SHARED_ANCHORS,
         STOP_LOSS_TYPES as _SHARED_TYPES,
         TRAILING_TYPES as _SHARED_TRAILING,
+        TRAILING_TAKE_PROFIT_TYPES as _SHARED_TRAILING_TP,
     )
     _STOP_LOSS_TYPES = set(_SHARED_TYPES)
     _STOP_LOSS_ANCHORS = set(_SHARED_ANCHORS)
     _TRAILING_TYPES = set(_SHARED_TRAILING)
+    _TRAILING_TAKE_PROFIT_TYPES = set(_SHARED_TRAILING_TP)
 except Exception:  # standalone engine: keep the local contract
     _STOP_LOSS_TYPES = {"percent", "structural", "atr"}
     _STOP_LOSS_ANCHORS = {
@@ -182,6 +184,8 @@ except Exception:  # standalone engine: keep the local contract
         "prev_n_bar_high",     # anchor at MAX(HIGH, N) at entry (short SL — reserved)
     }
     _TRAILING_TYPES = {"percent", "atr", "ema", "chandelier"}
+    # Phase 1 trailing take-profit: percent-only (see engine_contract for why).
+    _TRAILING_TAKE_PROFIT_TYPES = {"percent"}
 
 
 def _parse_stop_loss_spec(raw: Any) -> dict[str, Any] | None:
@@ -285,6 +289,44 @@ def _parse_trailing_stop_spec(raw: Any) -> dict[str, Any] | None:
         return spec
 
     return None  # unreachable
+
+
+def _parse_trailing_take_profit_spec(raw: Any) -> dict[str, Any] | None:
+    """Validate the trailing_take_profit block. Returns None when absent.
+
+    A trailing take-profit is a ratcheting *give-back* line: it follows the
+    position's running peak (long) / trough (short) and fires when price reverses
+    to it — the same primitive as a trailing stop, but framed as profit capture
+    and reported as TRAILING_TAKE_PROFIT. Phase 1 is percent-only (a % give-back
+    from the peak) so the live OMS can honour it identically (backtest↔live
+    parity). `activate_after_pct` defers trailing until the trade is that far in
+    profit — the usual way to let a winner run before protecting the gain.
+    """
+    if raw in (None, "", {}):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("trailing_take_profit must be a mapping or omitted entirely.")
+
+    tp_type = str(raw.get("type") or "").lower().strip()
+    if tp_type not in _TRAILING_TAKE_PROFIT_TYPES:
+        raise ValueError(
+            f"trailing_take_profit.type must be one of "
+            f"{sorted(_TRAILING_TAKE_PROFIT_TYPES)}, got {tp_type!r}"
+        )
+
+    spec: dict[str, Any] = {"type": tp_type}
+    activate = _to_float(
+        raw.get("activate_after_pct", 0.0), "trailing_take_profit.activate_after_pct", 0.0
+    )
+    spec["activate_after_pct"] = max(0.0, activate)
+
+    # Only `percent` is reachable today; the branch mirrors trailing_stop so the
+    # shape stays familiar and widening the type set later is mechanical.
+    distance = _to_float(raw.get("distance_pct"), "trailing_take_profit.distance_pct", 0.0)
+    if distance <= 0:
+        raise ValueError("trailing_take_profit.distance_pct must be > 0 for type=percent")
+    spec["distance_pct"] = distance
+    return spec
 
 
 def _parse_htf_rules(raw: Any) -> tuple[HtfRule, ...]:
@@ -439,6 +481,12 @@ class StrategyConfig:
     #   {"type": "chandelier",  "multiplier": 3.0,   "window": 14}
     stop_loss_spec: dict[str, Any] | None = None
     trailing_stop_spec: dict[str, Any] | None = None
+    # Phase 1 trailing take-profit — a ratcheting give-back line on the profit
+    # side. Optional; when omitted the take-profit is the static `take_profit`
+    # percent alone. Mutually exclusive with trailing_stop_spec (both would chase
+    # the same peak); the loader rejects setting both. Percent-only for now:
+    #   {"type": "percent", "distance_pct": 1.5, "activate_after_pct": 3.0}
+    trailing_take_profit_spec: dict[str, Any] | None = None
     # Phase 4 — optional reference symbol whose OHLCV is fetched alongside the
     # trade symbol and joined into the main df with a REF_ prefix. This is what
     # lets formulas reference Nifty/Bank-Nifty/sector indices via REF_CLOSE,
@@ -573,10 +621,44 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     entry_condition = _normalise_legacy_entry_condition(
         str(strategy.get("entry_condition") or strategy.get("entry", {}).get("condition") or "").strip()
     )
+
+    stop_loss = _to_float(
+        risk.get("stop_loss_percent", strategy.get("stop_loss_pct", variables.get("STOP_LOSS_TARGET"))),
+        "stop_loss_percent",
+        2.0,
+    )
+    # A trailing take-profit can supply the profit exit on its own. When it's
+    # present the static target is OPTIONAL and we must NOT inject a default percent —
+    # a low default (e.g. 1%) would fire before the trail engages and starve it. With
+    # no trailing TP the static target is still required and defaults to 5%.
+    _has_trailing_tp = bool(strategy.get("trailing_take_profit") or risk.get("trailing_take_profit"))
+    _raw_take_profit = risk.get(
+        "take_profit_percent", strategy.get("take_profit_pct", variables.get("TAKE_PROFIT_TARGET"))
+    )
+    if _raw_take_profit is None:
+        take_profit = 0.0 if _has_trailing_tp else 5.0
+    else:
+        take_profit = _to_float(_raw_take_profit, "take_profit_percent", 5.0)
+
+    if stop_loss <= 0:
+        raise ValueError("stop_loss_percent must be greater than zero.")
+    if take_profit <= 0 and not _has_trailing_tp:
+        raise ValueError(
+            "take_profit_percent must be greater than zero (or provide a trailing_take_profit)."
+        )
+
+    # Default exit formula: include the "PROFIT >= target" clause only when a static
+    # target exists. With trailing-only (take_profit == 0) that clause would be
+    # "PROFIT >= 0" — trivially true — and would exit before the trail can run, so we
+    # drop it and let the price-path stop + trailing take-profit own the exits.
+    if take_profit > 0:
+        _default_exit = "PROFIT >= TAKE_PROFIT_TARGET OR LOSS <= -STOP_LOSS_TARGET"
+    else:
+        _default_exit = "LOSS <= -STOP_LOSS_TARGET"
     exit_condition = str(
         strategy.get("exit_condition")
         or strategy.get("exit", {}).get("condition")
-        or "PROFIT >= TAKE_PROFIT_TARGET OR LOSS <= -STOP_LOSS_TARGET"
+        or _default_exit
     ).strip()
 
     # Phase 12 — optional SHORT leg conditions (for direction="both").
@@ -584,22 +666,6 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         str(strategy.get("short_entry_condition") or "").strip()
     )
     short_exit_condition = str(strategy.get("short_exit_condition") or "").strip()
-
-    stop_loss = _to_float(
-        risk.get("stop_loss_percent", strategy.get("stop_loss_pct", variables.get("STOP_LOSS_TARGET"))),
-        "stop_loss_percent",
-        2.0,
-    )
-    take_profit = _to_float(
-        risk.get("take_profit_percent", strategy.get("take_profit_pct", variables.get("TAKE_PROFIT_TARGET"))),
-        "take_profit_percent",
-        5.0,
-    )
-
-    if stop_loss <= 0:
-        raise ValueError("stop_loss_percent must be greater than zero.")
-    if take_profit <= 0:
-        raise ValueError("take_profit_percent must be greater than zero.")
 
     if entry_evaluation_mode == "registry":
         if not entry_signal_rules:
@@ -672,6 +738,21 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     trailing_stop_spec = _parse_trailing_stop_spec(
         strategy.get("trailing_stop") or risk.get("trailing_stop")
     )
+    # Phase 1 trailing take-profit (optional, percent-only).
+    trailing_take_profit_spec = _parse_trailing_take_profit_spec(
+        strategy.get("trailing_take_profit") or risk.get("trailing_take_profit")
+    )
+    # A position can trail EITHER the stop OR the take-profit, not both: two
+    # ratcheting lines chasing the same peak would collide and the exit semantics
+    # become ambiguous. Reject the combination up front with a clear message
+    # rather than silently picking one.
+    if trailing_stop_spec is not None and trailing_take_profit_spec is not None:
+        raise ValueError(
+            "trailing_stop and trailing_take_profit cannot both be set on one "
+            "strategy (they would chase the same peak). Choose one: a trailing "
+            "stop to protect against reversals, or a trailing take-profit to let "
+            "a winner run and capture the pull-back."
+        )
 
     # Phase 4 — optional reference symbol. Whitespace-strip and uppercase so
     # "^nsei" and "^NSEI" are equivalent. None when omitted.
@@ -912,6 +993,7 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         exit_signal_rules=exit_signal_rules or None,
         stop_loss_spec=stop_loss_spec,
         trailing_stop_spec=trailing_stop_spec,
+        trailing_take_profit_spec=trailing_take_profit_spec,
         reference_symbol=reference_symbol,
         htf_rules=htf_rules,
         patterns=patterns_overrides,

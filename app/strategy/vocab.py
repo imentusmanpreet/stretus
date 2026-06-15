@@ -97,6 +97,10 @@ def trailing_stop_types() -> frozenset[str]:
     return engine_bridge.trailing_stop_types()
 
 
+def trailing_take_profit_types() -> frozenset[str]:
+    return engine_bridge.trailing_take_profit_types()
+
+
 # ── Prompt-facing grammar description (generated) ─────────────────────────────
 
 def grammar_summary_for_prompt() -> str:

@@ -157,6 +157,35 @@ class TrailingStop(BaseModel):
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
+class TrailingTakeProfit(BaseModel):
+    """Optional trailing take-profit — a ratcheting give-back line on the PROFIT
+    side. Once the trade is ``activate_after_pct`` in profit, the exit trails
+    ``distance_pct`` behind the running peak (long) / trough (short) and fires on
+    the pull-back. Phase 1 is percent-only (the validator enforces the engine
+    type set); it is mutually exclusive with ``trailing_stop`` — a position trails
+    EITHER its stop OR its take-profit, never both."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(
+        default="percent",
+        description="Phase 1 supports 'percent' only (validated against the engine).",
+    )
+    distance_pct: float | None = Field(
+        default=None, gt=0,
+        description="Give-back distance: how far (percent) behind the running peak (long) / "
+        "trough (short) the take-profit trails. e.g. 2.0 = exit 2% off the peak.",
+    )
+    activate_after_pct: float | None = Field(
+        default=None, ge=0,
+        description="Profit percent the trade must reach before trailing engages. "
+        "Omit for immediate. e.g. 5.0 = only start trailing once up 5%.",
+    )
+
+    def to_engine_dict(self) -> dict[str, Any]:
+        return {k: v for k, v in self.model_dump().items() if v is not None}
+
+
 class IndicatorSpec(BaseModel):
     """A declared indicator + the EXACT parameters the user asked for (transparency).
 
@@ -281,9 +310,14 @@ class StrategySpec(BaseModel):
 
     # Rich, explainable risk management.
     stop_loss: StopLoss
-    take_profit: TakeProfit
+    # Optional: omit (None) when a trailing_take_profit provides the profit exit
+    # instead. The validator requires at least one of the two. A static target set
+    # at/below a trailing activation level would fire first and starve the trail —
+    # see the strategy prompt's HARD RULE 5.
+    take_profit: TakeProfit | None = None
     risk_management: RiskManagement = Field(default_factory=RiskManagement)
     trailing_stop: TrailingStop | None = None
+    trailing_take_profit: TrailingTakeProfit | None = None
 
     indicators: list[IndicatorSpec] = Field(default_factory=list)
     reference_symbol: str | None = None
@@ -305,8 +339,13 @@ class StrategySpec(BaseModel):
         return _DEFAULT_SL_PCT
 
     def resolved_take_profit_pct(self) -> float:
-        """The percent the engine consumes, derived from take_profit (RR-aware)."""
+        """The static-target percent the engine consumes, derived from take_profit
+        (RR-aware). Returns 0.0 when there is no static target (take_profit omitted) —
+        the engine then relies on the trailing_take_profit / exit conditions for the
+        profit exit, and emits NO static take-profit."""
         tp = self.take_profit
+        if tp is None:
+            return 0.0
         if tp.type == "percent":
             v = tp.numeric()
             if v and v > 0:
@@ -397,6 +436,8 @@ class StrategySpec(BaseModel):
             strat["stop_loss"] = sl_spec
         if self.trailing_stop is not None:
             strat["trailing_stop"] = self.trailing_stop.to_engine_dict()
+        if self.trailing_take_profit is not None:
+            strat["trailing_take_profit"] = self.trailing_take_profit.to_engine_dict()
         if self.htf_rules:
             strat["htf"] = [
                 {"timeframe": r.timeframe, "condition": r.condition} for r in self.htf_rules

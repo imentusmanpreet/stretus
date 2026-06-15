@@ -146,6 +146,10 @@ def trailing_stop_types() -> frozenset[str]:
     return frozenset(_import_loader()._TRAILING_TYPES)
 
 
+def trailing_take_profit_types() -> frozenset[str]:
+    return frozenset(_import_loader()._TRAILING_TAKE_PROFIT_TYPES)
+
+
 def normalise_market(market: str) -> str:
     """The engine's canonical market id for a free-text market string."""
     return _import_loader()._normalise_market(market)

@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.execution import ExecutionState
 from app.db.models.strategy import Strategy
+from app.schemas.backtest import TradeEntryReason, TradeExitReason
 from app.schemas.execution import (
     ActionType,
     AssetClass,
@@ -39,6 +40,7 @@ from app.schemas.execution import (
     OpenPosition,
     RiskSnapshot,
     StrategyConfigPayload,
+    TrailingOrderSpec,
 )
 from app.services.execution.account_manager import AccountCheckInput, AccountManager
 from app.services.execution.entry_gates import evaluate_entry_gates
@@ -58,6 +60,52 @@ from app.services.execution.rule_engine import RuleEngine
 from app.services.execution.trade_manager import TradeManager
 
 logger = logging.getLogger(__name__)
+
+_OHLCV_KEYS = {"open", "high", "low", "close", "volume",
+               "Open", "High", "Low", "Close", "Volume"}
+
+
+def _extract_last_bar(df) -> tuple[dict, dict]:
+    """Return (signal_bar_ohlcv, indicators) from the last candle of df."""
+    last_row = df.iloc[-1]
+    signal_bar = {
+        "datetime": str(df.index[-1]),
+        "open":   float(last_row.get("open",  last_row.get("Open",  0)) or 0),
+        "high":   float(last_row.get("high",  last_row.get("High",  0)) or 0),
+        "low":    float(last_row.get("low",   last_row.get("Low",   0)) or 0),
+        "close":  float(last_row.get("close", last_row.get("Close", 0)) or 0),
+        "volume": float(last_row.get("volume",last_row.get("Volume",0)) or 0),
+        "index":  len(df) - 1,
+    }
+    indicators: dict = {}
+    for col, val in last_row.items():
+        if col in _OHLCV_KEYS:
+            continue
+        try:
+            fval = float(val)
+            indicators[col] = None if (fval != fval) else fval  # NaN → None
+        except (TypeError, ValueError):
+            pass
+    return signal_bar, indicators
+
+
+def _parse_trailing_order_spec(raw: Any) -> Optional[TrailingOrderSpec]:
+    """Map a persisted trailing spec ({type, distance_pct, activate_after_pct}) to
+    the OMS-facing TrailingOrderSpec. Percent-only (Phase 1); returns None when
+    absent or unparseable so trailing stays an additive, fail-safe feature."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    try:
+        distance = float(raw.get("distance_pct"))
+    except (TypeError, ValueError):
+        return None
+    if distance <= 0:
+        return None
+    try:
+        activate = float(raw.get("activate_after_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        activate = 0.0
+    return TrailingOrderSpec(distance_pct=distance, activate_after_pct=max(0.0, activate))
 
 
 class StrategyEvaluator:
@@ -394,6 +442,8 @@ class StrategyEvaluator:
                 mode=mode.value,
                 bar_datetime=last_bar_dt,
                 asset_class=asset_class,
+                trailing_take_profit=strategy_cfg.sl_tp.trailing_take_profit,
+                trailing_stop=strategy_cfg.sl_tp.trailing_stop,
             )
 
             sl_pct  = float(getattr(effective_risk_config, "stop_loss_pct", strategy_cfg.sl_tp.stop_loss_pct))
@@ -421,6 +471,24 @@ class StrategyEvaluator:
                 f"  principal={currency_sym}{risk_out.principal_amount:,.4f}"
             )
 
+            signal_bar, indicators = _extract_last_bar(df)
+            entry_detail = TradeEntryReason(
+                summary=(
+                    f"Entry signal fired: {strategy_cfg.entry.trigger.type} "
+                    f"for {symbol} @ {currency_sym}{ltp:.4f}"
+                ),
+                evaluation_mode="registry",
+                condition=f"{strategy_cfg.entry.trigger.type} {strategy_cfg.entry.trigger.params}",
+                signal_bar=signal_bar,
+                entry_bar={"datetime": str(df.index[-1]), "index": len(df) - 1},
+                indicators=indicators,
+                confirmation_bars_required=strategy_cfg.gates.entry_confirmation_bars,
+                confirmation_bars_observed=strategy_cfg.gates.entry_confirmation_bars,
+                fill={"price": ltp, "note": "estimated at LTP; actual fill from broker"},
+                initial_stop_price=risk_out.stop_loss_price,
+                gates_passed=gate_result.gates_passed,
+            )
+
             return EvaluateExecuteResponse(
                 status="success",
                 action=ActionType.entry_created,
@@ -429,6 +497,7 @@ class StrategyEvaluator:
                 mode=mode,
                 bracket_order=bracket,
                 risk_snapshot=risk_snapshot,
+                entry_detail=entry_detail,
                 messages=messages,
             )
 
@@ -586,15 +655,26 @@ class StrategyEvaluator:
                     reason = "exit_signal"
 
             if reason:
-                exits.append(
-                    self._trade.build_exit_instruction(
-                        position=pos,
-                        reason=reason,
-                        exit_price=ltp,
-                        strategy_type=strategy_type,
-                        asset_class=asset_class,
-                    )
+                exit_instr = self._trade.build_exit_instruction(
+                    position=pos,
+                    reason=reason,
+                    exit_price=ltp,
+                    strategy_type=strategy_type,
+                    asset_class=asset_class,
                 )
+                exit_bar, exit_indicators = _extract_last_bar(df)
+                currency_sym = "$" if asset_class == AssetClass.crypto_spot else "₹"
+                exit_instr.exit_detail = TradeExitReason(
+                    summary=(
+                        f"Exit triggered ({reason}) for {pos.position_id} "
+                        f"| LTP={currency_sym}{ltp:.4f}"
+                    ),
+                    code=reason.upper(),
+                    trigger={"price": ltp, "type": reason},
+                    exit_bar=exit_bar,
+                    indicators=exit_indicators,
+                )
+                exits.append(exit_instr)
             else:
                 self._emit(messages, f"  ✅ No exit condition met for {pos.position_id} — hold.")
 
@@ -743,11 +823,27 @@ def _strategy_config_from_db(
         or raw.get("stop_loss_pct")
         or runtime_risk_config.stop_loss_pct
     )
-    tp_pct = float(
-        sl_tp_raw.get("take_profit_pct")
-        or raw.get("take_profit_pct")
-        or runtime_risk_config.take_profit_pct
+
+    # Phase 3 — trailing exits. A trailing take-profit / stop can be persisted at
+    # the strategy top level (engine-YAML shape) or under sl_tp. When a trailing
+    # take-profit is present the static target is OPTIONAL: a take_profit_pct of 0
+    # means "no static cap" and must NOT fall back to a default (which would fire
+    # before the trail engages). The OMS owns these legs at run time.
+    trailing_tp_spec = _parse_trailing_order_spec(
+        raw.get("trailing_take_profit") or sl_tp_raw.get("trailing_take_profit")
     )
+    trailing_st_spec = _parse_trailing_order_spec(
+        raw.get("trailing_stop") or sl_tp_raw.get("trailing_stop")
+    )
+    if trailing_tp_spec is not None:
+        _raw_tp = sl_tp_raw.get("take_profit_pct", raw.get("take_profit_pct"))
+        tp_pct = float(_raw_tp) if _raw_tp is not None else 0.0
+    else:
+        tp_pct = float(
+            sl_tp_raw.get("take_profit_pct")
+            or raw.get("take_profit_pct")
+            or runtime_risk_config.take_profit_pct
+        )
 
     # Phase 10 — entry gates. The chat flow persists these under a "gates" key
     # in strategy_config (see app/planner/strategy_assembler.py). Strategies
@@ -786,7 +882,12 @@ def _strategy_config_from_db(
         asset_class=asset_class,
         entry=_block(entry_raw),
         exit=_block(exit_raw),
-        sl_tp=SlTpConfig(stop_loss_pct=sl_pct, take_profit_pct=tp_pct),
+        sl_tp=SlTpConfig(
+            stop_loss_pct=sl_pct,
+            take_profit_pct=tp_pct,
+            trailing_take_profit=trailing_tp_spec,
+            trailing_stop=trailing_st_spec,
+        ),
         risk=RiskConfig(
             max_risk_per_trade_pct=float(
                 risk_raw.get("max_risk_per_trade_pct", runtime_risk_config.per_trade_risk)

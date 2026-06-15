@@ -138,6 +138,8 @@ def populate_builder_from_spec(builder: Any, spec: StrategySpec) -> None:
     builder.stop_loss_spec = spec.stop_loss_engine_spec()
     if spec.trailing_stop is not None:
         builder.trailing_stop_spec = spec.trailing_stop.to_engine_dict()
+    if spec.trailing_take_profit is not None:
+        builder.trailing_take_profit_spec = spec.trailing_take_profit.to_engine_dict()
 
     if spec.reference_symbol:
         builder.reference_symbol = spec.reference_symbol
@@ -210,6 +212,8 @@ def spec_to_plan(spec: StrategySpec) -> dict:
         plan["_stop_loss_spec"] = sl_spec
     if spec.trailing_stop is not None:
         plan["_trailing_stop_spec"] = spec.trailing_stop.to_engine_dict()
+    if spec.trailing_take_profit is not None:
+        plan["_trailing_take_profit_spec"] = spec.trailing_take_profit.to_engine_dict()
     if spec.reference_symbol:
         plan["_reference_symbol"] = spec.reference_symbol
     if spec.htf_rules:
@@ -239,16 +243,17 @@ def apply_spec_extras_to_builder(builder: Any, spec: StrategySpec) -> None:
         # don't tag that fallback "user" (it would render as "2%" and mask the true
         # "1 × ATR" / "1.5R" in the readback).
         sl_user_pct = spec.stop_loss.source == "user" and spec.stop_loss.type == "percent"
-        tp_user_pct = spec.take_profit.source == "user" and spec.take_profit.type == "percent"
+        tp = spec.take_profit  # may be None when a trailing_take_profit supplies the exit
+        tp_user_pct = tp is not None and tp.source == "user" and tp.type == "percent"
         rms["stop_loss_pct"] = "user" if sl_user_pct else "default"
         rms["take_profit_pct"] = "user" if tp_user_pct else "default"
         # Surface a risk:reward target as first-class user intent so the readback
         # shows "1.5R" instead of a stale/derived percentage.
-        if spec.take_profit.type == "risk_reward":
-            rr = spec.take_profit.numeric()
+        if tp is not None and tp.type == "risk_reward":
+            rr = tp.numeric()
             if rr and rr > 0:
                 store["risk_reward"] = rr
-                rms["risk_reward"] = "user" if spec.take_profit.source == "user" else "default"
+                rms["risk_reward"] = "user" if tp.source == "user" else "default"
     if spec.position_sizing_mode:
         builder.position_sizing_mode = spec.position_sizing_mode
     if spec.max_capital_allocation_pct is not None:

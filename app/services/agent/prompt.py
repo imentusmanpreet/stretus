@@ -225,6 +225,10 @@ Parse the free-form message for all of:
 - max_positions — "max 2 trades open", "one trade at a time".
 - trailing_stop — "trail SL after 2%", "shift SL to entry after first target",
   "structural trail under swing lows".
+- trailing_take_profit — "trail my profit by 2%", "let the winner run, exit 1.5%
+  off the peak", "lock gains, trail the take-profit once up 5%". This trails the
+  PROFIT target (not the stop) and books a TRAILING_TAKE_PROFIT exit. A strategy
+  uses a trailing stop OR a trailing take-profit, never both.
 - trading_window — "trade only 9:15 – 11:00", "no entries after 14:30", "exit
   all by 15:15".
 

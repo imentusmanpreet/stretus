@@ -140,9 +140,15 @@ def _build_gates_config(builder: Any) -> dict:
 
 
 def build_strategy_config(builder: Any, strategy_payload: dict) -> dict:
-    """Build the strategy_config dict (used by the YAML generator + UI)."""
+    """Build the strategy_config dict (used by the YAML generator + UI).
+
+    This is the JSONB the live execution evaluator reads back
+    (`strategy_evaluator._strategy_config_from_db`). SL/TP scalars come from the
+    separate risk_execution_config; the trailing specs live HERE so the evaluator
+    can attach them to the bracket order's trailing block for the OMS.
+    """
     strategy_object = strategy_payload.get("strategy_object", {})
-    return {
+    config: dict[str, Any] = {
         "exit":          copy.deepcopy(strategy_object.get("exit", [])),
         "name":          strategy_object.get("name", "strategy"),
         "asset":         strategy_object.get("asset", builder.format_symbol()),
@@ -154,6 +160,13 @@ def build_strategy_config(builder: Any, strategy_payload: dict) -> dict:
         # Phase 10 — entry gates, consumed by the live execution evaluator.
         "gates":         _build_gates_config(builder),
     }
+    # Phase 3 — trailing exits, consumed by strategy_evaluator → build_bracket_order
+    # (the OMS owns these legs at run time). Mutually exclusive; both optional.
+    if getattr(builder, "trailing_take_profit_spec", None):
+        config["trailing_take_profit"] = dict(builder.trailing_take_profit_spec)
+    if getattr(builder, "trailing_stop_spec", None):
+        config["trailing_stop"] = dict(builder.trailing_stop_spec)
+    return config
 
 
 def build_retrieval_meta(strategy_payload: dict) -> dict:

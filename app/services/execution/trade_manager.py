@@ -48,6 +48,7 @@ from app.schemas.execution import (
     OrderLeg,
     OrderValidity,
     ProductType,
+    TrailingOrderSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,16 @@ def _take_profit_order_type(asset_class: AssetClass) -> ExchangeOrderType:
     return ExchangeOrderType.limit
 
 
+def _trailing_exit_order_type(asset_class: AssetClass) -> ExchangeOrderType:
+    # A trailing exit fires on a REVERSAL (a pullback from the peak), so it is a
+    # TRIGGER (stop) order, never a resting LIMIT — even on the take-profit side.
+    # crypto_spot: TAKE_PROFIT = market triggered at stopPrice (the profit-side
+    # mirror of STOP_LOSS). equity: SL-M is the market-on-trigger type.
+    if asset_class == AssetClass.crypto_spot:
+        return ExchangeOrderType.take_profit
+    return ExchangeOrderType.sl_m
+
+
 def _default_validity(asset_class: AssetClass) -> OrderValidity:
     if asset_class == AssetClass.crypto_spot:
         return OrderValidity.gtc
@@ -127,6 +138,8 @@ class TradeManager:
         bar_datetime: Optional[str] = None,
         *,
         asset_class: AssetClass = AssetClass.equity_cash,
+        trailing_take_profit: Optional[TrailingOrderSpec] = None,
+        trailing_stop: Optional[TrailingOrderSpec] = None,
     ) -> BracketOrder:
         """
         Construct a long (BUY) bracket order.
@@ -137,12 +150,24 @@ class TradeManager:
         Crypto path:
           product=SPOT, entry/TP=LIMIT, SL=STOP_LOSS, validity=GTC,
           qty=Decimal (fractional base asset).
+
+        Trailing exits (Phase 3): when ``trailing_take_profit`` (or
+        ``trailing_stop``) is supplied, that leg carries the trailing spec and the
+        external OMS owns it — monitoring price, ratcheting the line, and firing the
+        exit. A trailing take-profit leg switches from a resting LIMIT to a TRIGGER
+        order_type (it fires on a pullback, not at a fixed price); ``take_profit_price``
+        is then the activation/trigger reference, not a guaranteed fill. The two
+        trailing legs are mutually exclusive (one ratcheting line, not two).
         """
         qty_decimal     = _as_decimal(quantity)
         product         = _product_type(strategy_type, asset_class)
         entry_type      = _entry_order_type(asset_class)
         sl_type         = _stop_loss_order_type(asset_class)
-        tp_type         = _take_profit_order_type(asset_class)
+        # A trailing take-profit fires on a reversal → trigger type, not LIMIT.
+        tp_type         = (
+            _trailing_exit_order_type(asset_class) if trailing_take_profit is not None
+            else _take_profit_order_type(asset_class)
+        )
         validity        = _default_validity(asset_class)
         idempotency_key = self._idempotency_key(strategy_id, symbol, bar_datetime, asset_class)
 
@@ -184,6 +209,8 @@ class TradeManager:
             order_type=sl_type,
             product_type=product,
             validity=validity,
+            # When trailing, the OMS ratchets this stop upward and owns the exit.
+            trailing=trailing_stop,
         )
 
         tp_order = OrderLeg(
@@ -194,9 +221,14 @@ class TradeManager:
             side="SELL",
             quantity=qty_decimal,
             price=tp_px,
+            # A trailing take-profit is a trigger order: set trigger_price too so the
+            # OMS has the activation/reference level, mirroring the SL leg.
+            trigger_price=tp_px if trailing_take_profit is not None else None,
             order_type=tp_type,
             product_type=product,
             validity=validity,
+            # When trailing, the OMS trails this take-profit and owns the exit.
+            trailing=trailing_take_profit,
         )
 
         metadata = {

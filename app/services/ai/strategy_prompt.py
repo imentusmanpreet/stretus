@@ -47,12 +47,36 @@ HARD RULES (a violation makes the strategy un-runnable and will be rejected):
                                           the system computes percent = stop% × ratio)
      • fixed-percentage basis         → type="percent"      (value = the percent)
      • ATR / fixed-points / indicator → the matching type, mirroring rule 3
-   Never substitute a default ratio when the user gave one. The spec carries a SINGLE target, so
+   Never substitute a default ratio when the user gave one. The spec carries a SINGLE static target, so
    if the user names several scaled targets (e.g. multiple R-multiples or partial exits), use the
    furthest as `take_profit` and record the full ladder in intent_summary so nothing is dropped.
-5. timeframe MUST be one of the supported timeframes; market should map to a known
+   `take_profit` is OPTIONAL: OMIT it (set null) when a `trailing_take_profit` provides the profit
+   exit instead (see rule 5). Every strategy still needs SOME profit exit — either a static
+   `take_profit` OR a `trailing_take_profit`.
+5. TRAILING exits (optional) — when the user wants the stop OR the target to FOLLOW price
+   as the trade moves in their favour (a "trailing" / "ratchet" / "let the winner run" idea),
+   capture it on the matching block. Phase 1 supports a PERCENT give-back only (type="percent"):
+     • trail the STOP — protect against a reversal ("trail my stop by 2%", "move SL up as it
+       runs") → set `trailing_stop` = {type:"percent", distance_pct:<% behind the peak/trough>,
+       activate_after_pct:<profit % before it engages>}.
+     • trail the TARGET — capture upside ("trail my profit by 2%", "let it run and exit 1.5%
+       off the peak", "lock gains, trail the take-profit once up 5%") → set
+       `trailing_take_profit` = {type:"percent", distance_pct:<give-back %>,
+       activate_after_pct:<profit % before it engages>}.
+   distance_pct = how far behind the running peak (long) / trough (short) the exit trails;
+   activate_after_pct = the profit the trade must reach before trailing engages (omit ⇒ immediate).
+   A strategy may trail EITHER the stop OR the take-profit, NEVER both (two ratcheting lines
+   would chase the same peak) — pick the one the user asked for. Capture the user's exact percentages.
+   CRITICAL — "small target THEN trail / convert to trailing after the first target / let it run":
+   this means the first target is the ACTIVATION, not a hard exit. Set
+   `trailing_take_profit.activate_after_pct` = that first-target percent and OMIT the static
+   `take_profit` (null). Do NOT set a static `take_profit` at (or below) the activation level — a
+   static target there fires FIRST and the trade exits before trailing can ever run, defeating the
+   request. Only add a static `take_profit` ALONGSIDE a trailing one if the user explicitly wants a
+   hard safety CAP, and then it MUST sit well ABOVE `activate_after_pct`.
+6. timeframe MUST be one of the supported timeframes; market should map to a known
    market id; objective and direction MUST be from their allowed lists.
-6. direction="both" REQUIRES short_entry_condition (and ideally short_exit_condition).
+7. direction="both" REQUIRES short_entry_condition (and ideally short_exit_condition).
    For a single-sided short strategy use direction="short_only" with the short logic
    in entry_condition/exit_condition.
 

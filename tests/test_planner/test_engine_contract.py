@@ -13,6 +13,7 @@ def test_anchors_in_sync_with_engine_loader():
     assert set(ec.STOP_LOSS_ANCHORS) == set(loader._STOP_LOSS_ANCHORS)
     assert set(ec.STOP_LOSS_TYPES) == set(loader._STOP_LOSS_TYPES)
     assert set(ec.TRAILING_TYPES) == set(loader._TRAILING_TYPES)
+    assert set(ec.TRAILING_TAKE_PROFIT_TYPES) == set(loader._TRAILING_TAKE_PROFIT_TYPES)
 
 
 def test_unmappable_stops_return_needs_clarify():

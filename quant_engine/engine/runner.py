@@ -409,6 +409,7 @@ def run_backtest(
             stt_delivery_pct=float(run_config.get("stt_delivery_pct", 0.1)),
             stop_loss_spec=cfg.stop_loss_spec,
             trailing_stop_spec=cfg.trailing_stop_spec,
+            trailing_take_profit_spec=cfg.trailing_take_profit_spec,
             htf_contexts=htf_contexts,
             time_exit_spec=cfg.time_exit_spec,
             # Phase 10 — new entry gates and circuit breakers

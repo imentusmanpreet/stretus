@@ -96,9 +96,21 @@ def test_extra_fields_are_forbidden():
         _spec(unexpected_field="x")
 
 
-def test_stop_loss_and_take_profit_are_required():
+def test_stop_loss_is_required():
+    # stop_loss has no default — a spec without it is a Pydantic error.
     with pytest.raises(PydanticValidationError):
         StrategySpec(
             name="x", symbol="INFY.NS", market="indian_stocks", timeframe="15m",
             objective="intraday", direction="long_only", entry_condition="CLOSE > EMA(20)",
+            take_profit=TakeProfit(type="percent", value=2.0),
         )
+
+
+def test_take_profit_is_optional_when_trailing_present():
+    from app.strategy.spec import TrailingTakeProfit
+    # No static take_profit, but a trailing one supplies the profit exit.
+    s = _spec(take_profit=None, trailing_take_profit=TrailingTakeProfit(distance_pct=0.5, activate_after_pct=1.0))
+    # No static target → resolved percent is 0 and the engine reads "no cap".
+    assert s.resolved_take_profit_pct() == 0.0
+    assert s.to_engine_yaml_dict()["risk_management"]["take_profit_percent"] == 0.0
+    assert s.to_engine_yaml_dict()["trailing_take_profit"]["distance_pct"] == 0.5

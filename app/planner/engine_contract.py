@@ -42,6 +42,14 @@ STOP_LOSS_ANCHORS: Final[tuple[str, ...]] = (
 
 TRAILING_TYPES: Final[tuple[str, ...]] = ("percent", "atr", "ema", "chandelier")
 
+# Trailing TAKE-PROFIT types. Phase 1 ships `percent` only: a ratcheting give-back
+# line measured as a % below the running peak (long) / above the trough (short).
+# ATR/EMA/chandelier are intentionally excluded for now because the live OMS that
+# enforces trailing exits can only honour price-based (percent) trailing — keeping
+# this set to percent guarantees backtest↔live parity. Widen only when the OMS can
+# compute indicator-based trailing too.
+TRAILING_TAKE_PROFIT_TYPES: Final[tuple[str, ...]] = ("percent",)
+
 # Engine take-profit is consumed as a single percent; every SDL TP type reduces
 # to a pct EXCEPT `points` (absolute price distance — needs the price to convert).
 TAKE_PROFIT_TYPES: Final[tuple[str, ...]] = ("percent", "rr", "atr")

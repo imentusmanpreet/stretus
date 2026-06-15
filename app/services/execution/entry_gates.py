@@ -70,6 +70,7 @@ class GateResult:
     passed: bool = True
     blocked_by: Optional[str] = None
     messages: List[str] = field(default_factory=list)
+    gates_passed: List[str] = field(default_factory=list)
 
 
 # ── Column / value helpers ─────────────────────────────────────────────────────
@@ -508,4 +509,9 @@ def evaluate_entry_gates(
 
     if result.passed:
         result.messages.append("✅ All entry gates passed.")
+        result.gates_passed = [
+            msg.split("[")[1].split("]")[0]
+            for msg in result.messages
+            if "  ✅ GATE [" in msg
+        ]
     return result

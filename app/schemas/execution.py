@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.backtest import TradeEntryReason, TradeExitReason
+
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
 
@@ -141,10 +143,50 @@ class ExitBlock(BaseModel):
     filters: List[SignalRule] = Field(default_factory=list)
 
 
+class TrailingOrderSpec(BaseModel):
+    """OMS contract for a trailing exit leg (see docs/TRAILING_TAKE_PROFIT_DESIGN.md §4).
+
+    The eval engine only EMITS this on a bracket leg; the external OMS monitors
+    price, ratchets the line, and fires the exit. Phase 1 is percent-only so the
+    OMS can honour it identically to the backtest (parity). `distance_pct` is the
+    give-back behind the running peak (long) / trough (short); `activate_after_pct`
+    is the profit the trade must reach before trailing engages (0 = immediate).
+    """
+
+    enabled: bool = True
+    basis: Literal["percent"] = "percent"
+    distance_pct: float = Field(..., gt=0, description="Give-back % behind the running extreme.")
+    activate_after_pct: float = Field(
+        0.0, ge=0, description="Profit % before trailing engages (0 = immediate)."
+    )
+    # OMS semantics: trail behind the running tick high (long) / low (short), and
+    # fire a MARKET exit when price reverses to the line. Fixed for Phase 1.
+    anchor: Literal["running_extreme"] = "running_extreme"
+    fire: Literal["market"] = "market"
+
+
 class SlTpConfig(BaseModel):
     type: Literal["percent"] = "percent"
     stop_loss_pct: float = Field(..., gt=0, le=50)
-    take_profit_pct: float = Field(..., gt=0, le=100)
+    # take_profit_pct may be 0 when a trailing_take_profit supplies the profit exit
+    # (a static target at the trailing activation level would fire first and starve
+    # the trail). The validator enforces "static target OR trailing", and the two
+    # trailing legs are mutually exclusive (one ratcheting line, not two).
+    take_profit_pct: float = Field(0.0, ge=0, le=100)
+    trailing_take_profit: Optional[TrailingOrderSpec] = None
+    trailing_stop: Optional[TrailingOrderSpec] = None
+
+    @model_validator(mode="after")
+    def _require_profit_exit_and_one_trail(self) -> "SlTpConfig":
+        if self.take_profit_pct <= 0 and self.trailing_take_profit is None:
+            raise ValueError(
+                "take_profit_pct must be > 0 unless a trailing_take_profit is set."
+            )
+        if self.trailing_stop is not None and self.trailing_take_profit is not None:
+            raise ValueError(
+                "trailing_stop and trailing_take_profit are mutually exclusive."
+            )
+        return self
 
 
 class RiskConfig(BaseModel):
@@ -406,6 +448,15 @@ class OrderLeg(BaseModel):
             "GTC/IOC/FOK. Distinct from how long a CNC *position* may be held."
         ),
     )
+    trailing: Optional[TrailingOrderSpec] = Field(
+        default=None,
+        description=(
+            "Present only on a trailing exit leg (stop or take-profit). The OMS "
+            "owns this leg: it monitors price, ratchets the line, and fires the "
+            "exit. When set on a take-profit leg the `order_type` is a trigger "
+            "type (TAKE_PROFIT / SL-M), never a resting LIMIT."
+        ),
+    )
 
 
 class BracketOrder(BaseModel):
@@ -437,6 +488,7 @@ class ExitInstruction(BaseModel):
     exit_price: float
     quantity: Quantity
     product_type: ProductType
+    exit_detail: Optional[TradeExitReason] = None
 
 
 class RiskSnapshot(BaseModel):
@@ -468,5 +520,6 @@ class EvaluateExecuteResponse(BaseModel):
     bracket_order: Optional[BracketOrder] = None
     exits: List[ExitInstruction] = Field(default_factory=list)
     risk_snapshot: Optional[RiskSnapshot] = None
+    entry_detail: Optional[TradeEntryReason] = None
     messages: List[str] = Field(default_factory=list)
     error: Optional[str] = None
