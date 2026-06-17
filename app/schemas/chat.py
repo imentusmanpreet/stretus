@@ -116,8 +116,11 @@ class ChatMessageItem(BaseModel):
     status:           Optional[str] = None
     error_message:    Optional[str] = None
     error:            Optional[dict] = None
-    strategy_draft:   Optional[dict] = None
+    # Lean strategy view (replaces the old strategy_draft blob). The meaningful
+    # strategy is grouped under `strategy_json` = {strategy, risk_execution_config,
+    # gates}; `review` (confirmations/warnings) and `backtest_result` stay top-level.
     strategy_json:    Optional[dict] = None
+    review:           Optional[dict] = None
     backtest_result:  Optional[dict] = None
     created_at:       Optional[str] = None
     updated_at:       Optional[str] = None

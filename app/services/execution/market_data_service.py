@@ -160,7 +160,7 @@ class MarketDataService:
         for tf in ("1m", "5m", "15m", "30m", "1h", "1d"):
             df = _cache.get_candles(key, tf)
             if df is not None and not df.empty:
-                ltp = float(df["Close"].iloc[-1])
+                ltp = float(df["close"].iloc[-1])
                 _cache.set_ltp(key, ltp)
                 logger.info(
                     "LTP from candle close | asset_class=%s symbol=%s tf=%s ltp=%.10g",

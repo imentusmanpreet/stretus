@@ -196,3 +196,36 @@ def collect_identifier_names(tree: Any) -> set[str]:
 
     _walk(tree)
     return names
+
+
+def collect_function_names(tree: Any) -> set[str]:
+    """Walk a compiled condition's AST and return every function name used.
+
+    The engine's parser does NOT always reject unknown function names at parse
+    time — it may only fail at evaluation. This lets the validator catch
+    fabricated functions (e.g. SUPERTREND) before they reach the backtest.
+    """
+    cond = _import_conditions()
+    names: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if node is None:
+            return
+        if isinstance(node, cond.FunctionNode):
+            names.add(node.name)
+            for arg in node.args:
+                _walk(arg)
+            return
+        if isinstance(node, cond.IdentifierNode):
+            return
+        left = getattr(node, "left", None)
+        right = getattr(node, "right", None)
+        operand = getattr(node, "operand", None)
+        if left is not None or right is not None:
+            _walk(left)
+            _walk(right)
+        elif operand is not None:
+            _walk(operand)
+
+    _walk(tree)
+    return names

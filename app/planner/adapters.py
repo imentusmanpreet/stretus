@@ -77,14 +77,14 @@ def plan_to_signal_plan(plan: StrategyPlan) -> dict[str, Any]:
     signals_used.append(plan.exit_trigger.name)
     signals_used.extend(p.name for p in plan.exit_filters)
 
-    entry_parts = [render_formula(plan.entry_trigger.name, plan.entry_trigger.params)]
+    entry_parts = [render_formula(plan.entry_trigger.name, plan.entry_trigger.params, plan.entry_trigger.timeframe)]
     for picked in plan.entry_filters:
-        entry_parts.append(render_formula(picked.name, picked.params))
+        entry_parts.append(render_formula(picked.name, picked.params, picked.timeframe))
     entry_condition = " AND ".join(p for p in entry_parts if p) or None
 
-    exit_parts = [render_formula(plan.exit_trigger.name, plan.exit_trigger.params)]
+    exit_parts = [render_formula(plan.exit_trigger.name, plan.exit_trigger.params, plan.exit_trigger.timeframe)]
     for picked in plan.exit_filters:
-        exit_parts.append(render_formula(picked.name, picked.params))
+        exit_parts.append(render_formula(picked.name, picked.params, picked.timeframe))
     exit_condition = " AND ".join(p for p in exit_parts if p) or None
 
     return {

@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import Literal, List, Optional, Tuple, Union
 
 from dotenv import dotenv_values
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _OPENROUTER_KEY_ENV_PREFIX = "OPENROUTER_API_KEY_"
@@ -102,7 +103,22 @@ class Settings(BaseSettings):
     #   anthropic/claude-3.5-sonnet        ← excellent reasoning
     #   google/gemini-pro-1.5              ← good for long contexts
     #   openai/gpt-4-turbo                 ← OpenAI's best
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct"
+    # ── Two-tier models ────────────────────────────────────────────────────────
+    # reasoning_model — the CAPABLE model used ONLY for the quality-critical step:
+    #   strategy generation (composing valid engine-grammar conditions that faithfully
+    #   capture complex intent). Worth the extra latency/cost.
+    # fast_model — the FAST/CHEAP model for everything else: routing, intent extraction,
+    #   input gathering, clarifications, and simple replies. Runs on every turn, so speed
+    #   matters most here. Empty → fall back to reasoning_model.
+    # Env aliases keep the legacy OPENROUTER_MODEL / OPENROUTER_FAST_MODEL vars working.
+    reasoning_model: str = Field(
+        default="meta-llama/llama-3.3-70b-instruct",
+        validation_alias=AliasChoices("reasoning_model", "REASONING_MODEL", "OPENROUTER_MODEL"),
+    )
+    fast_model: str = Field(
+        default="meta-llama/llama-3.3-70b-instruct",
+        validation_alias=AliasChoices("fast_model", "FAST_MODEL", "OPENROUTER_FAST_MODEL"),
+    )
 
     # ── Ollama Local Settings ─────────────────────────────────────────────────
     ollama_base_url: str = "http://localhost:11434"

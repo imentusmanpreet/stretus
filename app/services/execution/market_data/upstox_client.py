@@ -166,19 +166,21 @@ def _upstox_candles_to_df(candles: list) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
     df = df.set_index("timestamp").sort_index()
-    return df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df.columns = [c.lower() for c in df.columns]
+    return df
 
 
 def _resample_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Resample finer OHLCV bars to a coarser timeframe."""
+    """Resample finer OHLCV bars to a coarser timeframe. Expects lowercase columns."""
     resampled = df.resample(rule, closed="left", label="left").agg({
-        "Open":   "first",
-        "High":   "max",
-        "Low":    "min",
-        "Close":  "last",
-        "Volume": "sum",
+        "open":   "first",
+        "high":   "max",
+        "low":    "min",
+        "close":  "last",
+        "volume": "sum",
     })
-    return resampled.dropna(subset=["Open", "High", "Low", "Close"])
+    return resampled.dropna(subset=["open", "high", "low", "close"])
 
 
 # ── UpstoxClient ──────────────────────────────────────────────────────────────

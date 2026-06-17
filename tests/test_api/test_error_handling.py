@@ -134,19 +134,57 @@ def test_permission_error_returns_specific_strategy_file_message() -> None:
     )
 
 
-def test_public_strategy_draft_hides_risk_and_execution_for_any_mode() -> None:
-    payload = chat_route._public_strategy_draft(
+def test_lean_strategy_view_keeps_meaningful_drops_internal() -> None:
+    view = chat_route._lean_strategy_view(
         {
             "mode": "awaiting_confirmation",
             "symbol": "TCS.NS",
-            "risk_and_execution": {"max_trades": "2 trades per day"},
+            "timeframe": "5m",
+            "entry_condition": "CLOSE > EMA(20)",
+            # percent stop → already conveyed by stop_loss_pct, must NOT be duplicated
+            "stop_loss_spec": {"type": "percent", "pct": 1.5},
+            "take_profit_pct": 0.0,
+            "trailing_take_profit_spec": {"type": "percent", "distance_pct": 0.5, "activate_after_pct": 1.0},
+            "risk_execution_config": {"max_trades": 2, "trading_window": "24/7", "stop_loss_pct": 1.5},
+            # internal / duplicated noise that must be dropped:
+            "inputs_snapshot": {"details": {"x": 1}, "summary_rows": [1, 2]},
+            "agent_decision": {"tool": "plan_strategy_signals"},
+            "signal_plan": {"entry_condition": "CLOSE > EMA(20)"},
         }
     )
 
-    assert payload == {
-        "mode": "awaiting_confirmation",
-        "symbol": "TCS.NS",
-    }
+    # Top-level is only the focused objects; strategy holds LOGIC only (no risk).
+    assert set(view) <= {"strategy", "risk_execution_config", "gates", "review"}
+    assert "risk" not in view["strategy"]
+    assert view["strategy"]["symbol"] == "TCS.NS"
+    assert view["strategy"]["entry_condition"] == "CLOSE > EMA(20)"
+    # ALL risk is merged into risk_execution_config.
+    rec = view["risk_execution_config"]
+    assert rec["trailing_take_profit"]["distance_pct"] == 0.5
+    assert rec["trading_window"] == "24/7"
+    # A percent stop is NOT duplicated as a typed spec (stop_loss_pct already has it).
+    assert "stop_loss" not in rec
+    assert rec["stop_loss_pct"] == 1.5
+    # Internal / duplicated fields are gone everywhere.
+    import json as _json
+    blob = _json.dumps(view)
+    for noise in ("inputs_snapshot", "agent_decision", "signal_plan", "mode"):
+        assert noise not in blob
+
+
+def test_lean_strategy_view_keeps_typed_atr_stop_in_rec() -> None:
+    """A non-percent (ATR/structural) stop IS surfaced as a typed `stop_loss` inside
+    risk_execution_config, because it carries info beyond the flat stop_loss_pct."""
+    view = chat_route._lean_strategy_view(
+        {
+            "symbol": "BTC_USDT",
+            "stop_loss_spec": {"type": "atr", "window": 14, "multiplier": 1.5},
+            "risk_execution_config": {"stop_loss_pct": 2.0},
+        }
+    )
+    rec = view["risk_execution_config"]
+    assert rec["stop_loss"] == {"type": "atr", "window": 14, "multiplier": 1.5}
+    assert rec["stop_loss_pct"] == 2.0  # fallback percent still present
 
 
 def test_history_message_payload_hides_strategy_draft_after_backtest_complete() -> None:
@@ -171,7 +209,10 @@ def test_history_message_payload_hides_strategy_draft_after_backtest_complete() 
     payload = chat_route._history_message_payload(message)
 
     assert payload["state"] == "backtest_complete"
-    assert payload["strategy_draft"] is None
+    # The raw strategy_draft blob is gone; the meaningful strategy is grouped under
+    # a single `strategy_json` object, with backtest_result lifted to top level.
+    assert "strategy_draft" not in payload
+    assert payload["strategy_json"]["strategy"]["symbol"] == "HDFCBANK.NS"
     assert payload["backtest_result"]["metrics"]["total_return_pct"] == 1.2
 
 
@@ -181,17 +222,17 @@ async def test_history_message_payload_hydrates_runtime_risk_execution_from_db(m
     message = SimpleNamespace(
         id="msg-2",
         role=SimpleNamespace(value="assistant"),
-        strategy_draft=None,
-        strategy_json={
-            "context": {
-                "strategy_object": {
-                    "risk_and_execution": {
-                        "per_trade_risk": "1.0% of capital per trade",
-                        "trading_window": "old-window",
-                    }
-                }
-            }
+        # Lean strategy_json is built from the draft; its risk_execution_config
+        # carries a user value (preserved) and is missing others (DB backfills).
+        strategy_draft={
+            "symbol": "INFY.NS",
+            "risk_execution_config": {
+                "per_trade_risk": 1.0,
+                "trading_window": "old-window",
+                "rms_sources": {"per_trade_risk": "user"},
+            },
         },
+        strategy_json=None,
         content="Strategy ready.",
         status=SimpleNamespace(value="completed"),
         error_message=None,
@@ -234,10 +275,11 @@ async def test_history_message_payload_hydrates_runtime_risk_execution_from_db(m
         snapshot_cache={},
     )
 
-    risk = payload["strategy_json"]["context"]["strategy_object"]["risk_and_execution"]
-    # Assembled values win; runtime config only backfills missing keys.
-    assert risk["per_trade_risk"] == "1.0% of capital per trade"
-    assert risk["trading_window"] == "old-window"
-    assert risk["stop_loss_pct"] == 2.0
-    assert risk["take_profit_pct"] == 5.0
-    assert risk["max_trades"] == 2.0
+    rec = payload["strategy_json"]["risk_execution_config"]
+    # Draft (user/assembled) values win; runtime DB config only backfills missing keys.
+    assert rec["per_trade_risk"] == 1.0
+    assert rec["trading_window"] == "old-window"
+    assert rec["stop_loss_pct"] == 2.0
+    assert rec["take_profit_pct"] == 5.0
+    assert rec["max_trades"] == 2
+    assert rec["rms_sources"]["per_trade_risk"] == "user"  # provenance preserved

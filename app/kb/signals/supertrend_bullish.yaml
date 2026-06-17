@@ -2,7 +2,7 @@ name: supertrend_bullish
 category: trend
 direction: bullish
 kind: regime
-formula: CLOSE > SUPERTREND({window}, {multiplier})
+formula: CLOSE > SUPERTREND
 roles:
 - entry_trigger
 - entry_filter

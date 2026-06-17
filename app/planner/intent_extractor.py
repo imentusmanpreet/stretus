@@ -91,7 +91,7 @@ class IntentExtractor:
             {"role": "system", "content": self._system_prompt(taxonomy)},
             {"role": "user",   "content": f"User goal: {goal}"},
         ]
-        raw = await self._llm.chat(messages)
+        raw = await self._llm.chat(messages, fast=True)
         return self._parse_json(raw)
 
     # ── Parsing & validation ─────────────────────────────────────────────────

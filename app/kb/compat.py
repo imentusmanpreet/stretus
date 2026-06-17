@@ -97,6 +97,18 @@ async def resolve_supported_stock(query: str) -> dict | None:
             "matches": facts["stock_options"],
         }
 
+    if resolution.suggestion is not None:
+        # Fuzzy "did you mean" — surface as a single-option confirmation, reusing
+        # the ambiguous picker so the user explicitly accepts the correction
+        # instead of having a typo silently resolved to a possibly-wrong stock.
+        facts = ambiguous_stock_validation_facts(str(query), (resolution.suggestion,))
+        return {
+            "ambiguous": True,
+            "validation_code": AMBIGUOUS_STOCK_VALIDATION_CODE,
+            "validation_facts": facts,
+            "matches": facts["stock_options"],
+        }
+
     stock = resolution.stock
     if stock is None:
         return None

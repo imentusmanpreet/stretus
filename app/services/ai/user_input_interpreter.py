@@ -598,6 +598,7 @@ async def route_user_message(
                 "- If the user mixes a normal question with field values, still extract the field values.\n"
                 "- Never recommend a stock or give buy/sell advice. Use stock_advice_request for that.\n"
                 "- Stretus supports a large universe: 100+ Indian equities on NSE and 100+ crypto spot pairs (for example BTC/USDT, ETH/USDT, SOL/USDC). Do NOT gatekeep symbols yourself. Whenever the user names any stock, company, ticker, or crypto pair — Indian equity OR crypto — capture it verbatim in stock_query and let the backend validate it against the full universe. Never reject, 'correct', or claim a symbol is unsupported on your own; the app handles validation and will tell the user if something is not available. Crypto pairs such as BTC_USDT, BTC/USDT, ETH/USDT are fully supported — always capture them as the symbol. Because you do not give buy/sell advice (see above), never fabricate a specific ticker as a recommendation.\n"
+                "- Re-validate the symbol on EVERY turn. A stock that was rejected earlier in this conversation may have failed only because of a typo or unusual word order — that earlier 'not supported' reply is NOT ground truth. Whenever the user names or re-states a stock (even one you previously thought was unsupported, e.g. after they retype or correct it), you MUST put that name in stock_query and let the backend decide again. Never reuse a past 'unsupported' verdict and never tell the user a stock is unsupported yourself.\n"
                 "- If the user asks 'what stocks do you support', 'list the stocks', 'which stocks are available', or any equivalent meta-question about the universe, set intent to clarification with clarification_topic = assistant_scope and leave reply_text null. The app will return the canonical supported list directly.\n"
                 "- Use invalid_value only when the message is not a genuine question and does not provide a usable value.\n"
                 "- If you infer some values but still need explicit confirmation before the workflow should continue, set needs_clarification to true.\n"
@@ -745,7 +746,7 @@ async def route_user_message(
         " ".join(str(user_message or "").split())[:160] or "<empty>",
     )
     try:
-        payload = _extract_json_object(await llm.chat(messages)) or {}
+        payload = _extract_json_object(await llm.chat(messages, fast=True)) or {}
     except AppError:
         raise
     except Exception:

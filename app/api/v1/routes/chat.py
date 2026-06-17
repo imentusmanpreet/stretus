@@ -51,22 +51,6 @@ from app.services.chat.chat_service import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-_HIDDEN_STRATEGY_DRAFT_KEYS = {
-    "kb_query",
-    "kb_snippets",
-    "daily_loss_cap_pct",
-    "max_trade",
-    "daily_loss_cap",
-    "position_sizing",
-    "execution_mode",
-    "trading_window",
-    "risk_validation",
-    "per_trade_risk",
-    "risk_reward",
-    "max_trades",
-    "risk_execution_config",
-}
-_HIDDEN_SIGNAL_PLAN_KEYS = {"kb_query", "kb_snippets", "rationale"}
 _BACKTEST_METRIC_ORDER = (
     "num_days",
     "total_return_pct",
@@ -101,27 +85,111 @@ _BACKTEST_METRIC_ORDER = (
 )
 
 
-def _public_strategy_draft(draft: dict | None) -> dict | None:
-    if not isinstance(draft, dict):
-        return draft
+# ── Lean strategy view ─────────────────────────────────────────────────────────
+# The stored ``strategy_draft`` blob carries ~150 keys (the duplicated
+# inputs_snapshot, signal_plan, discovery/validation internals, kb signals, the
+# agent decision, …). The API exposes only a meaningful subset, in focused objects:
+#   `strategy`               — signal LOGIC only (identity, conditions, indicators)
+#   `risk_execution_config`  — ALL risk in one place: account RMS scalars + the
+#                              exit structure (trailing specs, typed non-% stop)
+#   `gates`                  — only the active entry/execution gates
+#   `review`                 — confirmations / warnings
 
-    public_draft = {
-        key: value
-        for key, value in draft.items()
-        if key not in _HIDDEN_STRATEGY_DRAFT_KEYS
+_STRATEGY_IDENTITY_KEYS = (
+    "symbol", "market", "asset_class", "timeframe",
+    "objective", "direction", "sentiment", "goal",
+)
+_STRATEGY_CONDITION_KEYS = (
+    "entry_condition", "exit_condition",
+    "short_entry_condition", "short_exit_condition",
+)
+# Gate → its "off"/disabled sentinel. A gate appears in `gates` ONLY when it is
+# set AND differs from this sentinel, so the object stays small (non-default only).
+# Pure ENTRY/EXECUTION gates only. Sizing fields (position_sizing_mode,
+# max_capital_allocation_pct) live in risk_execution_config — keeping them out of
+# here avoids duplicating the same concept across two objects.
+_GATE_OFF_SENTINELS: dict[str, object] = {
+    "gap_filter": "none",
+    "max_spread_bps": 0,
+    "entry_confirmation_bars": 1,
+    "cooldown_bars_after_loss": 0,
+    "cooldown_bars_after_profit": 0,
+    "max_consecutive_losses": 0,
+    "rsi_entry_band_min": None,
+    "rsi_entry_band_max": None,
+    "volume_ratio_threshold": None,
+}
+
+
+def _lean_gates(draft: dict) -> dict:
+    """Only the entry/execution gates that are actually active (≠ their off-sentinel)."""
+    gates: dict = {}
+    for key, off in _GATE_OFF_SENTINELS.items():
+        val = draft.get(key)
+        if val is not None and val != off:
+            gates[key] = val
+    start, end = draft.get("entry_window_start"), draft.get("entry_window_end")
+    if start and end:
+        gates["entry_window"] = f"{start} - {end}"
+    return gates
+
+
+def _lean_review(draft: dict) -> dict | None:
+    """Surface fidelity confirmations/warnings (e.g. 'confirm the default stop')."""
+    summary = draft.get("fidelity_summary")
+    findings = draft.get("fidelity_findings") or []
+    requires = bool(isinstance(summary, dict) and summary.get("requires_user_clarification"))
+    if not requires and not findings:
+        return None
+    return {
+        "requires_confirmation": requires,
+        "findings": [
+            {k: f.get(k) for k in ("field", "severity", "message") if f.get(k) is not None}
+            for f in findings if isinstance(f, dict)
+        ],
     }
 
-    signal_plan = public_draft.get("signal_plan")
-    if isinstance(signal_plan, dict):
-        public_draft["signal_plan"] = {
-            key: value
-            for key, value in signal_plan.items()
-            if key not in _HIDDEN_SIGNAL_PLAN_KEYS
-        }
 
-    public_draft.pop("risk_and_execution", None)
+def _lean_strategy_view(draft: dict | None) -> dict:
+    """Reduce the full strategy_draft blob to the meaningful API objects:
+    {strategy, risk_execution_config, gates, review}. Drops the duplicated
+    inputs_snapshot, signal_plan, and every internal discovery/validation/kb field."""
+    if not isinstance(draft, dict):
+        return {}
 
-    return public_draft
+    strategy: dict = {k: draft[k] for k in _STRATEGY_IDENTITY_KEYS if draft.get(k) is not None}
+    for k in _STRATEGY_CONDITION_KEYS:
+        if draft.get(k):
+            strategy[k] = draft[k]
+    if draft.get("indicators"):
+        strategy["indicators"] = draft["indicators"]
+
+    view: dict = {"strategy": strategy}
+
+    # ALL risk lives in one object — risk_execution_config. It carries the account/
+    # execution RMS (sizing, caps, window, SL/TP percents, rms_sources provenance)
+    # AND the strategy-level exit STRUCTURE merged in: the trailing specs, plus a
+    # typed stop_loss ONLY when it adds something beyond the flat stop_loss_pct
+    # (ATR/structural). A plain percent stop is already conveyed by stop_loss_pct,
+    # so we don't duplicate it. (take_profit_pct already lives in the RMS scalars.)
+    rec = dict(draft.get("risk_execution_config") or {})
+    sl_spec = draft.get("stop_loss_spec")
+    if isinstance(sl_spec, dict) and sl_spec and str(sl_spec.get("type")) != "percent":
+        rec["stop_loss"] = sl_spec
+    if draft.get("trailing_take_profit_spec"):
+        rec["trailing_take_profit"] = draft["trailing_take_profit_spec"]
+    if draft.get("trailing_stop_spec"):
+        rec["trailing_stop"] = draft["trailing_stop_spec"]
+    if rec:
+        view["risk_execution_config"] = rec
+
+    gates = _lean_gates(draft)
+    if gates:
+        view["gates"] = gates
+    review = _lean_review(draft)
+    if review:
+        view["review"] = review
+    return view
 
 
 def _ordered_backtest_metrics(metrics: dict | None) -> dict | None:
@@ -182,50 +250,6 @@ def _public_strategy_json(payload: dict | None) -> dict | None:
     return public_payload
 
 
-def _strategy_object_nodes(payload: dict | None) -> list[dict]:
-    if not isinstance(payload, dict):
-        return []
-
-    nodes: list[dict] = []
-    direct_strategy_object = payload.get("strategy_object")
-    if isinstance(direct_strategy_object, dict):
-        nodes.append(direct_strategy_object)
-
-    context = payload.get("context")
-    if isinstance(context, dict):
-        context_strategy_object = context.get("strategy_object")
-        if isinstance(context_strategy_object, dict):
-            nodes.append(context_strategy_object)
-
-    return nodes
-
-
-def _overlay_runtime_risk_execution(
-    payload: dict | None,
-    risk_and_execution: dict | None,
-) -> dict | None:
-    """Fill missing risk fields only — never replace an assembled risk block."""
-    if not isinstance(payload, dict) or not isinstance(risk_and_execution, dict):
-        return payload
-
-    updated_payload = copy.deepcopy(payload)
-    strategy_objects = _strategy_object_nodes(updated_payload)
-    if not strategy_objects:
-        return payload
-
-    for strategy_object in strategy_objects:
-        existing = strategy_object.get("risk_and_execution")
-        if isinstance(existing, dict) and existing:
-            # Preserve user/assembled SL/TP/window; backfill only null/missing keys.
-            merged = dict(risk_and_execution)
-            for key, value in existing.items():
-                if value is not None:
-                    merged[key] = value
-            strategy_object["risk_and_execution"] = merged
-        else:
-            strategy_object["risk_and_execution"] = dict(risk_and_execution)
-
-    return updated_payload
 
 
 def _history_message_payload(message) -> dict:
@@ -255,31 +279,39 @@ def _history_message_payload(message) -> dict:
             else message.error_message
         ) if message.role.value == "assistant" else None,
         "error": error_payload if message.role.value == "assistant" else None,
-        "strategy_draft": (
-            _public_strategy_draft(message.strategy_draft)
-            if message.role.value == "assistant"
-            else None
-        ),
         "created_at": message.created_at.isoformat() if message.role.value == "assistant" else None,
         "updated_at": (
             message.updated_at.isoformat() if message.updated_at else None
         ) if message.role.value == "assistant" else None,
     }
 
+    if message.role.value == "assistant" and isinstance(message.strategy_draft, dict):
+        # The meaningful strategy is grouped under ONE `strategy_json` object:
+        # {strategy (logic), risk_execution_config (all risk), gates}. `review`
+        # stays top-level. This replaces the old raw strategy_draft + the bloated
+        # assembled-context strategy_json blob.
+        _lean = _lean_strategy_view(message.strategy_draft)
+        _strategy_json = {
+            key: _lean[key]
+            for key in ("strategy", "risk_execution_config", "gates")
+            if key in _lean
+        }
+        if _strategy_json:
+            payload["strategy_json"] = _strategy_json
+        if _lean.get("review"):
+            payload["review"] = _lean["review"]
+
     if message.role.value == "assistant":
+        # The assembled-context strategy_json is no longer surfaced (the lean
+        # `strategy_json` above supersedes it); we only lift out the error and the
+        # backtest_result from it.
         public_strategy_json = _public_strategy_json(message.strategy_json)
         if isinstance(public_strategy_json, dict):
             if isinstance(public_strategy_json.get("error"), dict):
                 payload["error"] = public_strategy_json["error"]
-            remaining_payload = {
-                key: value
-                for key, value in public_strategy_json.items()
-                if key != "error"
-            }
-            if set(remaining_payload.keys()) == {"backtest_result"}:
-                payload["backtest_result"] = remaining_payload["backtest_result"]
-            elif remaining_payload:
-                payload["strategy_json"] = remaining_payload
+            backtest_result = public_strategy_json.get("backtest_result")
+            if isinstance(backtest_result, dict):
+                payload["backtest_result"] = backtest_result
 
     return payload
 
@@ -294,10 +326,14 @@ async def _history_message_payload_with_runtime_risk_execution(
     if message.role.value != "assistant":
         return payload
 
-    public_strategy_json = payload.get("strategy_json")
-    if not isinstance(public_strategy_json, dict):
+    # Backfill the lean `strategy_json.risk_execution_config` with the CURRENT active
+    # DB risk config — fills any keys the draft snapshot missed without ever
+    # replacing user/assembled values (those are non-None and win).
+    strategy_json = payload.get("strategy_json")
+    if not isinstance(strategy_json, dict):
         return payload
-    if not _strategy_object_nodes(public_strategy_json):
+    rec = strategy_json.get("risk_execution_config")
+    if not isinstance(rec, dict):
         return payload
 
     strategy_id = str(message.strategy_id) if getattr(message, "strategy_id", None) else None
@@ -314,10 +350,11 @@ async def _history_message_payload_with_runtime_risk_execution(
             runtime_risk_execution = build_risk_execution_response(snapshot)
             snapshot_cache[cache_key] = runtime_risk_execution
 
-        payload["strategy_json"] = _overlay_runtime_risk_execution(
-            public_strategy_json,
-            runtime_risk_execution,
-        )
+        merged = dict(runtime_risk_execution)
+        for key, value in rec.items():
+            if value is not None:
+                merged[key] = value
+        strategy_json["risk_execution_config"] = merged
     except Exception as exc:
         logger.warning(
             "chat_history risk_execution hydration skipped | session_id=%s message_id=%s error=%s",

@@ -1423,7 +1423,7 @@ def _rebuild_conditions(plan: dict[str, Any]) -> None:
         for sig in plan.get(bucket) or []:
             if not isinstance(sig, dict) or not sig.get("name"):
                 continue
-            part = render_formula(sig["name"], dict(sig.get("params") or {}))
+            part = render_formula(sig["name"], dict(sig.get("params") or {}), sig.get("timeframe"))
             if part:
                 entry_parts.append(part)
 
@@ -1438,7 +1438,7 @@ def _rebuild_conditions(plan: dict[str, Any]) -> None:
     for sig in plan.get("exit") or []:
         if not isinstance(sig, dict) or not sig.get("name"):
             continue
-        part = render_formula(sig["name"], dict(sig.get("params") or {}))
+        part = render_formula(sig["name"], dict(sig.get("params") or {}), sig.get("timeframe"))
         if part:
             exit_parts.append(part)
 
@@ -1627,7 +1627,7 @@ def _compile_exit_rules(
         # VWAP flip alone is too weak when user asked for ATR/trailing/time exits
         if sl_spec and name in ("vwap_bearish", "price_below_vwap", "below_vwap"):
             continue
-        part = render_formula(sig.get("name", ""), dict(sig.get("params") or {}))
+        part = render_formula(sig.get("name", ""), dict(sig.get("params") or {}), sig.get("timeframe"))
         if part and part not in exit_parts:
             exit_parts.append(part)
 

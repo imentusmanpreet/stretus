@@ -182,7 +182,8 @@ class StrategyEvaluator:
                 messages,
                 f"📊 Fetching {lookback} candles for {symbol} ({timeframe}) "
                 f"asset_class={asset_class.value} | signals={len(all_rules)} "
-                f"max_window={lookback}",
+                f"rules={[r.get('type') for r in all_rules]} "
+                f"params={[r.get('params') for r in all_rules]}",
             )
 
             df             = await self._market.fetch_candles(

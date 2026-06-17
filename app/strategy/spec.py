@@ -408,8 +408,10 @@ class StrategySpec(BaseModel):
                 "TAKE_PROFIT_TARGET": self.resolved_take_profit_pct(),
                 "STOP_LOSS_TARGET": self.resolved_stop_loss_pct(),
             },
-
-
+            "entry": {"condition": self.entry_condition},
+            # Multi-param studies (MACD/STOCH/…) carry their params here; periodic
+            # indicators are auto-derived from the formula by the engine.
+            "indicators": self._indicators_engine_config(),
             "risk_management": {
                 "stop_loss_percent": self.resolved_stop_loss_pct(),
                 "take_profit_percent": self.resolved_take_profit_pct(),

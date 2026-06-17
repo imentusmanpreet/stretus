@@ -200,7 +200,7 @@ async def resolve_supported_stock(query: str) -> dict[str, Any] | None:
     ]
 
     try:
-        response = await llm.chat(messages)
+        response = await llm.chat(messages, fast=True)
         payload = _extract_json_object(response)
         if not payload or not payload.get("matched"):
             return None

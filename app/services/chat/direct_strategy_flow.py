@@ -70,6 +70,7 @@ def _builder_context_message(builder: Any) -> str:
     _add("objective", g("objective"))
     _add("sentiment", g("sentiment"))
     _add("experience", g("experience"))
+    _add("goal", g("goal"))
     _add("direction", g("direction"))
     # Only surface SL/TP as user-given when provenance says so. A hydrated platform
     # DEFAULT must NOT be presented as user input — otherwise the LLM echoes the

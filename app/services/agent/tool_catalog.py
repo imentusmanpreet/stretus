@@ -61,7 +61,10 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "Also use when the user mentions risk settings (SL, TP, RR, per-trade risk, "
             "daily cap, position sizing, trailing stop, trading window) for the FIRST time "
             "during input collection — the backend extracts them automatically from the raw "
-            "user message, so you do not need to parse them yourself."
+            "user message, so you do not need to parse them yourself. "
+            "Do NOT use this for entry/exit signal conditions or indicator formulas "
+            "(e.g. 'EMA(8) > EMA(21) AND RSI(14) > 50') — those edit the signal plan and "
+            "must go to modify_signal_selection, not the captured input fields."
         ),
         {
             "type": "object",
@@ -184,6 +187,14 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "macd', 'use rsi_oversold instead', 'swap exit for vwap_bullish', "
             "'add ema_cross_up to entry', 'remove volume_spike', "
             "'change entry to sma and exit to ema'). "
+            "ALSO use this when the user gives a full entry/exit CONDITION or "
+            "FORMULA — anything containing comparison operators (>, <, >=, <=) "
+            "or indicator calls like EMA(...), RSI(...), AVG(...) (e.g. 'change "
+            "the entry signal to EMA(8) > EMA(21) AND RSI(14) > 50', 'set exit "
+            "to RSI(14) < 45 OR EMA(8) < EMA(21)'). Pass the ENTIRE formula "
+            "verbatim as `signal_name` for that slot; the backend validates it "
+            "with the engine parser and applies it directly. This is NOT a "
+            "stored-input change — do not route formulas to modify_strategy_inputs. "
             "Pass ALL of the trader's signal edits in a SINGLE call via the "
             "`changes` array — when the trader names both an entry change AND "
             "an exit change in one message, BOTH must appear as items in "
@@ -392,6 +403,26 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "trailing_stop_pct": {
                     "type": "number",
                     "description": "Trailing stop distance as a percentage, e.g. 2.0 for 2%.",
+                },
+                "trailing_take_profit_distance_pct": {
+                    "type": "number",
+                    "description": (
+                        "Trailing TAKE-PROFIT give-back distance as a percentage — how far "
+                        "below the running peak the profit exit trails. Use the EXACT number "
+                        "the user states (e.g. they say 'trailing distance 1.5%' → 1.5). Set "
+                        "this (with trailing_take_profit_activate_after_pct) whenever the user "
+                        "wants the take-profit to TRAIL / 'let the winner run' rather than a "
+                        "fixed target. When set, do NOT also send take_profit_pct."
+                    ),
+                },
+                "trailing_take_profit_activate_after_pct": {
+                    "type": "number",
+                    "description": (
+                        "Profit percent at which the trailing take-profit engages — the 'first "
+                        "target' the user names. Use the EXACT number stated (e.g. 'trail the "
+                        "take-profit once up 3%' → 3). Pairs with "
+                        "trailing_take_profit_distance_pct; omit if the user gives no activation."
+                    ),
                 },
                 "trading_window": {
                     "type": "string",

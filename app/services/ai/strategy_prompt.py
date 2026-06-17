@@ -22,6 +22,45 @@ from app.strategy.spec import StrategySpec
 logger = logging.getLogger(__name__)
 
 
+_COMPLEXITY_RULES = """
+COMPLEXITY BUDGET — scale condition complexity to the user's experience level.
+Read the "experience" field from the confirmed parameters block.
+Apply the budget to BOTH entry_condition AND exit_condition:
+
+  experience=beginner    → entry_condition: at most 2 AND-joined clauses.
+                           exit_condition:  at most 2 OR/AND-joined clauses.
+                           Use simple comparisons (e.g. EMA(9) > EMA(21)).
+                           NEVER add PREV() crossover detection unless the user
+                           explicitly asked for it. NEVER add volume confirmation
+                           unless the user mentioned volume. NEVER add VWAP to
+                           exit unless the user mentioned it. Fewer clauses =
+                           fewer missed trades and a more understandable strategy.
+  experience=intermediate → entry: up to 3 AND-joined clauses.
+                            exit:  up to 3 OR/AND-joined clauses.
+                            PREV() crossover detection is fine.
+  experience=expert       → no clause limit. Honor exactly what the user specified.
+  (unset / not present)   → treat as intermediate.
+
+RISK PROFILE SEMANTICS — "aggressive" means frequent entry, NOT more filters.
+Read the user's goal / request for these keywords:
+
+  goal contains "aggressive"   → LOOSEN entry thresholds (e.g. RSI > 45 not 50,
+                                  volume > SMA(VOLUME,20) * 1.0 not 1.5).
+                                  Use FEWER AND clauses — a simpler, more
+                                  permissive condition lets you enter more often.
+                                  Do NOT compensate by adding more confirmation
+                                  layers. Aggressive = higher trade frequency,
+                                  not higher conviction requirement.
+  goal contains "conservative" → TIGHTEN thresholds (RSI > 55, volume multiplier
+                                  1.5+). Add one extra confirmation clause to
+                                  reduce false signals.
+  goal contains "moderate" / unset → use standard thresholds.
+
+When BOTH experience and goal are present, apply both rules together.
+Example: beginner + aggressive → at most 2 clauses AND loosened thresholds.
+""".strip()
+
+
 _RULES = """
 HARD RULES (a violation makes the strategy un-runnable and will be rejected):
 1. entry_condition and (when present) exit/short conditions MUST use ONLY the
@@ -137,6 +176,7 @@ def build_strategy_system_prompt() -> str:
         "strict StrategySpec JSON that a backtest engine can run directly.\n\n"
         f"{grammar}\n\n"
         f"{enums}\n"
+        f"{_COMPLEXITY_RULES}\n\n"
         f"{_RULES}\n\n"
         "STRATEGY SPEC JSON SCHEMA (your output MUST conform):\n"
         f"{schema}\n"

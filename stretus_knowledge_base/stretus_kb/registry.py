@@ -58,6 +58,17 @@ class RuleRegistry:
         if "period" in params:
             params.setdefault("window", params["period"])
             del params["period"]
+        # All KB signal implementations expect PascalCase column names ("Close",
+        # "High", etc.).  The live-eval pipeline produces lowercase columns
+        # ("close", "high") for consistency with engine/conditions.py.  Rename
+        # only the known OHLCV columns; any extra columns (e.g. indicator
+        # columns added by a caller) are left as-is.
+        _OHLCV_TO_PASCAL = {
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        }
+        if not df.empty and any(c in df.columns for c in _OHLCV_TO_PASCAL):
+            df = df.rename(columns=_OHLCV_TO_PASCAL)
         return cls._registry[rule_name](df, **params)
 
     @classmethod

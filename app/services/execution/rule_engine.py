@@ -151,11 +151,15 @@ class RuleEngine:
                 messages.append(f"  ⚠️  {label} [condition]: no formula param — treating as False.")
                 return False, messages
             try:
-                from engine.conditions import evaluate_condition  # noqa: PLC0415
-                result = bool(evaluate_condition(formula, df, len(df) - 1))
+                from engine.conditions import evaluate_condition, explain_condition  # noqa: PLC0415
+                bar_i  = len(df) - 1
+                result = bool(evaluate_condition(formula, df, bar_i))
                 icon   = "✅" if result else "❌"
                 status = "PASS" if result else "FAIL"
                 messages.append(f"  {icon} {label} [condition] → {status}  (formula={formula!r})")
+                # Always emit per-comparison breakdown so discrepancies with chart are diagnosable.
+                for detail in explain_condition(formula, df, bar_i):
+                    messages.append(detail)
                 return result, messages
             except Exception as exc:
                 messages.append(f"  💥 {label} [condition]: formula evaluation error — {exc}")
@@ -174,9 +178,38 @@ class RuleEngine:
             messages.append(f"  {icon} {label} [{rule_type}] → {status}  ({param_str})")
             return result, messages
 
-        except ValueError as exc:
-            messages.append(f"  ⚠️  {label} [{rule_type}]: unknown signal — {exc}")
-            logger.warning("Unknown signal '%s': %s", rule_type, exc)
+        except ValueError:
+            # Signal not in RuleRegistry — try rendering its KB formula and evaluating
+            # it as a condition string. This covers YAML-only signals (e.g.
+            # price_cross_above_sma) that have no Python-registered implementation.
+            from app.planner.formulas import render_formula  # noqa: PLC0415
+            formula = render_formula(rule_type, params)
+            if formula:
+                try:
+                    from engine.conditions import evaluate_condition, explain_condition  # noqa: PLC0415
+                    bar_i  = len(df) - 1
+                    result = bool(evaluate_condition(formula, df, bar_i))
+                    icon   = "✅" if result else "❌"
+                    status = "PASS" if result else "FAIL"
+                    messages.append(
+                        f"  {icon} {label} [{rule_type}] → {status}  "
+                        f"(kb formula: {formula!r})"
+                    )
+                    for detail in explain_condition(formula, df, bar_i):
+                        messages.append(detail)
+                    return result, messages
+                except Exception as exc:
+                    messages.append(
+                        f"  💥 {label} [{rule_type}]: kb formula evaluation error — {exc}"
+                    )
+                    logger.error(
+                        "Error evaluating KB formula for signal %r: %s", rule_type, exc, exc_info=True
+                    )
+                    return False, messages
+            messages.append(
+                f"  ⚠️  {label} [{rule_type}]: unknown signal — not in registry and no KB formula found."
+            )
+            logger.warning("Unknown signal '%s': not in RuleRegistry and no KB formula.", rule_type)
             return False, messages
 
         except Exception as exc:

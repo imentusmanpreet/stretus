@@ -803,6 +803,95 @@ def evaluate_condition(
         return False
 
 
+def explain_condition(
+    condition: str,
+    df: pd.DataFrame,
+    i: int,
+    variables: dict[str, float] | None = None,
+) -> list[str]:
+    """Return a list of human-readable lines showing each comparison's actual values.
+
+    Example output for "EMA(9) > EMA(21) AND RSI(14) > 45":
+      ["EMA(9) > EMA(21)  →  1799.12 > 1801.45  ❌ FAIL",
+       "RSI(14) > 45  →  52.34 > 45  ✅ PASS"]
+
+    Used by the live-eval rule engine to surface the factual reason why an entry
+    or exit condition did not fire. Only called on the failing side so there is no
+    performance cost on the hot backtest path.
+    """
+    if not condition or i < 0 or i >= len(df):
+        return [f"explain_condition: cannot evaluate — i={i} len={len(df)}"]
+
+    try:
+        tree = _parse_expression(condition)
+    except Exception as exc:
+        return [f"explain_condition: parse error — {exc}"]
+
+    lines: list[str] = []
+
+    def _fmt(val: Any) -> str:
+        if isinstance(val, float):
+            if val != val:  # NaN
+                return "NaN"
+            return f"{val:.4f}"
+        if isinstance(val, bool):
+            return str(val)
+        return repr(val)
+
+    def _node_label(node: Any) -> str:
+        """Reconstruct a short readable label for any AST node."""
+        if isinstance(node, NumberNode):
+            v = node.value
+            return str(int(v)) if isinstance(v, float) and v == int(v) else str(v)
+        if isinstance(node, IdentifierNode):
+            return node.name
+        if isinstance(node, FunctionNode):
+            args = ", ".join(_node_label(a) for a in node.args)
+            return f"{node.name}({args})"
+        if isinstance(node, UnaryNode):
+            return f"-{_node_label(node.operand)}"
+        if isinstance(node, BinaryNode):
+            return f"{_node_label(node.left)} {node.op} {_node_label(node.right)}"
+        if isinstance(node, ComparisonNode):
+            return f"{_node_label(node.left)} {node.op} {_node_label(node.right)}"
+        if isinstance(node, BooleanNode):
+            return f"({_node_label(node.left)} {node.op} {_node_label(node.right)})"
+        return repr(node)
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, ComparisonNode):
+            try:
+                lv = _eval_node(node.left,  df, i, variables)
+                rv = _eval_node(node.right, df, i, variables)
+                ll = _node_label(node.left)
+                rl = _node_label(node.right)
+                is_nan = _is_nan(lv) or _is_nan(rv)
+                if is_nan:
+                    result = False
+                elif node.op == ">":  result = lv >  rv
+                elif node.op == "<":  result = lv <  rv
+                elif node.op == ">=": result = lv >= rv
+                elif node.op == "<=": result = lv <= rv
+                elif node.op == "==": result = lv == rv
+                elif node.op == "!=": result = lv != rv
+                else: result = False
+                icon = "✅ PASS" if result else "❌ FAIL"
+                nan_note = "  ⚠️ NaN — not enough data or unsupported column" if is_nan else ""
+                lines.append(
+                    f"  {ll} {node.op} {rl}  →  {_fmt(lv)} {node.op} {_fmt(rv)}  {icon}{nan_note}"
+                )
+            except Exception as exc:
+                lines.append(f"  {_node_label(node)}  →  eval error: {exc}")
+        elif isinstance(node, BooleanNode):
+            _walk(node.left)
+            _walk(node.right)
+        elif isinstance(node, UnaryNode) and node.op == "NOT":
+            _walk(node.operand)
+
+    _walk(tree)
+    return lines
+
+
 def build_entry_signals(
     condition: str,
     df: pd.DataFrame,

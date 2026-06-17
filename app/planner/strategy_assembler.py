@@ -241,6 +241,8 @@ def _build_execution_controls(builder: Any) -> dict[str, Any]:
         controls["stop_loss_spec"] = dict(builder.stop_loss_spec)
     if getattr(builder, "trailing_stop_spec", None):
         controls["trailing_stop_spec"] = dict(builder.trailing_stop_spec)
+    if getattr(builder, "trailing_take_profit_spec", None):
+        controls["trailing_take_profit_spec"] = dict(builder.trailing_take_profit_spec)
     if getattr(builder, "time_exit", None):
         controls["time_exit"] = dict(builder.time_exit)
     if getattr(builder, "reference_symbol", None):

@@ -186,6 +186,7 @@ async def extract_via_llm(message: str) -> list[dict[str, Any]]:
         result = await llm.chat_with_tools(
             messages, [tool], tool_choice={"type": "function",
                                            "function": {"name": "set_discovery_conditions"}},
+            fast=True,
         )
     except Exception as exc:
         # AppError, network, rate limit — caller decides whether to retry.

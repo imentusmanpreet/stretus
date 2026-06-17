@@ -154,6 +154,23 @@ def _check_conditions(spec: StrategySpec, result: ValidationResult) -> None:
                 )
             )
             logger.warning("⚠️ validator | %s unknown identifiers | %s", field_name, unknown)
+        # Function-name backstop: the parser may accept unknown function names
+        # syntactically but fail at evaluation time (e.g. SUPERTREND). Catch them here.
+        used_funcs = engine_bridge.collect_function_names(compiled.tree)
+        unknown_funcs = sorted(n for n in used_funcs if n not in engine_bridge.known_functions())
+        if unknown_funcs:
+            result.errors.append(
+                ValidationError(
+                    field=field_name,
+                    code="unknown_function",
+                    message=(
+                        f"{field_name} uses function(s) the engine cannot run: "
+                        f"{', '.join(unknown_funcs)}. "
+                        f"Use only: {', '.join(sorted(engine_bridge.known_functions()))}."
+                    ),
+                )
+            )
+            logger.warning("⚠️ validator | %s unknown functions | %s", field_name, unknown_funcs)
 
 
 def _check_safety_and_coherence(spec: StrategySpec, result: ValidationResult) -> None:

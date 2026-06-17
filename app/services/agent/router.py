@@ -213,6 +213,10 @@ class AgentRouter:
         )
 
         try:
+            # Reasoning tier: this is the per-turn brain — it both routes (picks the
+            # tool/action) AND captures the user's fields. A mis-route is unrecoverable
+            # downstream (the strategy generator never sees or fixes it), so accuracy
+            # here matters more than the small per-turn latency/cost saving.
             response = await self._llm.chat_with_tools(messages, AGENT_TOOL_SCHEMAS, session_id=session_id)
             decision = _decision_from_tool_response(response)
             if decision is not None:

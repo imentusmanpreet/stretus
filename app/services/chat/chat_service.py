@@ -248,8 +248,23 @@ def _format_signal_plan_lines(plan: dict[str, Any] | None) -> str:
         for s in plan.get("exit") or []
         if isinstance(s, dict) and s.get("name")
     ]
-    entry_line = ", ".join(entry_items) if entry_items else "(none)"
-    exit_line = ", ".join(exit_items) if exit_items else "(none)"
+    # When a slot carries a raw condition formula instead of named signals
+    # (set via a trader-typed expression), show the formula so the trader sees
+    # what will actually be backtested rather than "(none)".
+    entry_line = (
+        ", ".join(entry_items)
+        if entry_items
+        else (str(plan.get("entry_condition")).strip() or "(none)")
+        if plan.get("entry_condition")
+        else "(none)"
+    )
+    exit_line = (
+        ", ".join(exit_items)
+        if exit_items
+        else (str(plan.get("exit_condition")).strip() or "(none)")
+        if plan.get("exit_condition")
+        else "(none)"
+    )
     return f"- Entry: {entry_line}\n- Exit: {exit_line}"
 
 
@@ -997,6 +1012,28 @@ async def _upsert_builder_risk_execution_config(
     )
     values = _build_risk_execution_values_for_builder(builder, active_config)
 
+    # The DB snapshot has no provenance column, so set_risk_execution_config below
+    # (which rebuilds the config from snapshot.to_builder_context()) would wipe the
+    # rms_sources — re-flagging a user-given stop/target as "system_default" and
+    # tripping the fidelity "confirm your stop" warning. Capture the provenance now
+    # and restore it (user labels always win) after each rebuild.
+    _prior_sources = dict(
+        (getattr(builder, "risk_execution_config", None) or {}).get("rms_sources") or {}
+    )
+
+    def _restore_rms_sources() -> None:
+        if not _prior_sources:
+            return
+        cfg = dict(getattr(builder, "risk_execution_config", None) or {})
+        merged = dict(cfg.get("rms_sources") or {})
+        for key, src in _prior_sources.items():
+            if src == "user":
+                merged[key] = src           # user provenance is never downgraded
+            else:
+                merged.setdefault(key, src)
+        cfg["rms_sources"] = merged
+        builder.set_risk_execution_config(cfg)
+
     await upsert_risk_execution_config(
         db,
         config_scope=SESSION_SCOPE,
@@ -1013,6 +1050,7 @@ async def _upsert_builder_risk_execution_config(
         strategy_id=strategy_id,
     )
     builder.set_risk_execution_config(effective_session_snapshot.to_builder_context())
+    _restore_rms_sources()
 
     if strategy_id:
         await upsert_risk_execution_config(
@@ -1031,6 +1069,7 @@ async def _upsert_builder_risk_execution_config(
             strategy_id=strategy_id,
         )
         builder.set_risk_execution_config(effective_strategy_snapshot.to_builder_context())
+        _restore_rms_sources()
         return effective_strategy_snapshot
 
     return effective_session_snapshot
@@ -2678,6 +2717,10 @@ async def run_ai_processing(
                 from app.services.strategy.signal_modifier import (
                     apply_signal_request,
                 )
+                from app.services.strategy.condition_expression import (
+                    looks_like_condition_expression,
+                    validate_condition_expression,
+                )
 
                 params = dict(route.get("agent_tool_parameters") or {})
 
@@ -2700,11 +2743,22 @@ async def run_ai_processing(
                     else:
                         changes = []
 
+                # A change is a raw condition formula (e.g. "EMA(8) > EMA(21)
+                # AND RSI(14) > 50") rather than a catalog signal name. These
+                # are applied directly as the slot's condition (formula mode),
+                # so they must work even when no signal_plan exists yet and must
+                # bypass the catalog-name hallucination guard below.
+                _has_condition_change = any(
+                    looks_like_condition_expression(str(c.get("signal_name") or ""))
+                    for c in changes
+                )
+
                 logger.info(
                     "🔧 chat_flow|event=modify_signal_request|session_id=%s"
-                    "|change_count=%d",
+                    "|change_count=%d|has_condition_expr=%s",
                     session_id,
                     len(changes),
+                    _has_condition_change,
                 )
 
                 # Always force plan_signals so that the next "yes" re-assembles
@@ -2765,14 +2819,17 @@ async def run_ai_processing(
 
                 if _sdl_modified:
                     pass  # SDL path already set assistant_text + signal_plan
-                elif not builder.signal_plan:
+                elif not builder.signal_plan and not _has_condition_change:
                     assistant_text = (
                         "There is no signal plan to modify yet. Please ask me "
                         "to plan signals first, then you can swap individual "
                         "entry / exit signals."
                     )
                     per_change_outcomes.append({"status": "no_plan"})
-                elif not changes or _llm_hallucinated_signal_names(changes, user_content):
+                elif (
+                    not changes
+                    or _llm_hallucinated_signal_names(changes, user_content)
+                ) and not _has_condition_change:
                     from app.services.strategy.signal_suggestions import (
                         format_signal_suggestions,
                     )
@@ -2810,6 +2867,29 @@ async def run_ai_processing(
                                 f"name (slot={slot or '?'}, signal={signal_name or '?'})."
                             )
                             outcome["status"] = "bad_params"
+                            per_change_outcomes.append(outcome)
+                            continue
+
+                        # Raw condition formula (e.g. "EMA(8) > EMA(21) AND
+                        # RSI(14) > 50") rather than a catalog signal name.
+                        # Validate with the engine's own parser and set it as
+                        # the slot's condition directly — the backtester runs
+                        # this exact expression in formula mode.
+                        if looks_like_condition_expression(signal_name):
+                            check = validate_condition_expression(signal_name)
+                            if check.ok:
+                                builder.set_condition_expression(slot, check.expression)
+                                applied_messages.append(
+                                    f"Set {slot} condition to: {check.expression}"
+                                )
+                                outcome["status"] = "applied_condition"
+                                outcome["condition"] = check.expression
+                            else:
+                                pending_prompts.append(
+                                    check.error or "That condition could not be applied."
+                                )
+                                outcome["status"] = "invalid_condition"
+                                outcome["error"] = check.error
                             per_change_outcomes.append(outcome)
                             continue
 
@@ -3438,6 +3518,10 @@ async def run_ai_processing(
                 relevant_message = True
                 modification_value_fields = list(builder.pending_input_modification_fields)
 
+            # Set True when we recover a symbol the router dropped on a
+            # chat/clarification turn (see the salvage block below). Initialised
+            # here so it is always defined even when field extraction is skipped.
+            symbol_salvaged_this_turn = False
             if not skip_field_extraction:
                 # Symbol extraction is LLM-primary: the router captures any equity
                 # or crypto symbol the user names (verbatim) in `stock_query`, and
@@ -3462,6 +3546,31 @@ async def run_ai_processing(
                     stock_query = user_content
                 if pending_stock_choice:
                     stock_query = None
+                # Salvage net: the router sometimes classifies a turn as
+                # chat/clarification and drops the symbol the trader actually
+                # named (e.g. anchoring on an earlier rejection). When we are
+                # still missing a symbol, re-validate the raw message against the
+                # universe and adopt it ONLY on a positive resolution. A miss
+                # leaves the turn untouched, so genuine chat is never turned into
+                # a false "unsupported" error.
+                if (
+                    not stock_query
+                    and not pending_stock_choice
+                    and not builder.symbol
+                    and route_intent in {"general_chat", "clarification"}
+                ):
+                    salvage_match = await resolve_supported_stock(user_content)
+                    if salvage_match and (
+                        salvage_match.get("symbol") or salvage_match.get("ambiguous")
+                    ):
+                        stock_query = user_content
+                        symbol_salvaged_this_turn = True
+                        logger.info(
+                            "🛟 chat_flow|event=symbol_salvaged|session_id=%s|query=%r|intent=%s",
+                            session_id,
+                            user_content,
+                            route_intent,
+                        )
                 if stock_query:
                     relevant_message = True
                     stock_match = await resolve_supported_stock(stock_query)
@@ -3503,6 +3612,15 @@ async def run_ai_processing(
                             session_id,
                             stock_query,
                         )
+
+                # When the salvage net recovered a real symbol, mark it as a
+                # recognized field so the downstream reply asks the next missing
+                # input instead of replaying the router's stale "unsupported"
+                # free-form text. Scoped to the salvage path so normal turns
+                # (where a stock question may legitimately get a direct answer)
+                # are unaffected.
+                if symbol_salvaged_this_turn and builder.symbol:
+                    recognized_fields.add("symbol")
 
                 if builder.symbol and not is_supported_stock_symbol(builder.symbol):
                     builder.symbol = None
@@ -3653,6 +3771,39 @@ async def run_ai_processing(
                     rms_pending_confirmation.extend(_llm_rms_pending)
                 if any(route.get(_k) is not None for _k in _LLM_RMS_ROUTE_KEYS):
                     relevant_message = True
+
+                # Trailing TAKE-PROFIT is a give-back SPEC, not a scalar, so it
+                # doesn't flow through _store_user_rms. Capture it here at collect
+                # time (LLM-extracted) so the user's "trail my profit" intent isn't
+                # flattened into a static target. When present, the trailing line
+                # IS the profit exit → zero the static take-profit so it can't fire
+                # first (mirrors the planner) and tag that as user-given provenance.
+                _ttp_params = route.get("agent_tool_parameters") or {}
+                _ttp_dist = _ttp_params.get("trailing_take_profit_distance_pct")
+                _ttp_act = _ttp_params.get("trailing_take_profit_activate_after_pct")
+                if _ttp_dist is not None:
+                    try:
+                        _dist = float(_ttp_dist)
+                    except (TypeError, ValueError):
+                        _dist = 0.0
+                        logger.info("chat|rms|trailing_tp_bad_distance|dist=%r", _ttp_dist)
+                    if _dist > 0:
+                        _ttp_spec: dict[str, Any] = {
+                            "type": "percent",
+                            "distance_pct": _dist,
+                            "source": "user",
+                        }
+                        try:
+                            _act = float(_ttp_act) if _ttp_act is not None else None
+                        except (TypeError, ValueError):
+                            _act = None
+                        if _act is not None and _act >= 0:
+                            _ttp_spec["activate_after_pct"] = _act
+                        builder.trailing_take_profit_spec = _ttp_spec
+                        # Trailing supplies the profit exit → no static cap to pre-empt it.
+                        builder.take_profit = 0.0
+                        _store_user_rms(builder, "take_profit_pct", 0.0)
+                        relevant_message = True
 
                 # Propagate RMS fields extracted by _extract_rms_from_text.
                 # First-write-wins per field: a user-supplied value in a prior
@@ -4443,6 +4594,7 @@ async def run_ai_processing(
                     )
                     and not input_modification_turn
                     and not user_confirmed
+                    and not symbol_salvaged_this_turn
                     and not builder.symbol_validation_message
                     and not builder.timeframe_validation_message
                     and not builder.input_validation_message

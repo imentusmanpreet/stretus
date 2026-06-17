@@ -225,12 +225,21 @@ Parse the free-form message for all of:
 - max_positions — "max 2 trades open", "one trade at a time".
 - trailing_stop — "trail SL after 2%", "shift SL to entry after first target",
   "structural trail under swing lows".
-- trailing_take_profit — "trail my profit by 2%", "let the winner run, exit 1.5%
-  off the peak", "lock gains, trail the take-profit once up 5%". This trails the
-  PROFIT target (not the stop) and books a TRAILING_TAKE_PROFIT exit. A strategy
-  uses a trailing stop OR a trailing take-profit, never both.
-- trading_window — "trade only 9:15 – 11:00", "no entries after 14:30", "exit
-  all by 15:15".
+- trailing_take_profit — any phrasing where the PROFIT target should follow price:
+  "trail my profit by X%", "let the winner run, exit X% off the peak", "lock gains,
+  trail the take-profit once up Y%", "small target then trail". Books a
+  TRAILING_TAKE_PROFIT exit. When the user wants this, call modify_strategy_inputs
+  with `trailing_take_profit_distance_pct` (the give-back distance) and, if the user
+  named one, `trailing_take_profit_activate_after_pct` (the first-target/activation).
+  Always pass the user's EXACT numbers — never substitute the values in these
+  examples. Do NOT also send `take_profit_pct` (the trailing IS the profit exit; a
+  static target would fire first). A strategy uses a trailing stop OR a trailing
+  take-profit, never both.
+- trading_window — an intraday entry/exit window, ONLY for session-bound markets
+  (Indian equity/indices, whose session is ~09:15–15:30 IST): "trade only 09:15–11:00",
+  "no entries after 14:30", "square off by 15:15". Crypto trades 24/7 — do NOT impose
+  a window for crypto unless the user explicitly names one. Capture only what the
+  user states; never invent session hours.
 
 PROVENANCE & ASK-BEFORE-DEFAULT RULE
 When you call modify_strategy_inputs / plan_strategy_signals / assemble_strategy,

@@ -90,6 +90,16 @@ MAX_ENTRY_FILTERS = 3
 # Typically 1 is enough; 2 is the practical ceiling for real strategies.
 MAX_EXIT_FILTERS = 2
 
+# Per-experience caps: (max_entry_filters, max_exit_filters).
+# Beginners get no confirmation filters — just one trigger and one exit.
+# Intermediate gets one confirmation each side. Expert gets the global max.
+_EXPERIENCE_FILTER_CAPS: dict[str, tuple[int, int]] = {
+    "beginner":     (1, 0),
+    "intermediate": (2, 1),
+    "expert":       (MAX_ENTRY_FILTERS, MAX_EXIT_FILTERS),
+    "default":      (MAX_ENTRY_FILTERS, MAX_EXIT_FILTERS),
+}
+
 
 class Pipeline:
     """One instance per request (light); safe to construct inline."""
@@ -182,10 +192,12 @@ class Pipeline:
             # two volume checks, etc.). The pair_with hint cycles to the most
             # recently picked card so each new filter is rewarded for
             # complementing what's already there.
+            _exp_caps = _EXPERIENCE_FILTER_CAPS.get(experience, _EXPERIENCE_FILTER_CAPS["default"])
+            _max_entry_filters, _max_exit_filters = _exp_caps
             entry_filter_cards = []
             avoid_families: set[str] = {entry_trigger_card.family}
             most_recent_pick: SignalCard = entry_trigger_card
-            for _ in range(MAX_ENTRY_FILTERS):
+            for _ in range(_max_entry_filters):
                 filter_card, _ = self._filter_and_pick(
                     all_cards,
                     role="entry_filter",
@@ -218,16 +230,16 @@ class Pipeline:
                 trace=trace,
             )
 
-            # Step 3b-exit: pick up to MAX_EXIT_FILTERS exit filters (AND-ed
+            # Step 3b-exit: pick up to _max_exit_filters exit filters (AND-ed
             # confirmations that must hold alongside the exit trigger). Same
-            # deduplication logic as entry filters.
+            # deduplication logic as entry filters. Capped by experience level.
             exit_filter_cards = []
             exit_avoid_families: set[str] = {
                 exit_trigger_card.family,
                 entry_trigger_card.family,
             }
             exit_most_recent: SignalCard = exit_trigger_card
-            for _ in range(MAX_EXIT_FILTERS):
+            for _ in range(_max_exit_filters):
                 ef_card, _ = self._filter_and_pick(
                     all_cards,
                     role="exit_filter",

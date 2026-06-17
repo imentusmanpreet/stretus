@@ -8,6 +8,7 @@ no embedding queries. Hot-reloadable via `kb.reload()` for admin endpoints.
 from __future__ import annotations
 
 import csv
+import difflib
 import logging
 import re
 from dataclasses import dataclass
@@ -41,6 +42,10 @@ class StockLookupResolution:
 
     stock: Stock | None = None
     ambiguous_matches: tuple[Stock, ...] = ()
+    # A single fuzzy "did you mean" candidate the caller should confirm with the
+    # user rather than adopt silently. Left None for exact/prefix/alias/token
+    # resolutions; only set by the last-resort fuzzy tier.
+    suggestion: Stock | None = None
 
     @property
     def is_ambiguous(self) -> bool:
@@ -57,6 +62,32 @@ def _strip_exchange_hint(value: str) -> str:
 def _stock_key(value: str) -> str:
     """Compact stock names/symbols for exact and prefix comparisons."""
     return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+# Fuzzy stock-name matching is a last-resort "did you mean" tier: it runs only
+# after every exact/prefix/alias/token lookup has missed, and its best hit is
+# surfaced as a suggestion the user confirms — never auto-adopted. The cutoff is
+# intentionally strict so a real, distinct symbol is not silently rewritten into
+# a different one, and very short queries are skipped (too little signal).
+_FUZZY_STOCK_CUTOFF = 0.82
+_FUZZY_MIN_QUERY_LEN = 4
+
+
+def _stock_tokens(value: str) -> tuple[str, ...]:
+    """Split a name/symbol into normalized alphanumeric tokens (order kept)."""
+    cleaned = _strip_exchange_hint(value)
+    return tuple(tok.lower() for tok in re.split(r"[^0-9A-Za-z]+", cleaned) if tok)
+
+
+def _stock_token_key(value: str) -> str:
+    """Order-independent key: alphanumeric tokens sorted, then concatenated.
+
+    "Vodafone Idea", "idea vodafone" and "ideavodafone" all collapse to the same
+    key, so a reversed or space-variant word order still resolves. A single
+    already-joined token sorts to itself, so this mainly rescues multi-word names
+    whose tokens the user reordered.
+    """
+    return "".join(sorted(_stock_tokens(value)))
 
 
 def _read_yaml(path: Path) -> dict:
@@ -192,7 +223,14 @@ class KB:
 
     def _invalidate_indexes(self) -> None:
         # Clear cached_property values so the next access recomputes.
-        for key in ("signals_by_role", "_auto_aliases", "_stock_exact_index", "_stock_prefix_keys"):
+        for key in (
+            "signals_by_role",
+            "_auto_aliases",
+            "_stock_exact_index",
+            "_stock_prefix_keys",
+            "_stock_token_index",
+            "_stock_fuzzy_keys",
+        ):
             self.__dict__.pop(key, None)
         # presets is a plain dict (re-populated on _load), so nothing to clear here.
 
@@ -243,6 +281,52 @@ class KB:
                 _stock_key(stock.display_name),
             }
             out[symbol] = tuple(sorted(key for key in keys if key))
+        return out
+
+    @cached_property
+    def _stock_token_index(self) -> dict[str, tuple[str, ...]]:
+        """Order-independent token-set key → canonical symbols sharing it.
+
+        Built from display names so a reordered multi-word query still maps to
+        its stock. Consulted only as a fallback (see resolve_stock_query), and a
+        key shared by more than one symbol yields ambiguity instead of a guess.
+        """
+        out: dict[str, list[str]] = {}
+        for symbol, stock in self.stocks.items():
+            key = _stock_token_key(stock.display_name)
+            if not key:
+                continue
+            bucket = out.setdefault(key, [])
+            if symbol not in bucket:
+                bucket.append(symbol)
+        return {key: tuple(symbols) for key, symbols in out.items()}
+
+    @cached_property
+    def _stock_fuzzy_keys(self) -> tuple[str, ...]:
+        """All normalized exact keys, reused for difflib close-match suggestions."""
+        return tuple(self._stock_exact_index.keys())
+
+    def _fuzzy_stock_matches(self, normalized_query: str) -> list[Stock]:
+        """Close-but-not-exact symbol/name matches for a normalized query.
+
+        Returns at most a few candidates, best-first. Empty for short queries —
+        too little signal to fuzzy-match safely.
+        """
+        if not normalized_query or len(normalized_query) < _FUZZY_MIN_QUERY_LEN:
+            return []
+        close_keys = difflib.get_close_matches(
+            normalized_query, self._stock_fuzzy_keys, n=3, cutoff=_FUZZY_STOCK_CUTOFF
+        )
+        out: list[Stock] = []
+        seen: set[str] = set()
+        for key in close_keys:
+            symbol = self._stock_exact_index.get(key)
+            if not symbol or symbol in seen:
+                continue
+            stock = self.stocks.get(symbol)
+            if stock is not None:
+                seen.add(symbol)
+                out.append(stock)
         return out
 
     # ── Public lookups ────────────────────────────────────────────────────────
@@ -304,6 +388,27 @@ class KB:
         # Auto-derived aliases
         if q_lower in self._auto_aliases:
             return StockLookupResolution(stock=self.stocks.get(self._auto_aliases[q_lower]))
+
+        # Order-independent token-set fallback. Rescues reordered / space-variant
+        # multi-word names (e.g. "idea vodafone" → "Vodafone Idea") once the
+        # precise tiers above have missed. More than one symbol on the same token
+        # set is ambiguous rather than a silent guess.
+        token_symbols = self._stock_token_index.get(_stock_token_key(raw))
+        if token_symbols:
+            token_stocks = [self.stocks[s] for s in token_symbols if s in self.stocks]
+            if len(token_stocks) > 1:
+                return StockLookupResolution(ambiguous_matches=tuple(token_stocks))
+            if len(token_stocks) == 1:
+                return StockLookupResolution(stock=token_stocks[0])
+
+        # Fuzzy "did you mean" — last resort for typos. A single hit becomes a
+        # suggestion the caller asks the user to confirm; multiple hits reuse the
+        # ambiguous picker. Never auto-adopted by lookup_stock().
+        fuzzy_matches = self._fuzzy_stock_matches(q_key)
+        if len(fuzzy_matches) > 1:
+            return StockLookupResolution(ambiguous_matches=tuple(fuzzy_matches))
+        if len(fuzzy_matches) == 1:
+            return StockLookupResolution(suggestion=fuzzy_matches[0])
 
         return StockLookupResolution()
 

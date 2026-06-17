@@ -105,19 +105,21 @@ class LLMService:
             self._openrouter_key_manager = None
             self._openrouter_key = None
         
-        self._openrouter_model = current_settings.openrouter_model
-        
+        self._reasoning_model = current_settings.reasoning_model
+        # Fast tier for lightweight steps; falls back to the main model when unset.
+        self._fast_model = current_settings.fast_model or self._reasoning_model
+
         # Ollama configuration
         self._ollama_url = current_settings.ollama_base_url
         self._ollama_model = current_settings.ollama_model
 
         # What model name to expose (used for logging / DB storage)
         if self._provider == "openrouter":
-            self.model_name = self._openrouter_model
+            self.model_name = self._reasoning_model
         elif self._provider == "ollama":
             self.model_name = self._ollama_model
         else:  # auto
-            self.model_name = f"{self._openrouter_model} (auto)"
+            self.model_name = f"{self._reasoning_model} (auto)"
 
         keys_info = "not configured"
         if self._openrouter_key_manager:
@@ -133,7 +135,7 @@ class LLMService:
 
     # ── Public method ─────────────────────────────────────────────────────────
 
-    async def chat(self, messages: list[dict], session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
+    async def chat(self, messages: list[dict], session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None, fast: bool = False) -> str:
         """
         Send a message list to the LLM and return the text response.
 
@@ -150,14 +152,16 @@ class LLMService:
             session_id: Optional session ID for token tracking
             max_tokens: Optional output-token cap (defaults to the provider default).
         """
+        # Fast tier → cheap/quick model for lightweight steps; None → main model.
+        use_model = self._fast_model if fast else None
         if self._provider == "openrouter":
-            return await self._call_openrouter(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+            return await self._call_openrouter(messages, model=use_model, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
 
         elif self._provider == "ollama":
             return await self._call_ollama(messages)
 
         else:  # auto — try openrouter first, fall back to ollama
-            return await self._auto(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+            return await self._auto(messages, model=use_model, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
 
     async def chat_with_tools(
         self,
@@ -167,6 +171,7 @@ class LLMService:
         tool_choice: str | dict = "auto",
         session_id: str | None = None,
         max_tokens: int = 1024,
+        fast: bool = False,
     ) -> dict:
         """
         Send messages with tool definitions and return a normalized response:
@@ -188,11 +193,12 @@ class LLMService:
             tool_choice: Tool selection strategy
             session_id: Optional session ID for token tracking
         """
+        use_model = self._fast_model if fast else None
         if self._provider == "openrouter":
-            return await self._call_openrouter_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
+            return await self._call_openrouter_with_tools(messages, tools, model=use_model, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
         if self._provider == "ollama":
             return await self._call_ollama_with_tools(messages, tools)
-        return await self._auto_with_tools(messages, tools, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
+        return await self._auto_with_tools(messages, tools, model=use_model, tool_choice=tool_choice, session_id=session_id, max_tokens=max_tokens)
 
     # ── Provider info ─────────────────────────────────────────────────────────
 
@@ -200,7 +206,7 @@ class LLMService:
         """Return current provider config — useful for /health endpoint."""
         result = {
             "provider":      self._provider,
-            "openrouter_model":    self._openrouter_model,
+            "openrouter_model":    self._reasoning_model,
             "ollama_model":  self._ollama_model,
             "ollama_url":    self._ollama_url,
             "active_model":  self.model_name,
@@ -236,7 +242,7 @@ class LLMService:
         OpenRouter provides unified access to multiple LLM providers.
         Get your API key at: https://openrouter.ai/keys
         """
-        use_model = model or self._openrouter_model
+        use_model = model or self._reasoning_model
 
         try:
             from openai import AsyncOpenAI, APIConnectionError, AuthenticationError, BadRequestError, NotFoundError, RateLimitError, APIError
@@ -394,7 +400,7 @@ class LLMService:
                 "OpenRouter is not configured on the server. Please retry after some time.",
             )
 
-        use_model = model or self._openrouter_model
+        use_model = model or self._reasoning_model
         effective_max_tokens = max_tokens or 2048
         return await self._openrouter_with_rotation(
             lambda key: self._call_openrouter_once(messages, key, use_model, session_id=session_id, max_tokens=effective_max_tokens, reasoning_effort=reasoning_effort),
@@ -454,7 +460,7 @@ class LLMService:
         session_id: str | None = None,
     ) -> dict:
         """Call OpenRouter with native tool definitions and normalize the result."""
-        use_model = model or self._openrouter_model
+        use_model = model or self._reasoning_model
 
         try:
             from openai import AsyncOpenAI, APIConnectionError, AuthenticationError, BadRequestError, NotFoundError, RateLimitError, APIError
@@ -566,7 +572,7 @@ class LLMService:
                 "OpenRouter is not configured on the server. Please retry after some time.",
             )
 
-        use_model = model or self._openrouter_model
+        use_model = model or self._reasoning_model
         return await self._openrouter_with_rotation(
             lambda key: self._call_openrouter_tools_once(
                 messages,
@@ -745,7 +751,7 @@ class LLMService:
 
     # ── Auto (try OpenRouter, fall back to Ollama) ───────────────────────────
 
-    async def _auto(self, messages: list[dict], session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
+    async def _auto(self, messages: list[dict], model: Optional[str] = None, session_id: str | None = None, max_tokens: int | None = None, reasoning_effort: str | None = None) -> str:
         """
         Try OpenRouter first. If it fails (no key, rate limit, network issue),
         automatically fall back to the local Ollama model.
@@ -756,8 +762,8 @@ class LLMService:
 
         if self._openrouter_key:
             try:
-                result = await self._call_openrouter(messages, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
-                self.model_name = self._openrouter_model
+                result = await self._call_openrouter(messages, model=model, session_id=session_id, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
+                self.model_name = model or self._reasoning_model
                 return result
             except AppError as exc:
                 openrouter_error = exc
@@ -781,6 +787,7 @@ class LLMService:
         messages: list[dict],
         tools: list[dict],
         *,
+        model: Optional[str] = None,
         tool_choice: str | dict = "auto",
         session_id: str | None = None,
         max_tokens: int = 1024,
@@ -792,11 +799,12 @@ class LLMService:
                 result = await self._call_openrouter_with_tools(
                     messages,
                     tools,
+                    model=model,
                     tool_choice=tool_choice,
                     session_id=session_id,
                     max_tokens=max_tokens,
                 )
-                self.model_name = self._openrouter_model
+                self.model_name = model or self._reasoning_model
                 return result
             except AppError as exc:
                 openrouter_error = exc
@@ -834,12 +842,12 @@ class LLMService:
                 await self._call_openrouter_once(
                     [{"role": "user", "content": "hi"}],
                     api_key,
-                    self._openrouter_model,
+                    self._reasoning_model,
                     max_tokens=5,
                 )
                 stats = self._openrouter_key_manager.get_stats()
                 result["openrouter_status"] = "ok"
-                result["openrouter_model"] = self._openrouter_model
+                result["openrouter_model"] = self._reasoning_model
                 result["openrouter_keys_remaining"] = stats['keys_remaining']
                 result["openrouter_active_key_index"] = stats['active_key_index']
             except Exception as exc:

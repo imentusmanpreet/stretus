@@ -327,7 +327,7 @@ async def compose_milestone_response(
             {"role": "system", "content": TRADER_PERSONA_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        response = await llm.chat(messages)
+        response = await llm.chat(messages, fast=True)
         if response and response.strip():
             return response.strip()
     except Exception as exc:

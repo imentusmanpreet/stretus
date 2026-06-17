@@ -1534,6 +1534,55 @@ class StrategyBuilder:
             entries.append(new_entry)
         return self.signal_plan
 
+    def set_condition_expression(self, slot: str, expression: str) -> dict:
+        """Set a raw, trader-typed condition *formula* for ``slot``.
+
+        Unlike :meth:`modify_signal`, which places a named KB signal, this
+        stores a free-form expression (e.g. ``"EMA(8) > EMA(21) AND RSI(14) >
+        50"``) as the slot's condition string. The named-signal list for the
+        slot is cleared so :meth:`to_yaml_dict` emits *formula* evaluation mode
+        (registry mode is only selected when a slot still carries named
+        signals) — i.e. the engine evaluates this exact expression.
+
+        The expression must already be validated by
+        ``app.services.strategy.condition_expression.validate_condition_expression``;
+        this method does not re-parse it.
+
+        Args:
+            slot: ``"entry"`` or ``"exit"``.
+            expression: the validated condition formula.
+
+        Returns:
+            The updated ``signal_plan`` dict.
+
+        Raises:
+            ValueError: if ``slot`` is not ``"entry"`` / ``"exit"`` or the
+                expression is empty.
+        """
+        slot_clean = str(slot or "").strip().lower()
+        if slot_clean not in ("entry", "exit"):
+            raise ValueError(f"slot must be 'entry' or 'exit', got {slot!r}")
+
+        expr = str(expression or "").strip()
+        if not expr:
+            raise ValueError("expression must be non-empty.")
+
+        if not isinstance(self.signal_plan, dict):
+            self.signal_plan = {"entry": [], "exit": []}
+        self.signal_plan.setdefault("entry", [])
+        self.signal_plan.setdefault("exit", [])
+
+        # Clear the slot's named signals so the YAML stays in formula mode and
+        # this expression is what the engine runs. The other slot is untouched.
+        self.signal_plan[slot_clean] = []
+        if slot_clean == "entry":
+            self.entry_condition = expr
+            self.signal_plan["entry_condition"] = expr
+        else:
+            self.exit_condition = expr
+            self.signal_plan["exit_condition"] = expr
+        return self.signal_plan
+
     def remove_signal(self, slot: str, signal_name: str) -> dict:
         """Remove the first occurrence of ``signal_name`` from the ``slot`` list.
 

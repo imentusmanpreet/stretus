@@ -1296,5 +1296,14 @@
     "win_rate": 0.0781,
     "total_trades": 21169,
     "last_updated": "2026-06-10"
+  },
+  "price_cross_above_sma:ETH_USDT:1m": {
+    "signal_name": "price_cross_above_sma",
+    "symbol": "ETH_USDT",
+    "timeframe": "1m",
+    "best_params": {},
+    "win_rate": 0.251,
+    "total_trades": 17373,
+    "last_updated": "2026-06-16"
   }
 }

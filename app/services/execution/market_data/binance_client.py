@@ -135,19 +135,21 @@ def _binance_klines_to_df(klines: list) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, unit="ms", errors="coerce")
     df = df.set_index("timestamp").sort_index()
-    return df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    df.columns = [c.lower() for c in df.columns]
+    return df
 
 
 def _resample_df(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """Aggregate OHLCV bars to a coarser timeframe."""
+    """Aggregate OHLCV bars to a coarser timeframe. Expects lowercase columns."""
     resampled = df.resample(rule, closed="left", label="left").agg({
-        "Open":   "first",
-        "High":   "max",
-        "Low":    "min",
-        "Close":  "last",
-        "Volume": "sum",
+        "open":   "first",
+        "high":   "max",
+        "low":    "min",
+        "close":  "last",
+        "volume": "sum",
     })
-    return resampled.dropna(subset=["Open", "High", "Low", "Close"])
+    return resampled.dropna(subset=["open", "high", "low", "close"])
 
 
 # ── BinanceClient ─────────────────────────────────────────────────────────────

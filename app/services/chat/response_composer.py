@@ -194,6 +194,15 @@ def compose_response(code: AssistantResponseCode, **facts: Any) -> str:  # noqa:
         options = facts.get("stock_options")
         if not isinstance(options, list):
             options = []
+        if len(options) == 1:
+            # Single candidate — a fuzzy "did you mean" suggestion. Phrase it as a
+            # confirmation rather than a "multiple matches" list.
+            only_option = _format_stock_option(options[0], 1).split(". ", 1)[-1]
+            return (
+                f"I couldn\'t find an exact match for **\'{stock_query}\'**. "
+                f"Did you mean **{only_option}**?\n\n"
+                "Reply with the name to confirm, or pick another supported stock."
+            )
         option_lines = "\n".join(
             f"- {_format_stock_option(option, idx)}"
             for idx, option in enumerate(options, start=1)
