@@ -219,7 +219,7 @@ then ships execution (orders → OMS).
 | Validation | `app/strategy/validator.py` | ✅ rejects non-engine-legal type; rejects trailing-stop + trailing-TP together (mirrors loader guard) |
 | Draft persistence | `app/services/strategy/builder.py` | ✅ `trailing_take_profit_spec` field + `apply_signal_plan` + `merge_preview` + `to_draft_json` + `to_yaml_dict` |
 | Direct flow | `app/services/chat/direct_strategy_flow.py` | ✅ spec → builder + spec → plan |
-| LLM system prompt (direct path) | `app/services/ai/strategy_prompt.py` | ✅ **HARD RULE 5** teaches the trailing family (trailing_stop + trailing_take_profit): percent-only, distance_pct=give-back, activate_after_pct=profit threshold, EITHER/OR mutual exclusion. This is the prompt that drives the LLM-only `StrategySpec` generation (`use_direct_strategy_path`). |
+| LLM system prompt (direct path) | `app/services/ai/strategy_prompt.py` | ✅ **HARD RULE 5** teaches the trailing family (trailing_stop + trailing_take_profit): percent-only, distance_pct=give-back, activate_after_pct=profit threshold, and that BOTH may be set together (staged trail), avoiding a dominated/redundant pair. This is the prompt that drives the LLM-only `StrategySpec` generation (`use_direct_strategy_path`). |
 | Schema descriptions | `app/strategy/spec.py` | ✅ `TrailingTakeProfit` fields carry LLM-facing descriptions (auto-included in `json_schema_for_llm()`) |
 | Agent prompt | `app/services/agent/prompt.py` | ✅ conversational parse guidance |
 | Tests | `tests/test_strategy/test_trailing_take_profit.py` | ✅ 12 tests (spec render, builder round-trip, validator, loader round-trip) |
@@ -236,7 +236,7 @@ LLM-only extraction). Full removal of the regex extractor is a separate cleanup,
 ### Phase 3 — Order schema + builder 🟩 ✅ DONE
 | Task | File | Status |
 |---|---|---|
-| Leg field + model | `app/schemas/execution.py` | ✅ `TrailingOrderSpec` + `OrderLeg.trailing`. `SlTpConfig` carries `trailing_take_profit`/`trailing_stop`, allows `take_profit_pct=0`, validator: "static target OR trailing" + two trailing legs mutually exclusive |
+| Leg field + model | `app/schemas/execution.py` | ✅ `TrailingOrderSpec` + `OrderLeg.trailing`. `SlTpConfig` carries `trailing_take_profit`/`trailing_stop`, allows `take_profit_pct=0`, validator: "static target OR trailing"; both trailing legs may coexist (dominated-line warning, not blocked) |
 | Order build | `app/services/execution/trade_manager.py` | ✅ `build_bracket_order(trailing_take_profit=, trailing_stop=)` attaches the block; trailing-TP leg switches LIMIT→trigger (`TAKE_PROFIT` crypto / `SL-M` equity) + `trigger_price`; no-trailing path byte-for-byte legacy |
 | Eval engine | `app/services/execution/strategy_evaluator.py` | ✅ reads trailing (`_parse_trailing_order_spec`), preserves `take_profit_pct=0`, passes specs into `build_bracket_order` |
 | Tests | `tests/test_api/test_trailing_bracket_order.py` | ✅ 4 tests |
@@ -267,9 +267,16 @@ Verify the chat→strategy persistence writes it there; else add it in the assem
 1. **Eval-engine exit scope:** Confirm the eval engine **keeps** exit-signal and
    time-based exits (recommended — OMS can't evaluate indicator logic), while OMS
    takes SL/TP/trailing. *(Default assumed: keep.)*
-2. **Trailing SL + Trailing TP together:** Disallow both trailing simultaneously on
-   one position in Phase 1 (they'd chase the same peak and conflict). Allowed combos:
-   fixed-SL + trailing-TP, OR trailing-SL + fixed/no-TP.
+2. **Trailing SL + Trailing TP together:** ✅ **ALLOWED.** A position may carry a
+   trailing stop leg AND a trailing take-profit leg at once — they don't conflict.
+   The engine (and the OMS) trail **both legs independently** and exit on whichever a
+   reversal reaches first; **OCO** then cancels the sibling. With different
+   distances/activation thresholds this yields a **staged trail** (e.g. a wide trail
+   early, a tight trail once deep in profit). The one degenerate case — a *dominated*
+   line that can never fire (always tighter AND activates no later than the other) —
+   is surfaced to the user as a **non-blocking warning** (`dominated_trailing_line`),
+   not rejected. **OMS impact:** the bracket may now carry a `trailing` block on BOTH
+   the stop-loss leg and the take-profit leg; honour each independently under OCO.
 3. **`absolute` basis:** Ship `percent` only in Phase 1; add `absolute` if needed.
 
 ---

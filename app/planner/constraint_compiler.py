@@ -1335,6 +1335,23 @@ def _apply_sl_tp_from_plan(
     if tp is not None and getattr(builder, "take_profit", None) is None:
         builder.take_profit = float(tp)
 
+    # If a multi-TP ladder was captured in execution_layers["partial_exits"],
+    # the scalar take_profit must be zeroed so the LLM context doesn't see it
+    # as a confirmed user parameter that overrides the ladder.
+    has_partial_exits = bool(
+        (getattr(builder, "execution_layers", None) or {}).get("partial_exits")
+    )
+    if has_partial_exits:
+        builder.take_profit = 0.0
+        rms = dict(getattr(builder, "risk_execution_config", None) or {})
+        sources = dict(rms.get("rms_sources", {}))
+        rms["take_profit_pct"] = 0.0
+        sources["take_profit_pct"] = "multi_tp"
+        rms["rms_sources"] = sources
+        builder.risk_execution_config = rms
+        logger.debug("constraint_compiler|multi_tp_active|zeroed_scalar_tp")
+        return
+
     rr_ratio = None
     if semantic and semantic.risk_reward and semantic.risk_reward.ratio:
         rr_ratio = float(semantic.risk_reward.ratio)

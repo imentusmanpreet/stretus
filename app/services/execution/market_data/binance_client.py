@@ -41,7 +41,13 @@ from app.core.config import get_settings
 from app.services.execution.market_data.base import MarketDataClient
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
+
+# Default public-host base URL when ref_data / env override is absent.
+_DEFAULT_BASE_URL = "https://api.binance.com"
+
+
+def _default_settings():
+    return get_settings()
 
 
 # Native Binance Spot intervals (per https://binance-docs.github.io/apidocs/spot/en/#kline-candlestick-data).
@@ -71,10 +77,6 @@ _TIMEFRAME_PLAN: dict[str, tuple[str, Optional[str]]] = {
 # Default cap for Binance's ``limit`` query param. The API allows up to 1500,
 # but we keep a safety margin to avoid 429s for over-eager backtests.
 _BINANCE_MAX_LIMIT = 1000
-
-# Default public-host base URL. Pulled from settings.crypto_market_data_url if
-# the operator wants to point at a regional mirror or a test cluster.
-_DEFAULT_BASE_URL = "https://api.binance.com"
 
 
 def _plan_for(timeframe: str) -> tuple[str, Optional[str]]:
@@ -168,19 +170,30 @@ class BinanceClient(MarketDataClient):
 
     adapter_id = "binance_rest"
 
-    def __init__(self) -> None:
-        self._base    = self._resolve_base_url()
-        self._timeout = settings.market_data_timeout_seconds
+    def __init__(
+        self,
+        *,
+        base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        adapter_id: str = "binance_rest",
+    ) -> None:
+        settings = _default_settings()
+        self.adapter_id = adapter_id
+        self._base = (
+            base_url
+            or getattr(settings, "crypto_market_data_url", None)
+            or _DEFAULT_BASE_URL
+        ).rstrip("/")
+        self._timeout = timeout if timeout is not None else settings.market_data_timeout_seconds
+        logger.debug(
+            "tenant_config|event=binance_client_init|adapter_id=%s|base_url=%s",
+            self.adapter_id,
+            self._base,
+        )
 
     @staticmethod
-    def _resolve_base_url() -> str:
-        """
-        Resolve the Binance Spot base URL.
-
-        Reads ``settings.crypto_market_data_url`` if set, otherwise falls back
-        to the public production endpoint. We never reuse ``market_data_url``
-        because that one is Upstox-owned.
-        """
+    def _resolve_base_url_from_settings() -> str:
+        settings = _default_settings()
         url = getattr(settings, "crypto_market_data_url", None) or _DEFAULT_BASE_URL
         return str(url).rstrip("/")
 

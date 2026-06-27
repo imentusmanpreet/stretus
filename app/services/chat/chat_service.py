@@ -107,6 +107,7 @@ from app.services.strategy.builder import (
     MARKET_CONFIG,
     StrategyBuilder,
     UNSUPPORTED_USER_TIMEFRAME_CODE,
+    detect_universe_intent,
     extract_exchange_hint,
     extract_goal_text,
     extract_strategy_details,
@@ -423,17 +424,24 @@ def _merge_agent_risk_config(
             if value is None or value <= 0:
                 continue
         if value is not None:
+            previous = merged.get(cfg_key)
             merged[cfg_key] = value
             sources = dict(merged.get("rms_sources") or {})
             sources[cfg_key] = source
             merged["rms_sources"] = sources
-            if cfg_key not in changed:
+            # Only flag a field as changed when the value actually differs from
+            # what is already in the merged config. Re-emitting the same value
+            # (e.g. when the user confirms with "yes" and the LLM router resends
+            # the identical risk params) must NOT register as a change — else we
+            # regenerate the same "Updated ... reassemble?" reply forever.
+            if value != previous and cfg_key not in changed:
                 changed.append(cfg_key)
 
     max_trades = _coerce_agent_int_param(params, "max_trades")
     if max_trades is not None:
+        if max_trades != merged.get("max_trades"):
+            changed.append("max_trades")
         merged["max_trades"] = max_trades
-        changed.append("max_trades")
 
     return merged, changed
 
@@ -473,6 +481,197 @@ def _store_user_rms(builder: "StrategyBuilder", field: str, value: float | int) 
         builder.daily_loss_cap = float(value)
     elif field == "max_trades":
         builder.max_trade = str(int(value))
+
+
+def _merge_agent_trailing_config(
+    builder: "StrategyBuilder",
+    params: dict[str, Any],
+    merged_risk_config: dict[str, Any],
+) -> list[str]:
+    """Apply agent-supplied trailing-stop / trailing-take-profit updates onto the
+    builder's spec attributes and report which trailing fields actually changed.
+
+    Trailing exits are stored as give-back SPEC dicts (``trailing_stop_spec`` /
+    ``trailing_take_profit_spec``) — NOT scalar RMS values — so they never flow
+    through ``_merge_agent_risk_config``. Without this, a post-assembly request
+    like "update trailing stop distance to 3%" routes to UPDATE_RISK_EXECUTION_
+    CONFIG, finds no scalar change, and falls back to the generic "which setting?"
+    reply. This mirrors the collect-time handler so the same intent is honoured
+    after the strategy is already assembled.
+
+    Both legs expose two independently editable knobs — the give-back
+    ``distance_pct`` and the ``activate_after_pct`` profit gate — and either one
+    can be changed on its own (the other is preserved from the existing spec).
+    Re-emitting identical values is NOT flagged as a change (prevents the
+    reassembly-confirmation loop, exactly as the scalar path does). For a
+    trailing take-profit with an active distance, the static take-profit is
+    zeroed (the trailing line IS the profit exit) and that zeroing is mirrored
+    into ``merged_risk_config`` so the subsequent ``_apply_risk_config_to_builder``
+    stays consistent."""
+
+    def _num(raw: Any, label: str) -> float | None:
+        """Parse one agent-supplied numeric knob; None when absent/unparseable."""
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            logger.info("chat|rms|%s_bad_value|raw=%r", label, raw)
+            return None
+
+    changed: list[str] = []
+
+    # ── Trailing STOP (percent give-back) ────────────────────────────────
+    ts_dist_in = _num(params.get("trailing_stop_pct"), "trailing_stop_distance")
+    ts_act_in = _num(params.get("trailing_stop_activate_after_pct"), "trailing_stop_activate")
+    if ts_dist_in is not None or ts_act_in is not None:
+        existing = dict(builder.trailing_stop_spec or {})
+        prev_dist = existing.get("distance_pct")
+        prev_act = existing.get("activate_after_pct")
+        # Explicit, in-range value wins; otherwise keep the prior one so a
+        # single-knob edit doesn't wipe the other.
+        dist = ts_dist_in if (ts_dist_in is not None and ts_dist_in > 0) else prev_dist
+        act = ts_act_in if (ts_act_in is not None and ts_act_in >= 0) else prev_act
+        if dist is not None or act is not None:
+            spec: dict[str, Any] = {"type": "percent", "source": "user"}
+            if dist is not None:
+                spec["distance_pct"] = dist
+            if act is not None:
+                spec["activate_after_pct"] = act
+            builder.trailing_stop_spec = spec
+            if dist != prev_dist or act != prev_act:
+                changed.append("trailing_stop")
+
+    # ── Trailing TAKE-PROFIT (percent give-back) ─────────────────────────
+    ttp_dist_in = _num(params.get("trailing_take_profit_distance_pct"), "trailing_tp_distance")
+    ttp_act_in = _num(params.get("trailing_take_profit_activate_after_pct"), "trailing_tp_activate")
+    if ttp_dist_in is not None or ttp_act_in is not None:
+        existing = dict(builder.trailing_take_profit_spec or {})
+        prev_dist = existing.get("distance_pct")
+        prev_act = existing.get("activate_after_pct")
+        dist = ttp_dist_in if (ttp_dist_in is not None and ttp_dist_in > 0) else prev_dist
+        act = ttp_act_in if (ttp_act_in is not None and ttp_act_in >= 0) else prev_act
+        if dist is not None or act is not None:
+            spec = {"type": "percent", "source": "user"}
+            if dist is not None:
+                spec["distance_pct"] = dist
+            if act is not None:
+                spec["activate_after_pct"] = act
+            builder.trailing_take_profit_spec = spec
+            # Only when a give-back distance is active does the trailing line
+            # become the profit exit → zero the static cap so it can't pre-empt
+            # it, and mirror that into the merged config so a later
+            # _apply_risk_config_to_builder doesn't restore the old target.
+            if dist is not None:
+                builder.take_profit = 0.0
+                _store_user_rms(builder, "take_profit_pct", 0.0)
+                merged_risk_config["take_profit_pct"] = 0.0
+                _sources = dict(merged_risk_config.get("rms_sources") or {})
+                _sources["take_profit_pct"] = "user"
+                merged_risk_config["rms_sources"] = _sources
+            if dist != prev_dist or act != prev_act:
+                changed.append("trailing_take_profit")
+
+    return changed
+
+
+# Phrasing cues that tell us WHICH trailing knob the user means. A bare
+# "trailing X percentage to N%" with neither cue is ambiguous — distance_pct
+# (give-back) vs activate_after_pct (profit gate) — and we must ask rather than
+# silently defaulting to distance.
+_TRAILING_DISTANCE_CUES = (
+    "distance", "give back", "giveback", "give-back", "trail by", "trailing by",
+    "trail distance", "trailing distance", "drawback",
+)
+_TRAILING_ACTIVATE_CUES = (
+    "activate", "activation", "activ", "kick in", "kicks in", "kick-in",
+    "trigger", "once up", "once in profit", "after reaching", "engage",
+    "start trailing", "begin trailing", "trail after",
+)
+
+# (leg, choice) → the agent-tool param key that carries that single knob.
+_TRAILING_PARAM_KEYS = {
+    ("trailing_take_profit", "distance"): "trailing_take_profit_distance_pct",
+    ("trailing_take_profit", "activate"): "trailing_take_profit_activate_after_pct",
+    ("trailing_stop", "distance"): "trailing_stop_pct",
+    ("trailing_stop", "activate"): "trailing_stop_activate_after_pct",
+}
+
+
+def _trailing_cue(text: str) -> str | None:
+    """Classify which trailing knob the user named: ``"distance"``, ``"activate"``,
+    or ``None`` when the phrasing names neither (ambiguous)."""
+    low = (text or "").lower()
+    has_dist = any(c in low for c in _TRAILING_DISTANCE_CUES)
+    has_act = any(c in low for c in _TRAILING_ACTIVATE_CUES)
+    if has_act and not has_dist:
+        return "activate"
+    if has_dist and not has_act:
+        return "distance"
+    return None
+
+
+def _detect_ambiguous_trailing_update(
+    user_content: str,
+    params: dict[str, Any],
+) -> tuple[str, float] | None:
+    """When the user supplies a SINGLE trailing percentage without saying whether
+    it is the give-back distance or the activate-after gate, return
+    ``(leg, value)`` so the caller can ask which one. Returns ``None`` when the
+    phrasing is explicit, when both knobs were given, or when no trailing value
+    is present."""
+    if _trailing_cue(user_content) is not None:
+        return None  # user named the knob → not ambiguous
+    # Gather every trailing value present across both legs. Only a SINGLE bare
+    # value is ambiguous; a bulk set ("trailing stop 2% and trailing tp 3%") is
+    # taken at face value so nothing is dropped behind a clarification.
+    found: list[tuple[str, Any]] = []
+    for leg, dkey, akey in (
+        ("trailing_take_profit",
+         "trailing_take_profit_distance_pct",
+         "trailing_take_profit_activate_after_pct"),
+        ("trailing_stop",
+         "trailing_stop_pct",
+         "trailing_stop_activate_after_pct"),
+    ):
+        for key in (dkey, akey):
+            if params.get(key) is not None:
+                found.append((leg, params.get(key)))
+    if len(found) != 1:
+        return None
+    leg, raw = found[0]
+    try:
+        return leg, float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_trailing_choice(text: str) -> str | None:
+    """Read the user's reply to a trailing-knob clarification: ``"distance"``,
+    ``"activate"``, or ``None`` if unrecognised. Accepts the phrasing cues plus
+    the option indices presented in the question (1 = distance, 2 = activate)."""
+    cue = _trailing_cue(text)
+    if cue:
+        return cue
+    low = " ".join(str(text or "").split()).lower().strip(" .)!")
+    if low in {"1", "(1", "first", "one", "option 1"}:
+        return "distance"
+    if low in {"2", "(2", "second", "two", "option 2"}:
+        return "activate"
+    return None
+
+
+def _build_trailing_clarification_question(leg: str, value: float) -> str:
+    """Ask whether the supplied percentage is the give-back distance or the
+    activate-after gate for the named trailing leg."""
+    label = "trailing take-profit" if leg == "trailing_take_profit" else "trailing stop"
+    v = _compact_number(value)
+    return (
+        f"For the {label}, should {v}% be the give-back **distance** "
+        f"(how far it trails from the running peak) or the **activate-after** "
+        f"threshold (the profit level where trailing kicks in)?\n"
+        f"Reply 'distance' or 'activate after'."
+    )
 
 
 def _apply_validated_llm_rms(
@@ -560,6 +759,7 @@ def _build_risk_update_reply(
     changed_fields: list[str],
     *,
     needs_reassembly: bool,
+    builder: "StrategyBuilder | None" = None,
 ) -> str:
     labels = {
         "stop_loss_pct": "stop loss",
@@ -567,10 +767,32 @@ def _build_risk_update_reply(
         "daily_loss_cap": "daily loss cap",
         "per_trade_risk": "per-trade risk",
         "max_trades": "max trades",
+        "trailing_stop": "trailing stop",
+        "trailing_take_profit": "trailing take profit",
     }
+    def _trailing_piece(label: str, spec: dict[str, Any] | None) -> str:
+        """Render a trailing leg as 'distance X% (activate after Y%)' — both knobs
+        when present, so an activation-only edit isn't reported as a distance."""
+        spec = spec or {}
+        bits: list[str] = []
+        if spec.get("distance_pct") is not None:
+            bits.append(f"distance {_compact_number(spec['distance_pct'])}%")
+        if spec.get("activate_after_pct") is not None:
+            bits.append(f"activate after {_compact_number(spec['activate_after_pct'])}%")
+        detail = ", ".join(bits) if bits else "updated"
+        return f"{label}: {detail}"
+
     pieces: list[str] = []
     for field in changed_fields:
         label = labels.get(field, field)
+        # Trailing exits live on the builder as spec dicts, not in the flat risk
+        # config — render both their distance and activation from the active spec.
+        if field == "trailing_stop":
+            pieces.append(_trailing_piece(label, getattr(builder, "trailing_stop_spec", None)))
+            continue
+        if field == "trailing_take_profit":
+            pieces.append(_trailing_piece(label, getattr(builder, "trailing_take_profit_spec", None)))
+            continue
         value = config.get(field)
         suffix = "" if field == "max_trades" else "%"
         pieces.append(f"{label}: {_compact_number(value)}{suffix}")
@@ -2097,11 +2319,12 @@ async def accept_message(db: AsyncSession, session_id: str, user_content: str) -
 def _summary_row_from_result(symbol: str | None, backtest_result: dict) -> AssetBacktestSummary:
     """Build one comparison row from a single-asset backtest result.
 
-    The four metrics are lifted verbatim from the result's metrics block — no new
-    computation. Symbol falls back to the run config's symbol when not supplied
-    (single-asset / None case).
+    The metrics are lifted verbatim from the result's metrics block and the
+    grade/labels from its assessment block — no new computation. Symbol falls
+    back to the run config's symbol when not supplied (single-asset / None case).
     """
     m = (backtest_result or {}).get("metrics") or {}
+    a = (backtest_result or {}).get("assessment") or {}
     return AssetBacktestSummary(
         symbol=str(
             symbol
@@ -2115,9 +2338,162 @@ def _summary_row_from_result(symbol: str | None, backtest_result: dict) -> Asset
         annual_return=float(m.get("annual_return", 0.0) or 0.0),
         volatility_pct=float(m.get("volatility_pct", 0.0) or 0.0),
         max_drawdown=float(m.get("max_drawdown", 0.0) or 0.0),
+        sharpe_ratio=float(m.get("sharpe_ratio", 0.0) or 0.0),
+        win_rate=float(m.get("win_rate", 0.0) or 0.0),
+        total_trades=int(m.get("total_trades", 0) or 0),
+        overall_grade=str(a.get("overall_grade") or ""),
+        return_potential=str(a.get("return_potential") or ""),
+        risk_profile=str(a.get("risk_profile") or ""),
+        recommendation=str(a.get("recommended_for") or ""),
         failure_reason=str(backtest_result.get("failure_reason") or ""),
         **{"pass": bool(backtest_result.get("pass"))},
     )
+
+
+def _stamp_symbol_into_yaml(yaml_path: str, symbol: str, session_id: str | None = None) -> str:
+    """Rewrite a strategy YAML so ``strategy.symbol`` is ``symbol``, returning a new path.
+
+    The engine labels every ``Trade.instrument`` from the YAML's ``cfg.symbol`` (not the
+    market-data request symbol). For a dynamic-universe member — or any multi-asset override —
+    the YAML body carries a template/placeholder symbol (``UNIVERSE_MEMBER``), so without this
+    the trades would be mislabeled. Stamping the real member symbol makes the engine's
+    ``cfg.symbol`` — and therefore each trade's instrument — the actual asset. The
+    ``universe:`` block (if any) is preserved so the strategy stays a universe strategy.
+    """
+    import tempfile
+    import yaml as _yaml
+
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as fh:
+            doc = _yaml.safe_load(fh)
+        if not isinstance(doc, dict) or not isinstance(doc.get("strategy"), dict):
+            return yaml_path
+        if str(doc["strategy"].get("symbol") or "") == symbol:
+            return yaml_path  # already correct — no rewrite needed
+        doc["strategy"]["symbol"] = symbol
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        _yaml.dump(doc, tmp, sort_keys=False, default_flow_style=False)
+        tmp.close()
+        logger.info(
+            "🏷️ chat_flow|event=member_symbol_stamped|session_id=%s|symbol=%s|path=%s",
+            session_id, symbol, tmp.name,
+        )
+        return tmp.name
+    except Exception as exc:  # noqa: BLE001 — never let labeling break the backtest
+        logger.warning("⚠️ chat_flow|event=symbol_stamp_failed|symbol=%s|err=%s", symbol, exc)
+        return yaml_path
+
+
+def _portfolio_fill_to_trade(fill, orig_by_key: dict) -> dict:
+    """One portfolio fill → a trade dict that KEEPS the original member trade's rich detail.
+
+    Starts from the original member trade (which carries ``entry_reason`` /
+    ``exit_reason_detail`` / ``entry_price`` / ``exit_price`` / MAE / MFE / holding_candles) and
+    overlays the portfolio's view (allocated capital + rupee P&L on that capital). So a
+    universe trade reads exactly like a single-asset trade, plus the portfolio sizing.
+    """
+    orig = dict(orig_by_key.get((fill.symbol, fill.entry_ts, fill.exit_ts), {}) or {})
+    orig.update({
+        "instrument": fill.symbol,
+        "side": fill.side,
+        "entry_date": str(fill.entry_ts),
+        "exit_date": str(fill.exit_ts),
+        "allocated_capital": round(fill.allocated_capital, 2),
+        "pnl_inr": round(fill.pnl_abs, 2),          # rupee P&L on the allocated capital
+        "pnl_pct": round(fill.pnl_frac * 100.0, 4),  # same % as the member trade
+    })
+    return orig
+
+
+def _aggregate_universe_portfolio(
+    member_results: list[dict],
+    *,
+    starting_capital: float,
+    max_positions: int,
+    sizing_mode: str,
+    members: list[str],
+    survivorship_mode: str,
+    ref_id: str,
+) -> dict:
+    """Fold N per-member backtests into ONE shared-capital portfolio result.
+
+    A dynamic universe is ONE strategy, so it must produce ONE backtest result with ONE
+    ``backtest_ref_id`` — not N independent runs. Each member's result already carries its
+    trades (``metrics.backtest_trades``); we feed those into the tested
+    ``engine.portfolio.PortfolioManager`` (shared capital + ``max_positions`` cap), which
+    returns one equity curve + per-symbol attribution. We then reshape it into the SAME
+    backtest-result envelope the chat persists/replies with (canonical metric names), so the
+    downstream is unchanged — it just sees a single result.
+    """
+    from app.strategy import engine_bridge
+
+    engine_bridge.is_available()  # ensure quant_engine/ on sys.path
+    import pandas as pd
+    from engine.portfolio import CandidateTrade, PortfolioManager
+
+    candidates: list = []
+    # Key each candidate back to its ORIGINAL member trade dict so we can restore the rich
+    # entry_reason / exit_reason_detail (the CandidateTrade value object drops them).
+    orig_by_key: dict = {}
+    for res in member_results:
+        for t in ((res.get("metrics") or {}).get("backtest_trades") or []):
+            try:
+                entry_ts = pd.to_datetime(t.get("entry_date"))
+                exit_ts = pd.to_datetime(t.get("exit_date"))
+                sym = str(t.get("instrument") or "")
+                candidates.append(CandidateTrade(
+                    symbol=sym, entry_ts=entry_ts, exit_ts=exit_ts,
+                    side=str(t.get("side") or "LONG"),
+                    pnl_frac=float(t.get("pnl_abs") or 0.0),   # Trade.pnl_abs = fractional return
+                ))
+                orig_by_key[(sym, entry_ts, exit_ts)] = t
+            except Exception:  # noqa: BLE001 — skip a malformed trade, keep the rest
+                continue
+
+    pm = PortfolioManager(
+        starting_capital=float(starting_capital),
+        max_positions=max(1, int(max_positions)),
+        sizing_mode=sizing_mode,  # type: ignore[arg-type]
+    )
+    pf = pm.run(candidates)
+    g = pf.metrics
+
+    # Reuse the first member's envelope shape, overwrite with portfolio aggregates so the
+    # existing summarize/reply code keeps working (single-result path).
+    base = copy.deepcopy(member_results[0]) if member_results else {}
+    base["backtest_ref_id"] = ref_id
+    metrics = dict(base.get("metrics") or {})
+    metrics.update({
+        "net_return_pct": g.get("total_return_pct", 0.0),
+        "ending_balance": g.get("ending_balance", starting_capital),
+        "total_trades": int(g.get("total_trades", 0) or 0),
+        "win_rate": g.get("win_rate_pct", 0.0),
+        "max_drawdown": abs(g.get("max_drawdown_pct", 0.0)),
+        "sharpe_ratio": g.get("sharpe", 0.0),
+        "sortino_ratio": g.get("sortino", 0.0),
+        "calmar_ratio": g.get("calmar", 0.0),
+        # The group's trade list = the portfolio's actual fills (post cap/capital arbitration),
+        # each MERGED ONTO its original member trade so entry_reason / exit_reason_detail /
+        # entry_price / exit_price / MAE / MFE are preserved (same shape as single-asset trades),
+        # with the portfolio's allocated capital + rupee P&L overlaid.
+        "backtest_trades": [_portfolio_fill_to_trade(f, orig_by_key) for f in pf.fills],
+    })
+    base["metrics"] = metrics
+    base["pass"] = bool(g.get("total_return_pct", 0.0) > 0)
+    # Portfolio extras (drill-down): which members traded, their P&L, skips, the curve.
+    base["universe_members"] = list(members)
+    base["universe_attribution"] = {k: round(v, 2) for k, v in pf.per_symbol_pnl.items()}
+    base["universe_skip_counts"] = dict(pf.skip_counts)
+    base["survivorship_mode"] = survivorship_mode
+    base["equity_curve"] = [
+        {"timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts), "equity": float(v)}
+        for ts, v in pf.equity_curve.items()
+    ]
+    logger.info(
+        "🌌 portfolio aggregate | ref=%s | members=%d | trades=%d | return=%.2f%% | per_symbol=%s",
+        ref_id, len(members), len(pf.fills), g.get("total_return_pct", 0.0), base["universe_attribution"],
+    )
+    return base
 
 
 async def _run_single_asset_backtest(
@@ -2247,9 +2623,9 @@ async def _run_single_asset_backtest(
                         "⚠️ chat_flow|event=sdl_yaml_fallback|err=%s",
                         _y_err,
                     )
-                    yaml_path = generate_yaml(builder)
+                    yaml_path = generate_yaml(builder, symbol_override=symbol)
             else:
-                yaml_path = generate_yaml(builder)
+                yaml_path = generate_yaml(builder, symbol_override=symbol)
             logger.info(
                 "✅ chat_flow|event=signal_params_enriched|session_id=%s"
                 "|bars=%d|yaml_path=%s|entry=%r|exit=%r",
@@ -2288,6 +2664,10 @@ async def _run_single_asset_backtest(
     # `engine_ohlcv` (the 1m series under intrabar execution, else the strategy
     # timeframe) was fetched once above; enrichment ran on the strategy-timeframe
     # view resampled from it. No second network fetch.
+    # Stamp the runtime symbol into the YAML so the engine's cfg.symbol — and every
+    # Trade's instrument label — is the asset we actually fetched (not the placeholder).
+    if symbol:
+        yaml_path = _stamp_symbol_into_yaml(yaml_path, symbol, session_id)
     backtest_result = await run_quant_backtest_sync(
         yaml_path=yaml_path,
         ohlcv_data=engine_ohlcv,
@@ -2461,6 +2841,22 @@ async def run_ai_processing(
                         session_id, _early_preset.name,
                     )
 
+            # Dynamic universe (direct path): detect an instrument SELECTION RULE
+            # ("top 10 by volume", "most active NIFTY500") BEFORE the agent router runs,
+            # so build_agent_state surfaces `universe_intent` and the agent does NOT ask
+            # "which symbol?". Sticky across turns; the universe rule's fields are authored
+            # by the spec-generating LLM downstream (LLM-only — never regex-extracted).
+            if (
+                get_settings().use_direct_strategy_path
+                and not getattr(builder, "universe_intent", False)
+                and detect_universe_intent(user_content)
+            ):
+                builder.universe_intent = True
+                logger.info(
+                    "🌌 chat_flow|event=universe_intent_detected_pre_router|session_id=%s",
+                    session_id,
+                )
+
             # Issue 2 — recognise an explicit "choose among these stocks:
             # A, B, C" message and persist the resolved symbols on the
             # builder so the next discovery run scans only those stocks.
@@ -2543,6 +2939,41 @@ async def run_ai_processing(
             route = agent_decision.to_legacy_route()
             route_intent = route.get("intent", "collect_input")
             route_reply_text = (route.get("reply_text") or "").strip() or None
+
+            # ── Trailing-knob clarification follow-up ──────────────────────────
+            # If the previous turn asked the user to pick the give-back DISTANCE
+            # vs the ACTIVATE-AFTER threshold for a trailing exit (see
+            # _detect_ambiguous_trailing_update), interpret this turn's reply as
+            # that choice and rewrite the route into an explicit single-knob risk
+            # update. The pending value rides on the prior draft. We override the
+            # router intent so a terse "distance" / "2" reply can't be misrouted,
+            # and flag the turn so the ambiguity check below does not re-fire.
+            _resolving_trailing_clarification = False
+            _pending_tc = (
+                last_draft.get("trailing_clarification")
+                if isinstance(last_draft, dict) else None
+            )
+            if (
+                isinstance(_pending_tc, dict)
+                and _pending_tc.get("leg")
+                and _pending_tc.get("value") is not None
+            ):
+                _tc_choice = _resolve_trailing_choice(user_content)
+                _tc_key = (
+                    _TRAILING_PARAM_KEYS.get((_pending_tc["leg"], _tc_choice))
+                    if _tc_choice else None
+                )
+                if _tc_key:
+                    route["intent"] = "risk_execution_update"
+                    route["agent_tool_parameters"] = {_tc_key: _pending_tc["value"]}
+                    route_intent = "risk_execution_update"
+                    _resolving_trailing_clarification = True
+                    logger.info(
+                        "🎯 chat_flow|event=trailing_clarification_resolved|session_id=%s"
+                        "|leg=%s|choice=%s|value=%s",
+                        session_id, _pending_tc["leg"], _tc_choice, _pending_tc["value"],
+                    )
+
             # Multi-asset: an explicit symbols list on the request bypasses LLM
             # extraction — it always wins over whatever the agent inferred.
             if request_symbols:
@@ -3217,9 +3648,39 @@ async def run_ai_processing(
                 await db.commit()
                 return
 
+            # ── Repeat-loop fix: "yes"/"reassemble" while a reassembly is pending ──
+            # After a risk change on an already-assembled strategy we set the state
+            # to "plan_signals" and ask the user to confirm reassembly. On that
+            # confirmation the LLM router (its tool description says "...or when
+            # confirming proposed defaults") RE-EMITS the same risk params as a
+            # fresh update_risk_execution_config call. Re-running the risk branch
+            # would regenerate the identical "Updated ... reassemble?" message and
+            # loop forever. A pure confirmation here means "reassemble" — route it
+            # through the normal confirmation/assemble path instead. detect_user_
+            # confirmation() matches "yes"/"proceed" but NOT "change stop loss",
+            # so genuine risk-change requests still fall through as risk updates.
+            if (
+                route_intent == "risk_execution_update"
+                and previous_state == "plan_signals"
+                and builder.signal_plan
+                and detect_user_confirmation(user_content)
+            ):
+                logger.info(
+                    "🔁 chat_flow|event=risk_update_confirmation_reroute|session_id=%s"
+                    " — treating confirmation as reassembly approval, not a new risk update",
+                    session_id,
+                )
+                route_intent = "confirmation"
+                route["intent"] = "confirmation"
+                route["is_confirmation"] = True
+
             if route_intent == "risk_execution_update":
                 params = dict(route.get("agent_tool_parameters") or {})
                 assistant_state = previous_state
+                # Set when we must ask the user whether a bare trailing percentage
+                # is the give-back distance or the activate-after gate; persisted
+                # on the draft so the next turn can resolve it.
+                _trailing_clarification_pending: dict[str, Any] | None = None
                 try:
                     active_config = await resolve_active_risk_execution_config(
                         db,
@@ -3231,39 +3692,66 @@ async def run_ai_processing(
                         active_config,
                         params,
                     )
-                    if not changed_risk_fields:
-                        assistant_text = (
-                            "Which risk or execution setting should I update? "
-                            "You can change stop loss, take profit, daily loss cap, "
-                            "per-trade risk, or max trades."
-                        )
+                    # A bare "change trailing <profit|stop> percentage to N%" is
+                    # ambiguous — it could mean the give-back distance or the
+                    # activate-after gate. Rather than silently defaulting to the
+                    # distance, ask which one (resolved next turn by the
+                    # clarification follow-up above). Skipped when we ARE resolving
+                    # that follow-up (the knob is now explicit).
+                    _amb_trailing = (
+                        None if _resolving_trailing_clarification
+                        else _detect_ambiguous_trailing_update(user_content, params)
+                    )
+                    if _amb_trailing is not None:
+                        _amb_leg, _amb_value = _amb_trailing
+                        assistant_text = _build_trailing_clarification_question(_amb_leg, _amb_value)
                         processing_status = "awaiting_user_input"
+                        _trailing_clarification_pending = {"leg": _amb_leg, "value": _amb_value}
+                        # Builder is left untouched — nothing is applied until the
+                        # user picks a knob.
                     else:
-                        _apply_risk_config_to_builder(builder, merged_risk_config)
-                        needs_reassembly = bool(
-                            latest_strategy_context
-                            or previous_state in {
-                                "assemble_strategy",
-                                "backtest_confirmation",
-                                "backtest_complete",
-                            }
+                        # Trailing stop / trailing take-profit are SPEC dicts on the
+                        # builder, not scalar RMS values, so they bypass the merge
+                        # above. Apply them here so a post-assembly "update trailing
+                        # distance" is honoured instead of dropping to the generic
+                        # "which setting?" prompt.
+                        changed_risk_fields.extend(
+                            _merge_agent_trailing_config(builder, params, merged_risk_config)
                         )
-                        if builder.signal_plan:
-                            assistant_state = "plan_signals" if needs_reassembly else previous_state
-                        elif builder.is_user_input_complete() and builder.user_input_confirmed:
-                            assistant_state = "plan_signals"
+                        if not changed_risk_fields:
+                            assistant_text = (
+                                "Which risk or execution setting should I update? "
+                                "You can change stop loss, take profit, daily loss cap, "
+                                "per-trade risk, trailing stop, trailing take profit, or max trades."
+                            )
+                            processing_status = "awaiting_user_input"
                         else:
-                            assistant_state = "collect_user_input"
-                        assistant_text = _build_risk_update_reply(
-                            merged_risk_config,
-                            changed_risk_fields,
-                            needs_reassembly=needs_reassembly,
-                        )
-                        processing_status = (
-                            "awaiting_confirmation"
-                            if assistant_state == "plan_signals"
-                            else _draft_processing_status(builder, assistant_state)
-                        )
+                            _apply_risk_config_to_builder(builder, merged_risk_config)
+                            needs_reassembly = bool(
+                                latest_strategy_context
+                                or previous_state in {
+                                    "assemble_strategy",
+                                    "backtest_confirmation",
+                                    "backtest_complete",
+                                }
+                            )
+                            if builder.signal_plan:
+                                assistant_state = "plan_signals" if needs_reassembly else previous_state
+                            elif builder.is_user_input_complete() and builder.user_input_confirmed:
+                                assistant_state = "plan_signals"
+                            else:
+                                assistant_state = "collect_user_input"
+                            assistant_text = _build_risk_update_reply(
+                                merged_risk_config,
+                                changed_risk_fields,
+                                needs_reassembly=needs_reassembly,
+                                builder=builder,
+                            )
+                            processing_status = (
+                                "awaiting_confirmation"
+                                if assistant_state == "plan_signals"
+                                else _draft_processing_status(builder, assistant_state)
+                            )
                 except Exception as risk_exc:
                     logger.warning(
                         "⚠️ chat_flow|event=agent_risk_update_failed|session_id=%s|err=%s",
@@ -3305,6 +3793,10 @@ async def run_ai_processing(
                     "parameters": params,
                     "source": route.get("agent_source"),
                 }
+                # Carry the pending trailing-knob question to the next turn so the
+                # user's "distance"/"activate after" reply can be resolved.
+                if _trailing_clarification_pending:
+                    draft["trailing_clarification"] = _trailing_clarification_pending
                 if user_msg:
                     user_msg.strategy_draft = draft
                     user_msg.status = MessageStatus.completed
@@ -3333,6 +3825,14 @@ async def run_ai_processing(
 
             parsed_builder = StrategyBuilder()
             extract_strategy_details(user_content, parsed_builder)
+
+            # Direct path: detect a SELECTION RULE (dynamic universe) so input-gathering
+            # does NOT demand a single symbol and routes to the direct universe synthesis
+            # instead of the KB scanner. Sticky once detected; the universe rule itself is
+            # authored by the spec-generating LLM downstream (LLM-only).
+            if get_settings().use_direct_strategy_path and detect_universe_intent(user_content):
+                builder.universe_intent = True
+                logger.info("🌌 chat | universe intent detected | session=%s", session_id)
 
             # ── Early semantic extraction ─────────────────────────────────
             # Run BEFORE planning so that builder.semantic_intent is populated
@@ -3376,14 +3876,11 @@ async def run_ai_processing(
                                 "source": "semantic",
                                 "atr_multiple": _csl.atr_multiple,
                             }
-                        if not parsed_builder.trailing_stop_spec and _crm.trailing_stop and _crm.trailing_stop.enabled:
-                            _cts = _crm.trailing_stop
-                            parsed_builder.trailing_stop_spec = {
-                                "type": _cts.type,
-                                "activate_after_pct": _cts.activate_after_pct,
-                                "ema_period": _cts.ema_period,
-                                "source": "semantic",
-                            }
+                        # Trailing stop is NOT propagated from the semantic extractor.
+                        # The trailing family is owned exclusively by the LLM
+                        # `StrategySpec` path (LLM-only RMS) — a single validated
+                        # source. The semantic path used to emit distance-less,
+                        # backtest-crashing trailing specs, so it no longer sets one.
                     # ── Phase 2 — propagate execution parameters from semantic
                     # extractor into parsed_builder's typed fields so they
                     # flow into builder during the propagation block below.
@@ -3530,6 +4027,12 @@ async def run_ai_processing(
                 # — when the LLM returns nothing the symbol simply stays unset and
                 # the normal "which symbol?" collect prompt asks the user.
                 stock_query = route.get("stock_query")
+                # Dynamic universe: the instrument is a SELECTION RULE, not a single
+                # symbol — so never run single-symbol resolution/validation here (it would
+                # mis-read "top 15 crypto pairs" as a ticker and emit the misleading
+                # "that stock isn't in my universe" reply). The resolver supplies symbols.
+                if getattr(builder, "universe_intent", False) or getattr(builder, "universe", None):
+                    stock_query = None
                 # Multi-asset backtest: the named assets drive the backtest only
                 # (they flow through route["backtest_symbols"] to the run_backtest
                 # loop) and are NOT a strategy-symbol change. Skip stock validation
@@ -3537,6 +4040,75 @@ async def run_ai_processing(
                 # reset the session to collect_user_input.
                 if route.get("backtest_symbols"):
                     stock_query = None
+                # Re-run the SAME assembled strategy on a different asset. In a
+                # post-assembly state, "backtest for <asset>" must NOT become a
+                # strategy-symbol change (which would reset the whole flow); route
+                # the named asset through the backtest override path instead, so the
+                # already-planned signals/strategy are reused verbatim and only the
+                # backtested symbol changes. The message must say "backtest", the
+                # router must have treated it as a symbol change (collect_input +
+                # stock_query), and the asset must resolve cleanly.
+                #
+                # A non-symbol input blocks the rerun ONLY when it is a GENUINE
+                # reconfiguration — a different preset, or a real timeframe change.
+                # The LLM routinely re-emits the unchanged objective/goal/etc.
+                # alongside the symbol; those re-statements must NOT block the
+                # rerun (the user asked only to swap the asset, keep the rest), or
+                # the symbol would apply and reset the whole flow.
+                _msg_lower = (user_content or "").lower()
+
+                def _rerun_field_changed(route_key, current):
+                    val = route.get(route_key)
+                    if val is None:
+                        return False
+                    return str(val).strip().lower() != str(current or "").strip().lower()
+
+                _rerun_tf_changed = False
+                _rerun_tf_in = route.get("timeframe_input")
+                if _rerun_tf_in:
+                    _rerun_resolved_tf, _ = resolve_supported_user_timeframe(_rerun_tf_in)
+                    _rerun_tf_changed = bool(_rerun_resolved_tf) and _rerun_resolved_tf != builder.timeframe
+
+                _rerun_is_reconfig = (
+                    bool(route.get("strategy_preset"))
+                    or _rerun_tf_changed
+                    or _rerun_field_changed("objective", builder.objective)
+                )
+                if (
+                    stock_query
+                    and not route.get("backtest_symbols")
+                    and route_intent == "collect_input"
+                    and previous_state in {
+                        "assemble_strategy",
+                        "backtest_confirmation",
+                        "backtest_complete",
+                    }
+                    and (
+                        "backtest" in _msg_lower
+                        or "back test" in _msg_lower
+                        or "back-test" in _msg_lower
+                    )
+                    and not _rerun_is_reconfig
+                ):
+                    _rerun_match = await resolve_supported_stock(stock_query)
+                    if _rerun_match and _rerun_match.get("symbol"):
+                        _rerun_symbol = str(_rerun_match["symbol"]).strip()
+                        _rerun_exch = extract_exchange_hint(user_content)
+                        if _rerun_exch and not _rerun_symbol.upper().endswith((".NS", ".BO")):
+                            _rerun_symbol = f"{_rerun_symbol}.{_rerun_exch}"
+                        route["backtest_symbols"] = [_rerun_symbol]
+                        route["intent"] = "run_backtest"
+                        route_intent = "run_backtest"
+                        relevant_message = True
+                        stock_query = None
+                        logger.info(
+                            "♻️ chat_flow|event=backtest_rerun_symbol_override|session_id=%s"
+                            "|query=%r|symbol=%s|prev_state=%s — reusing assembled strategy",
+                            session_id,
+                            _rerun_match.get("symbol"),
+                            _rerun_symbol,
+                            previous_state,
+                        )
                 if (
                     not stock_query
                     and builder.input_modification_requested
@@ -3550,26 +4122,42 @@ async def run_ai_processing(
                 # chat/clarification and drops the symbol the trader actually
                 # named (e.g. anchoring on an earlier rejection). When we are
                 # still missing a symbol, re-validate the raw message against the
-                # universe and adopt it ONLY on a positive resolution. A miss
-                # leaves the turn untouched, so genuine chat is never turned into
-                # a false "unsupported" error.
+                # universe and adopt it ONLY on a STRONG, unambiguous match — an
+                # exact symbol/name or a curated alias. Everything weaker is
+                # deliberately ignored here:
+                #   - a greeting ("hi", "hello", "namaste") is short-circuited
+                #     before resolution;
+                #   - an ambiguous prefix ("hi" -> Hindustan*, "in" -> INFY/IOC/…)
+                #     is too weak to override a turn the agent already called chat;
+                #   - a loose single-prefix hit ("it" -> ITC, "go" -> GODREJCP,
+                #     "can" -> CANBK) is the classic false positive that turned
+                #     ordinary chat into a stock suggestion.
+                # A genuine symbol the user is setting still flows through the
+                # normal collect_input + stock_query path below, so this gate only
+                # narrows the chat/clarification backstop and changes no other flow.
                 if (
                     not stock_query
                     and not pending_stock_choice
                     and not builder.symbol
+                    and not getattr(builder, "universe_intent", False)
+                    and not getattr(builder, "universe", None)
                     and route_intent in {"general_chat", "clarification"}
+                    and not _is_greeting_message(user_content)
                 ):
                     salvage_match = await resolve_supported_stock(user_content)
-                    if salvage_match and (
-                        salvage_match.get("symbol") or salvage_match.get("ambiguous")
+                    if (
+                        salvage_match
+                        and salvage_match.get("symbol")
+                        and salvage_match.get("match_kind") in {"exact", "alias"}
                     ):
                         stock_query = user_content
                         symbol_salvaged_this_turn = True
                         logger.info(
-                            "🛟 chat_flow|event=symbol_salvaged|session_id=%s|query=%r|intent=%s",
+                            "🛟 chat_flow|event=symbol_salvaged|session_id=%s|query=%r|intent=%s|match_kind=%s",
                             session_id,
                             user_content,
                             route_intent,
+                            salvage_match.get("match_kind"),
                         )
                 if stock_query:
                     relevant_message = True
@@ -3772,38 +4360,115 @@ async def run_ai_processing(
                 if any(route.get(_k) is not None for _k in _LLM_RMS_ROUTE_KEYS):
                     relevant_message = True
 
-                # Trailing TAKE-PROFIT is a give-back SPEC, not a scalar, so it
-                # doesn't flow through _store_user_rms. Capture it here at collect
-                # time (LLM-extracted) so the user's "trail my profit" intent isn't
-                # flattened into a static target. When present, the trailing line
-                # IS the profit exit → zero the static take-profit so it can't fire
-                # first (mirrors the planner) and tag that as user-given provenance.
-                _ttp_params = route.get("agent_tool_parameters") or {}
-                _ttp_dist = _ttp_params.get("trailing_take_profit_distance_pct")
-                _ttp_act = _ttp_params.get("trailing_take_profit_activate_after_pct")
-                if _ttp_dist is not None:
-                    try:
-                        _dist = float(_ttp_dist)
-                    except (TypeError, ValueError):
-                        _dist = 0.0
-                        logger.info("chat|rms|trailing_tp_bad_distance|dist=%r", _ttp_dist)
-                    if _dist > 0:
-                        _ttp_spec: dict[str, Any] = {
-                            "type": "percent",
-                            "distance_pct": _dist,
-                            "source": "user",
-                        }
-                        try:
-                            _act = float(_ttp_act) if _ttp_act is not None else None
-                        except (TypeError, ValueError):
-                            _act = None
-                        if _act is not None and _act >= 0:
-                            _ttp_spec["activate_after_pct"] = _act
-                        builder.trailing_take_profit_spec = _ttp_spec
-                        # Trailing supplies the profit exit → no static cap to pre-empt it.
+                # Trailing STOP and TAKE-PROFIT are give-back SPEC dicts, not scalar
+                # RMS values. The primary path is update_risk_execution_config (which
+                # has full clarification logic). This is a safety net for when the LLM
+                # still routes trailing params via modify_strategy_inputs (e.g. during
+                # initial input collection). Uses the same _merge_agent_trailing_config
+                # so single-knob edits preserve the other knob and the static take-profit
+                # is zeroed when a trailing-distance exit is active.
+                _collect_route_params = dict(route.get("agent_tool_parameters") or {})
+                _collect_trailing = {
+                    k: _collect_route_params[k]
+                    for k in (
+                        "trailing_stop_pct",
+                        "trailing_stop_activate_after_pct",
+                        "trailing_take_profit_distance_pct",
+                        "trailing_take_profit_activate_after_pct",
+                    )
+                    if k in _collect_route_params
+                }
+                if _collect_trailing:
+                    _collect_merged = dict(builder.risk_execution_config or {})
+                    _collect_merged.setdefault("rms_sources", {})
+                    if _merge_agent_trailing_config(builder, _collect_trailing, _collect_merged):
+                        relevant_message = True
+
+                # Multi-TP ladder — regex extraction directly from user_content.
+                # The routing LLM (fast=True) is not reliable enough to emit a
+                # structured array for this case. We extract deterministically:
+                #   "exit 30% at 1R, 30% at 2R, 40% at 4R" → 3 rungs
+                # Only fires when ≥2 distinct R-multiple targets are found.
+                # First-write-wins: if execution_layers already has partial_exits
+                # from a prior turn (restored via merge_preview), skip re-extraction.
+                _existing_layers = getattr(builder, "execution_layers", None) or {}
+                _already_has_ladder = bool(_existing_layers.get("partial_exits"))
+                if not _already_has_ladder:
+                    _raw_msg = re.sub(r"\bhalf\b", "50%", user_content, flags=re.IGNORECASE)
+                    _mtp_rungs: list[dict] = []
+                    # Primary: leading-verb form — "exit 30% at 1R", "book 50% at 2R"
+                    for _m in re.finditer(
+                        r"(?:exit|take|book(?:ing)?|close|sell|partial)\s+(?:profit\s+)?"
+                        r"(?:(\d+(?:\.\d+)?)\s*%\s+)?"
+                        r"(?:of\s+(?:the\s+)?(?:position|remaining)\s+)?"
+                        r"(?:at|after|on|@)\s+(\d+(?:\.\d+)?)\s*r\b",
+                        _raw_msg, re.IGNORECASE,
+                    ):
+                        _entry: dict = {"trigger": "rr_multiple", "value": float(_m.group(2))}
+                        if _m.group(1):
+                            _entry["size_pct"] = float(_m.group(1))
+                        _mtp_rungs.append(_entry)
+                    # Continuation: verbless comma items — ", 30% at 2R, 40% at 4R"
+                    if _mtp_rungs:
+                        for _m in re.finditer(
+                            r",\s*(\d+(?:\.\d+)?)\s*%\s+(?:at|after|on|@)\s+(\d+(?:\.\d+)?)\s*r\b",
+                            _raw_msg, re.IGNORECASE,
+                        ):
+                            _mtp_rungs.append({
+                                "trigger": "rr_multiple",
+                                "value": float(_m.group(2)),
+                                "size_pct": float(_m.group(1)),
+                            })
+                    # De-duplicate by value, keep first occurrence
+                    _seen_vals: set = set()
+                    _deduped: list[dict] = []
+                    for _r in _mtp_rungs:
+                        _v = _r.get("value")
+                        if _v not in _seen_vals:
+                            _seen_vals.add(_v)
+                            _deduped.append(_r)
+                    # Extract risk_action instructions and map to rung by position.
+                    # Patterns: "move SL to breakeven after TP1/first target"
+                    #           "move SL to previous TP after TP2/second target"
+                    # TP index in the user's phrase is 1-based; rung list is 0-based.
+                    _breakeven_idx: set[int] = set()
+                    _prevtp_idx: set[int] = set()
+                    for _bm in re.finditer(
+                        r"(?:move|set|trail|shift)\s+(?:the\s+)?(?:SL|stop(?:\s*loss)?)"
+                        r"\s+to\s+(?:break\s*even|entry|BE)"
+                        r"(?:\s+after\s+(?:TP|target|rung|take.?profit)?\s*(\d+))?",
+                        user_content, re.IGNORECASE,
+                    ):
+                        _idx = int(_bm.group(1)) - 1 if _bm.group(1) else 0
+                        _breakeven_idx.add(_idx)
+                    for _pm in re.finditer(
+                        r"(?:move|set|trail|shift)\s+(?:the\s+)?(?:SL|stop(?:\s*loss)?)"
+                        r"\s+to\s+(?:previous|last|prior)\s+(?:TP|target|take.?profit)"
+                        r"(?:\s+after\s+(?:TP|target|rung|take.?profit)?\s*(\d+))?",
+                        user_content, re.IGNORECASE,
+                    ):
+                        _idx = int(_pm.group(1)) - 1 if _pm.group(1) else 1
+                        _prevtp_idx.add(_idx)
+                    for _i, _r in enumerate(_deduped):
+                        if _i in _breakeven_idx:
+                            _r["risk_action"] = "move_sl_to_breakeven"
+                        elif _i in _prevtp_idx:
+                            _r["risk_action"] = "move_sl_to_previous_tp"
+                        else:
+                            _r.setdefault("risk_action", "none")
+                    if len(_deduped) >= 2:
+                        _layers = dict(_existing_layers)
+                        _layers["partial_exits"] = _deduped
+                        builder.execution_layers = _layers
                         builder.take_profit = 0.0
                         _store_user_rms(builder, "take_profit_pct", 0.0)
+                        _existing_rms = dict(builder.risk_execution_config or {})
+                        _existing_src = dict(_existing_rms.get("rms_sources", {}))
+                        _existing_src["take_profit_pct"] = "multi_tp"
+                        _existing_rms["rms_sources"] = _existing_src
+                        builder.risk_execution_config = _existing_rms
                         relevant_message = True
+                        logger.info("chat|multi_tp|regex_extracted|rungs=%d", len(_deduped))
 
                 # Propagate RMS fields extracted by _extract_rms_from_text.
                 # First-write-wins per field: a user-supplied value in a prior
@@ -4088,6 +4753,11 @@ async def run_ai_processing(
             strategy_id_to_save = None
             ref_backtest_id = None
             persisted_backtest_uuid: uuid.UUID | None = None
+            # Set only for a single-asset run whose symbol was overridden via the
+            # run_backtest `symbols` arg. Labels the result header + Stored-inputs
+            # "Stock" row with the asset the user actually asked for, without
+            # mutating the session strategy. None → legacy display.
+            backtest_display_symbol: str | None = None
 
             if route_intent == "run_backtest" and user_state in {
                 "assemble_strategy",
@@ -4143,6 +4813,57 @@ async def run_ai_processing(
                     # Empty/None symbols → a single run using the strategy YAML's
                     # own symbol (length-1 wrapper — fully back-compatible).
                     _symbols = route.get("backtest_symbols") or [None]
+
+                    # Dynamic universe: resolve the selection RULE into the actual member
+                    # symbols and backtest those, instead of the placeholder template symbol
+                    # (which is not a real instrument — see UNIVERSE_MEMBER). This is what
+                    # makes "top 10 by volume / most active" run end-to-end through chat.
+                    _universe_note: str | None = None
+                    if getattr(builder, "universe", None):
+                        from app.services.universe.chat_resolution import resolve_member_symbols
+                        _members, _universe_note = await resolve_member_symbols(
+                            builder.universe, asof=datetime.now(timezone.utc),
+                            session_id=session_id,
+                        )
+                        if _members:
+                            _symbols = _members
+                            # Record the resolution outcome so the response surfaces it under
+                            # strategy.universe.resolved (members + cap + survivorship).
+                            _u = builder.universe or {}
+                            _src_kind = (_u.get("source") or {}).get("kind")
+                            builder.universe_resolved = {
+                                "asof": datetime.now(timezone.utc).isoformat(),
+                                "members": list(_members),
+                                "requested_take": _u.get("take"),
+                                "effective_take": len(_members),
+                                "cap_reason": (
+                                    "platform_limit"
+                                    if _universe_note and "platform limit" in _universe_note
+                                    else "none"
+                                ),
+                                # crypto_all / catalog pools use today's supported list → approximate
+                                "survivorship_mode": "approximate",
+                                "note": _universe_note,
+                            }
+                            logger.info(
+                                "\n┌─🌌 DYNAMIC UNIVERSE BACKTEST | session=%s ───────────────────────────\n"
+                                "│  rule resolved → %d member(s): %s\n"
+                                "│  %s\n"
+                                "│  each member is backtested below with the shared strategy template\n"
+                                "└──────────────────────────────────────────────────────────────────────",
+                                session_id, len(_members), _members,
+                                ("⚠️ " + _universe_note) if _universe_note else "no platform-cap clamp",
+                            )
+                        else:
+                            logger.warning(
+                                "🌌 chat_flow|event=universe_no_members|session_id=%s|source=%s",
+                                session_id, (builder.universe or {}).get("source"),
+                            )
+                            raise RuntimeError(
+                                _universe_note
+                                or "The universe rule resolved to no tradable members. "
+                                "For index/sector/F&O universes, seed universe_membership first."
+                            )
                     # Snapshot the clean signal plan so each asset enriches from the
                     # same baseline; sequential runs must not inherit the previous
                     # asset's calibrated params (contamination — see helper docstring).
@@ -4152,10 +4873,15 @@ async def run_ai_processing(
                     _base_yaml_path = yaml_path
                     multi_results: list[dict] = []
                     multi_summary: list[AssetBacktestSummary] = []
-                    for _sym in _symbols:
+                    for _idx, _sym in enumerate(_symbols, start=1):
                         if _base_signal_plan is not None:
                             builder.signal_plan = copy.deepcopy(_base_signal_plan)
                         backtest_started_at = datetime.now(timezone.utc)
+                        if len(_symbols) > 1 or getattr(builder, "universe", None):
+                            logger.info(
+                                "▶️  📊 BACKTEST MEMBER %d/%d | symbol=%s | session=%s",
+                                _idx, len(_symbols), _sym, session_id,
+                            )
                         try:
                             backtest_result, result_summary = await _run_single_asset_backtest(
                                 symbol=_sym,
@@ -4198,7 +4924,10 @@ async def run_ai_processing(
                         multi_summary.append(_summary_row_from_result(_sym, backtest_result))
 
                         # Persist one DB row per asset — each keeps its own ref id.
-                        if _sid:
+                        # EXCEPTION: a dynamic universe is ONE strategy → we persist a SINGLE
+                        # shared-capital portfolio row after the loop (one ref id), not one
+                        # per member. So skip per-member persistence here for universe runs.
+                        if _sid and not getattr(builder, "universe", None):
                             try:
                                 strategy_uuid = uuid.UUID(str(_sid))
                                 persisted_backtest_uuid = await insert_chat_backtest_row(
@@ -4243,8 +4972,43 @@ async def run_ai_processing(
                     # results[] and serves the lightweight summary (symbol →
                     # backtest_ref_id + key metrics) so the frontend can fetch each
                     # asset's detail by ref id.
-                    _is_multi = len(_symbols) > 1
-                    if _is_multi:
+                    # Dynamic universe → ONE shared-capital portfolio result with ONE ref id
+                    # (a universe is one strategy, not N independent backtests). We fold the
+                    # members' trades through the Portfolio Manager and persist a single row.
+                    _universe_group = bool(getattr(builder, "universe", None))
+                    _group_ref_id: str | None = None
+                    if _universe_group:
+                        _group_ref_id = str(uuid.uuid4())
+                        _ur = getattr(builder, "universe_resolved", None) or {}
+                        _eff_max_pos = int(_ur.get("effective_take") or len(multi_results) or 1)
+                        group_result = _aggregate_universe_portfolio(
+                            multi_results,
+                            starting_capital=100_000.0,
+                            max_positions=_eff_max_pos,
+                            sizing_mode="equal_weight",
+                            members=list(_symbols),
+                            survivorship_mode=str(_ur.get("survivorship_mode") or "approximate"),
+                            ref_id=_group_ref_id,
+                        )
+                        if _sid:
+                            try:
+                                await insert_chat_backtest_row(
+                                    db, strategy_id=uuid.UUID(str(_sid)),
+                                    summary=summarize_backtest_for_db(group_result),
+                                    started_at=backtest_started_at,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "❌ chat_flow|event=universe_group_save_failed|session_id=%s", session_id,
+                                )
+                        backtest_result = group_result
+                        assistant_text = build_backtest_result_reply(builder, group_result)
+                        strategy_json_to_save = {"backtest_result": group_result}
+                        logger.info(
+                            "🌌 chat_flow|event=universe_group_backtest|session_id=%s|ref=%s|members=%d",
+                            session_id, _group_ref_id, len(_symbols),
+                        )
+                    elif len(_symbols) > 1:
                         multi_asset_result = MultiAssetBacktestResult(
                             strategy_name=(multi_results[0] or {}).get("strategy_name"),
                             backtest_date_range=(multi_results[0] or {}).get("backtest_date_range"),
@@ -4260,7 +5024,17 @@ async def run_ai_processing(
                         }
                     else:
                         backtest_result = multi_results[0]
-                        assistant_text = build_backtest_result_reply(builder, backtest_result)
+                        # When the single run used an explicit symbol override
+                        # (e.g. "run backtest for tcs"), label the result with that
+                        # asset rather than the session strategy's own symbol. No
+                        # override (legacy run) → display_symbol stays None.
+                        backtest_display_symbol = (
+                            _symbols[0] if route.get("backtest_symbols") else None
+                        )
+                        assistant_text = build_backtest_result_reply(
+                            builder, backtest_result,
+                            display_symbol=backtest_display_symbol,
+                        )
                         strategy_json_to_save = {"backtest_result": backtest_result}
                     assistant_state = "backtest_complete"
                     draft = builder.to_draft_json(
@@ -4271,12 +5045,16 @@ async def run_ai_processing(
                         "from_utc": _from_utc,
                         "to_utc": _to_utc,
                     }
-                    ref_backtest_id = str((multi_results[0] or {}).get("backtest_ref_id") or "")
+                    # Universe → the SINGLE group ref id; otherwise the (first) member's ref.
+                    ref_backtest_id = _group_ref_id or str((multi_results[0] or {}).get("backtest_ref_id") or "")
                     if ref_backtest_id:
                         draft["backtest_ref_id"] = ref_backtest_id
-                    _ref_ids = [s.backtest_ref_id for s in multi_summary if s.backtest_ref_id]
-                    if _ref_ids:
-                        draft["backtest_ref_ids"] = _ref_ids
+                    # A universe run is ONE backtest → expose only the single group ref, not the
+                    # per-member ref list (those rows aren't persisted for universe strategies).
+                    if not _universe_group:
+                        _ref_ids = [s.backtest_ref_id for s in multi_summary if s.backtest_ref_id]
+                        if _ref_ids:
+                            draft["backtest_ref_ids"] = _ref_ids
 
                     # Log token usage summary at backtest completion
                     log_token_summary(session_id, "backtest_complete")
@@ -4284,11 +5062,7 @@ async def run_ai_processing(
                     assistant_text = build_backtest_earliest_date_reply(
                         earliest_backtest_from_display(),
                     )
-                    assistant_state = (
-                        "assemble_strategy"
-                        if user_state == "assemble_strategy"
-                        else "backtest_confirmation"
-                    )
+                    assistant_state = "backtest_confirmation"
                     draft = builder.to_draft_json(
                         mode_override=assistant_state,
                         processing_status=_draft_processing_status(builder, assistant_state),
@@ -4320,11 +5094,7 @@ async def run_ai_processing(
                             session_id,
                         )
                     assistant_text = build_backtest_error_reply(str(backtest_exc))
-                    assistant_state = (
-                        "assemble_strategy"
-                        if user_state == "assemble_strategy"
-                        else "backtest_confirmation"
-                    )
+                    assistant_state = "backtest_confirmation"
                     draft = builder.to_draft_json(
                         mode_override=assistant_state,
                         processing_status=_draft_processing_status(builder, assistant_state),
@@ -5456,6 +6226,7 @@ async def run_ai_processing(
                 builder,
                 state=assistant_state,
                 draft=draft if isinstance(draft, dict) else None,
+                display_symbol=backtest_display_symbol,
             )
 
             assistant_msg = ChatMessage(

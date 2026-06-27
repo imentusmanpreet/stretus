@@ -263,3 +263,50 @@ async def run_quant_backtest_sync(
         result.get("backtest_ref_id"),
     )
     return result
+
+
+async def run_quant_portfolio_sync(payload: dict[str, Any]) -> dict[str, Any]:
+    """POST a dynamic-universe portfolio backtest to the engine's /run-portfolio-sync.
+
+    ``payload`` is the RunPortfolioSyncRequest shape (template_yaml, member_ohlcv,
+    membership_windows, portfolio config, snapshots, …). Returns the single portfolio
+    result dict. Raises ``RuntimeError`` on transport/engine failure, mirroring the
+    error-surfacing of :func:`run_quant_backtest_sync` (never a misleading silent empty).
+    """
+    settings = refresh_settings()
+    n_members = len(payload.get("member_ohlcv") or {})
+    logger.info(
+        "📡 Quant engine POST /run-portfolio-sync | members=%d max_positions=%s ref=%s",
+        n_members, payload.get("max_positions"), payload.get("backtest_ref_id"),
+    )
+    try:
+        async with httpx.AsyncClient(timeout=settings.quant_engine_timeout_seconds) as client:
+            response = await client.post(
+                f"{settings.quant_engine_url}/run-portfolio-sync",
+                content=orjson.dumps(payload),
+                headers={"Content-Type": "application/json"},
+            )
+            if response.status_code == 404:
+                raise RuntimeError(
+                    "The running quant engine does not expose /run-portfolio-sync yet. "
+                    "Rebuild and restart the quant_engine service, then retry."
+                )
+            response.raise_for_status()
+            result = response.json()
+    except httpx.HTTPStatusError as exc:
+        logger.exception("❌ Quant engine portfolio run failed | http_status=%s", exc.response.status_code)
+        raise RuntimeError(
+            f"Quant engine portfolio backtest failed with HTTP {exc.response.status_code}."
+        ) from exc
+    except httpx.HTTPError as exc:
+        logger.exception("📡❌ Failed to reach quant engine for portfolio backtest")
+        raise RuntimeError("Failed to reach the quant engine service.") from exc
+
+    if not isinstance(result, dict) or "metrics" not in result:
+        raise ValueError("Quant engine returned an unexpected portfolio response payload.")
+    logger.info(
+        "✅ Quant engine /run-portfolio-sync complete | members=%s fills=%s ref=%s",
+        len(result.get("members") or []), result.get("metrics", {}).get("total_trades"),
+        result.get("backtest_ref_id"),
+    )
+    return result

@@ -86,12 +86,29 @@ HARD RULES (a violation makes the strategy un-runnable and will be rejected):
                                           the system computes percent = stop% × ratio)
      • fixed-percentage basis         → type="percent"      (value = the percent)
      • ATR / fixed-points / indicator → the matching type, mirroring rule 3
-   Never substitute a default ratio when the user gave one. The spec carries a SINGLE static target, so
-   if the user names several scaled targets (e.g. multiple R-multiples or partial exits), use the
-   furthest as `take_profit` and record the full ladder in intent_summary so nothing is dropped.
+   Never substitute a default ratio when the user gave one.
+   SINGLE target → use `take_profit.type` + `take_profit.value` (the existing scalar path).
+   MULTIPLE targets (TP1/TP2/TP3, "exit in tranches", "scale out") → use `take_profit.targets`
+   (a list of TakeProfitTarget rungs). Do NOT set `take_profit.value` when `targets` is non-empty —
+   the ladder supersedes it. Each rung carries:
+     • type          — "risk_reward" or "percent"
+     • value         — the EXACT R-multiple or percent the user named
+     • exit_fraction — fraction of the original position to exit at this rung (must sum ≤1.0;
+                       use null to share the remainder equally across unset rungs)
+     • risk_action   — optional SL mutation after this rung fires:
+         "move_sl_to_breakeven"   — move SL to the entry price
+         "move_sl_to_previous_tp" — move SL to the previous rung's price
+         "none"                   — no SL change (default)
+   Example (TP1=1R exit 30% move-SL-to-BE, TP2=2R exit 30%, TP3=4R exit 40%):
+     "targets": [
+       {"type":"risk_reward","value":1,"exit_fraction":0.30,"risk_action":{"type":"move_sl_to_breakeven"}},
+       {"type":"risk_reward","value":2,"exit_fraction":0.30,"risk_action":{"type":"none"}},
+       {"type":"risk_reward","value":4,"exit_fraction":0.40,"risk_action":{"type":"none"}}
+     ]
+   Leave `trailing_take_profit` unset when using a targets ladder (they are mutually exclusive).
    `take_profit` is OPTIONAL: OMIT it (set null) when a `trailing_take_profit` provides the profit
    exit instead (see rule 5). Every strategy still needs SOME profit exit — either a static
-   `take_profit` OR a `trailing_take_profit`.
+   `take_profit` (scalar or ladder) OR a `trailing_take_profit`.
 5. TRAILING exits (optional) — when the user wants the stop OR the target to FOLLOW price
    as the trade moves in their favour (a "trailing" / "ratchet" / "let the winner run" idea),
    capture it on the matching block. Phase 1 supports a PERCENT give-back only (type="percent"):
@@ -104,17 +121,36 @@ HARD RULES (a violation makes the strategy un-runnable and will be rejected):
        activate_after_pct:<profit % before it engages>}.
    distance_pct = how far behind the running peak (long) / trough (short) the exit trails;
    activate_after_pct = the profit the trade must reach before trailing engages (omit ⇒ immediate).
-   A strategy may trail EITHER the stop OR the take-profit, NEVER both (two ratcheting lines
-   would chase the same peak) — pick the one the user asked for. Capture the user's exact percentages.
-   CRITICAL — "small target THEN trail / convert to trailing after the first target / let it run":
-   this means the first target is the ACTIVATION, not a hard exit. Set
-   `trailing_take_profit.activate_after_pct` = that first-target percent and OMIT the static
+   `distance_pct` is REQUIRED for any percent trailing block — it IS the trail amount. NEVER emit a
+   `trailing_stop`/`trailing_take_profit` with only `activate_after_pct`; without `distance_pct` the
+   block is rejected. If the user gave no give-back distance, do not invent a trailing block at all.
+   A strategy MAY trail the stop, the take-profit, or BOTH. They do NOT conflict — the engine runs
+   both lines and exits on whichever a reversal reaches first. When the user asks for BOTH ("trail my
+   stop by 1% after +3%, AND a trailing take-profit after +8% with a 2% give-back") set BOTH blocks —
+   never drop one. Capture the user's exact percentages. Avoid a REDUNDANT pair, though: if one line
+   is always at least as tight AND activates no later than the other, the other can never fire — only
+   set both when their distances/activations differ meaningfully (a staged trail).
+   WHICH BLOCK — decide by WHAT the user trails, NOT by whether it activates after a gain:
+     • "stop" / "trail my stop" / "trailing stop" / "move my SL up" → `trailing_stop`, EVEN IF it
+       only kicks in after a gain. "Once up 2%, trail my stop by 0.5%" → trailing_stop with
+       activate_after_pct:2, distance_pct:0.5. An activation threshold does NOT make it a target.
+     • "profit" / "target" / "take-profit" / "let the winner run" / "lock in gains" → `trailing_take_profit`.
+   A `trailing_stop` is a COMPLETE exit on its own (it ratchets above entry and books the gain on a
+   reversal). When the user asks only for a trailing stop and names no target, set `trailing_stop`,
+   OMIT the static `take_profit` (null), and do NOT invent a target or reframe it as trailing_take_profit.
+   CRITICAL — only when the user names a profit TARGET to trail ("small target THEN trail / convert
+   to trailing after the first target / let it run"): the first target is the ACTIVATION, not a hard
+   exit. Set `trailing_take_profit.activate_after_pct` = that first-target percent and OMIT the static
    `take_profit` (null). Do NOT set a static `take_profit` at (or below) the activation level — a
    static target there fires FIRST and the trade exits before trailing can ever run, defeating the
    request. Only add a static `take_profit` ALONGSIDE a trailing one if the user explicitly wants a
    hard safety CAP, and then it MUST sit well ABOVE `activate_after_pct`.
 6. timeframe MUST be one of the supported timeframes; market should map to a known
    market id; objective and direction MUST be from their allowed lists.
+   When the user gives NO explicit timeframe, default it to MATCH the holding style they imply:
+   scalping / day-trading / intraday → 1m–15m; SWING (multi-day holds) → 1d (or 1h–4h only if they
+   hint at a shorter swing); positional / investing / long-term → 1d–1w. A "swing" or "positional"
+   strategy must NEVER default to 1m — that is scalping and contradicts the stated style.
 7. direction="both" REQUIRES short_entry_condition (and ideally short_exit_condition).
    For a single-sided short strategy use direction="short_only" with the short logic
    in entry_condition/exit_condition.
@@ -158,6 +194,45 @@ OUTPUT:
 """.strip()
 
 
+_UNIVERSE_RULES = """
+DYNAMIC UNIVERSE (instrument SELECTION RULE instead of one symbol):
+When the user names a RULE for picking instruments rather than a single instrument —
+e.g. "the 10 most active NIFTY-500 stocks above their VWAP", "top 10 crypto by volume",
+"biggest gainers in banking", "strongest stocks near 52-week highs" — emit a `universe`
+block and leave `symbol` null. A spec has EITHER `symbol` OR `universe`, never both.
+When the user names ONE concrete instrument (e.g. "TCS", "BTCUSDT"), set `symbol` and
+leave `universe` null exactly as before.
+
+Build the `universe` block from the user's words (preserve every value verbatim):
+  • source — where the candidate pool comes from:
+      "NIFTY 500 / NIFTY 50 / an index"  → {kind:"index",   name:"<INDEX>"}
+      "banking / IT / a sector"          → {kind:"sector",  name:"<sector>"}
+      "F&O / futures-and-options names"  → {kind:"f_and_o"}
+      "all crypto / any coin / top coins"→ {kind:"crypto_all"}
+      an explicit list of symbols        → {kind:"watchlist", symbols:[...]}
+  • screen — boolean filters in the SAME grammar as entry_condition (e.g. "above VWAP"
+      → ["CLOSE > VWAP"]). A candidate must pass ALL. Empty when the user gave none.
+  • rank — map the user's selection intent to `rank.by` (+ order):
+      "most active / most traded"        → by:"rvol",         order:"desc"
+      "biggest gainers / top movers up"  → by:"pct_change",   order:"desc"
+      "biggest losers / down the most"   → by:"pct_change",   order:"asc"
+      "strongest / relative strength"    → by:"rel_strength", order:"desc"
+      "strongest momentum"               → by:"momentum",     order:"desc"
+      "most oversold"                    → by:"rsi",          order:"asc"
+      "most volatile"                    → by:"atr_pct",      order:"desc"
+      "nearest 52-week highs"            → by:"distance_52w", order:"asc"
+  • take — the N the user stated ("top 10" → 10); default 10 when unstated.
+  • max_positions — the user's concurrent cap ("max 5 positions" → 5); default = take.
+  • refresh — when membership is re-resolved: {cadence:"daily"|"weekly"|"intraday",
+      at:"HH:MM"} ("every morning one hour after open" → cadence:"daily", at:"10:15"
+      for NSE). Default cadence:"daily".
+  • eligibility / breadth — set only if the user asked (e.g. a liquidity floor → min_adv).
+Everything else (entry/exit/stop/target/gates) is authored EXACTLY as for a single
+symbol — that body is run per selected member. Set each universe field's intent
+faithfully; do not invent constraints the user did not state.
+""".strip()
+
+
 def build_strategy_system_prompt() -> str:
     """Assemble the full system prompt from live engine vocabulary + the spec schema."""
     grammar = vocab.grammar_summary_for_prompt()
@@ -177,6 +252,7 @@ def build_strategy_system_prompt() -> str:
         f"{grammar}\n\n"
         f"{enums}\n"
         f"{_COMPLEXITY_RULES}\n\n"
+        f"{_UNIVERSE_RULES}\n\n"
         f"{_RULES}\n\n"
         "STRATEGY SPEC JSON SCHEMA (your output MUST conform):\n"
         f"{schema}\n"

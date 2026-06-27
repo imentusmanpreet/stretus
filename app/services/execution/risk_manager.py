@@ -264,6 +264,60 @@ class RiskManager:
             messages=messages,
         )
 
+    def compute_tp_ladder(
+        self,
+        entry_price: float,
+        stop_loss_price: float,
+        total_quantity: Decimal,
+        tp_targets: List[dict],
+        asset_class: AssetClass,
+        tick_size: float = 0.05,
+        lot_size: int = 1,
+        qty_step: Optional[float] = None,
+    ) -> "TpLadder":
+        """Resolve multi-TP rung specs to absolute prices and per-rung quantities.
+
+        Resolves prices at entry time so R-multiple rungs honour the actual fill and
+        SL distance rather than any pre-computed approximation.
+        """
+        from app.schemas.execution import TpLadder, TpRungState  # local to avoid circular import
+
+        risk_per_unit = abs(entry_price - stop_loss_price) or (entry_price * 0.01)
+        is_short = stop_loss_price > entry_price
+        rungs: list[TpRungState] = []
+
+        for rung in tp_targets:
+            tp_type     = str(rung.get("type", "risk_reward")).lower()
+            value       = float(rung.get("value", 1.0))
+            frac        = float(rung.get("exit_fraction", 0.0))
+            risk_action = str(rung.get("risk_action", "none"))
+            rung_index  = int(rung.get("rung_index", len(rungs)))
+
+            if tp_type == "risk_reward":
+                raw_price = (
+                    entry_price - value * risk_per_unit if is_short
+                    else entry_price + value * risk_per_unit
+                )
+            else:  # percent
+                raw_price = (
+                    entry_price * (1.0 - value / 100.0) if is_short
+                    else entry_price * (1.0 + value / 100.0)
+                )
+            rounded_price = self._round_tick(raw_price, tick_size)
+            raw_qty  = float(total_quantity) * frac
+            exit_qty = self._round_quantity(raw_qty, asset_class=asset_class, lot_size=lot_size, qty_step=qty_step)
+
+            rungs.append(TpRungState(
+                rung_index=rung_index,
+                price=rounded_price,
+                exit_fraction=frac,
+                exit_qty=exit_qty,
+                hit=False,
+                risk_action=risk_action,
+            ))
+
+        return TpLadder(rungs=rungs, total_quantity=total_quantity)
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _extract_sl_tp(

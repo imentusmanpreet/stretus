@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.backtest import TradeEntryReason, TradeExitReason
+from app.strategy.spec import UniverseSpec
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
@@ -165,26 +166,55 @@ class TrailingOrderSpec(BaseModel):
     fire: Literal["market"] = "market"
 
 
+class TpRungState(BaseModel):
+    """Runtime state for one rung of a multi-TP ladder on an open position."""
+
+    rung_index: int
+    price: float = Field(..., description="Absolute target price for this rung.")
+    exit_fraction: float = Field(..., gt=0, le=1, description="Fraction of original position to exit.")
+    exit_qty: Quantity = Field(..., description="Absolute quantity to exit at this rung.")
+    hit: bool = Field(False, description="True once this rung has been executed.")
+    risk_action: str = Field("none", description="SL mutation after firing: none|move_sl_to_breakeven|move_sl_to_previous_tp")
+
+
+class TpLadder(BaseModel):
+    """Full take-profit ladder attached to an open position."""
+
+    rungs: List[TpRungState]
+    total_quantity: Quantity = Field(..., description="Full position size at entry.")
+
+
 class SlTpConfig(BaseModel):
     type: Literal["percent"] = "percent"
     stop_loss_pct: float = Field(..., gt=0, le=50)
-    # take_profit_pct may be 0 when a trailing_take_profit supplies the profit exit
-    # (a static target at the trailing activation level would fire first and starve
-    # the trail). The validator enforces "static target OR trailing", and the two
-    # trailing legs are mutually exclusive (one ratcheting line, not two).
+    # take_profit_pct may be 0 when a trailing_take_profit or multi_take_profit
+    # supplies the profit exit. The validator enforces at least one profit exit.
     take_profit_pct: float = Field(0.0, ge=0, le=100)
     trailing_take_profit: Optional[TrailingOrderSpec] = None
     trailing_stop: Optional[TrailingOrderSpec] = None
+    # Multi-TP ladder: list of rung specs. When set, take_profit_pct must be 0.
+    multi_take_profit: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description=(
+            "Multi-TP ladder rungs. Each: {type, value, exit_fraction, risk_action}. "
+            "When set, take_profit_pct must be 0 and trailing_take_profit must be None."
+        ),
+    )
 
     @model_validator(mode="after")
     def _require_profit_exit_and_one_trail(self) -> "SlTpConfig":
-        if self.take_profit_pct <= 0 and self.trailing_take_profit is None:
+        has_multi_tp = bool(self.multi_take_profit)
+        if self.take_profit_pct <= 0 and self.trailing_take_profit is None and not has_multi_tp:
             raise ValueError(
-                "take_profit_pct must be > 0 unless a trailing_take_profit is set."
+                "take_profit_pct must be > 0 unless a trailing_take_profit or multi_take_profit is set."
             )
         if self.trailing_stop is not None and self.trailing_take_profit is not None:
             raise ValueError(
                 "trailing_stop and trailing_take_profit are mutually exclusive."
+            )
+        if has_multi_tp and self.trailing_take_profit is not None:
+            raise ValueError(
+                "multi_take_profit and trailing_take_profit are mutually exclusive."
             )
         return self
 
@@ -327,6 +357,9 @@ class OpenPosition(BaseModel):
     stop_loss_price: Optional[float] = None
     take_profit_price: Optional[float] = None
     entry_bar_index: Optional[int] = None
+    # Multi-TP ladder state. None = single-TP mode (legacy behaviour).
+    # Rungs with hit=True have already been executed and are skipped by the evaluator.
+    take_profit_ladder: Optional[TpLadder] = None
 
 
 class ExecutionStatePayload(BaseModel):
@@ -350,12 +383,61 @@ class ExecutionStatePayload(BaseModel):
 
 # ── Request Models ─────────────────────────────────────────────────────────────
 
+class UniverseBlock(BaseModel):
+    """Dynamic-universe extension of the evaluate request (presence ⇒ portfolio evaluation).
+
+    The per-member strategy BODY is the request's own ``strategy_config`` (its ``symbol`` is a
+    placeholder, stamped per member). This block adds the PORTFOLIO-level inputs that have no
+    meaning for a single symbol: the member set (omit to load the deployment's active members),
+    the shared-capital pool, the concurrent-position cap (clamped to the platform ceiling), and
+    every member's open positions. When present, the endpoint returns a
+    :class:`~app.schemas.universe_execution.UniverseEvaluateResponse` instead of the per-symbol
+    response — the static single-symbol path is unaffected.
+    """
+
+    deployment_id: str = Field(..., description="Identifier for this dynamic deployment (audit/logging).")
+    # Member-resolution precedence: explicit `members` (override) → live `rule` (resolve now) →
+    # the deployment's active members in the DB (cadence-driven).
+    rule: Optional[UniverseSpec] = Field(
+        None,
+        description="A dynamic-universe selection RULE (source/rank/take). When set (and `members` "
+        "is omitted), the endpoint resolves the universe LIVE at request time (top-N) and trades "
+        "the result — a self-contained, stateless dynamic call (no table, no pre-seeding).",
+    )
+    members: Optional[List[str]] = Field(
+        None,
+        description="Explicit member symbols (override, for testing). Omit to resolve the `rule` "
+        "live, or — if no rule — to load the deployment's active members from the DB.",
+    )
+    # OMS-owned state. Optional in the schema so we can FAIL CLOSED in live mode when the OMS
+    # omits them (an evaluator must never assume capital/flat-positions for real money). Paper
+    # may default. None ⇒ "not supplied" (distinct from an explicit empty list = "flat").
+    total_capital: Optional[float] = Field(
+        None, gt=0, description="Shared capital pool (from the OMS). Required for mode=live."
+    )
+    max_positions: int = Field(2, gt=0, description="Concurrent-position cap (clamped to the platform ceiling).")
+    sizing_mode: Literal["equal_weight", "risk_based"] = "equal_weight"
+    risk_per_trade_pct: float = Field(1.0, gt=0)
+    open_positions: Optional[List[OpenPosition]] = Field(
+        None,
+        description="The deployment's open positions across ALL members (from the OMS). "
+        "Required for mode=live; an explicit [] means flat.",
+    )
+    bars_since_last_trade: int = Field(
+        0, ge=0,
+        description="Bars elapsed since the deployment's last trade, used by the cooldown account "
+        "gate (an entry is blocked while this is below the strategy's cooldown_bars, default 5). "
+        "Production: supplied by the OMS. Testing: set high (e.g. 999) to bypass the cooldown.",
+    )
+
+
 class EvaluateExecuteRequest(BaseModel):
     """
     Unified request for POST /strategy/evaluate/execute.
 
-    Exactly one of (strategy_id) OR (strategy_config + execution_state)
-    must be provided.
+    Static (single symbol): exactly one of (strategy_id) OR (strategy_config + execution_state).
+    Dynamic (universe): strategy_config (the per-member body) + a ``universe`` block. The
+    presence of ``universe`` selects the portfolio-evaluation path; everything else is unchanged.
     """
 
     # Mode 1 fields
@@ -378,12 +460,32 @@ class EvaluateExecuteRequest(BaseModel):
         description="Inline execution state. Required for Mode 2.",
     )
 
+    # Dynamic-universe extension (presence ⇒ portfolio evaluation; see UniverseBlock).
+    universe: Optional[UniverseBlock] = Field(
+        None,
+        description="Dynamic-universe portfolio inputs. When set, the per-member body is "
+        "'strategy_config' and the response is a portfolio-level UniverseEvaluateResponse.",
+    )
+
     @model_validator(mode="after")
     def _validate_mode(self) -> "EvaluateExecuteRequest":
         has_id = self.strategy_id is not None
         has_config = self.strategy_config is not None
         has_state  = self.execution_state is not None
 
+        # ── Dynamic path: a universe block needs the per-member body in strategy_config.
+        # execution_state is NOT required (open positions live on the universe block).
+        if self.universe is not None:
+            if not has_config:
+                raise ValueError(
+                    "'strategy_config' (the per-member strategy body) is required when a "
+                    "'universe' block is provided."
+                )
+            if has_id:
+                raise ValueError("Provide either 'strategy_id' OR a 'universe' block, not both.")
+            return self
+
+        # ── Static path (unchanged) ───────────────────────────────────────────
         if not has_id and not has_config:
             raise ValueError(
                 "Provide either 'strategy_id' (Mode 1) or "
@@ -484,7 +586,7 @@ class BracketOrder(BaseModel):
 class ExitInstruction(BaseModel):
     position_id: str
     symbol: str
-    reason: Literal["stop_loss", "take_profit", "exit_signal", "time_based"]
+    reason: Literal["stop_loss", "take_profit", "exit_signal", "time_based", "partial_take_profit"]
     exit_price: float
     quantity: Quantity
     product_type: ProductType
@@ -518,6 +620,13 @@ class EvaluateExecuteResponse(BaseModel):
     ltp: Optional[float] = None
     mode: EvaluationMode = EvaluationMode.paper
     bracket_order: Optional[BracketOrder] = None
+    multi_tp_bracket: Optional[dict] = Field(
+        None,
+        description=(
+            "Populated instead of bracket_order when the strategy uses a multi-TP ladder. "
+            "Contains entry_order, stop_loss_order, and take_profit_orders (list)."
+        ),
+    )
     exits: List[ExitInstruction] = Field(default_factory=list)
     risk_snapshot: Optional[RiskSnapshot] = None
     entry_detail: Optional[TradeEntryReason] = None

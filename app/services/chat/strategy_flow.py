@@ -304,6 +304,7 @@ def build_backtest_result_reply(
     backtest_result: dict,
     *,
     multi_result: Any = None,
+    display_symbol: str | None = None,
 ) -> str:
     # Multi-asset: when more than one asset ran, lead with a side-by-side
     # comparison table. `multi_result` is a MultiAssetBacktestResult (duck-typed
@@ -315,9 +316,14 @@ def build_backtest_result_reply(
     metrics = backtest_result.get("metrics") if isinstance(backtest_result, dict) else {}
     assessment = backtest_result.get("assessment") if isinstance(backtest_result, dict) else {}
 
+    # `display_symbol` is set only for a single-asset run whose symbol was
+    # overridden via the run_backtest `symbols` arg (e.g. "run backtest for tcs"
+    # on a HINDALCO strategy). The override changes which OHLCV is simulated but
+    # NOT the session strategy, so we label the header with the asset the user
+    # actually asked for. None → legacy behaviour (the strategy's own symbol).
     return compose_response(
         "workflow.backtest_complete",
-        asset=_asset_label(builder),
+        asset=display_symbol or _asset_label(builder),
         passed=backtest_result.get("pass"),
         total_return_pct=(metrics or {}).get("total_return_pct"),
         win_rate=(metrics or {}).get("win_rate"),

@@ -1,0 +1,235 @@
+<mxfile host="app.diagrams.net" modified="2026-06-17T00:00:00.000Z" agent="claude-code" version="24.0.0" type="device">
+  <diagram id="dynamic-universe" name="Dynamic Universe Architecture">
+    <mxGraphModel dx="1600" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ===================== CONTAINERS (drawn behind) ===================== -->
+        <mxCell id="C1" value="1 · Authoring &amp; Compilation  (LLM-only; static path untouched)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="1400" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="C2" value="2 · Universe Rule  (four slots — lives inside StrategySpec)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="300" width="1400" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="C3" value="3 · Universe Resolver  (resolver.py — generalized scanner; point-in-time, fail-closed, hashed)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="490" width="1400" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="C4" value="4 · Data Layer  (lazy · two-tier · streaming · bounded memory)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="690" width="1400" height="250" as="geometry" />
+        </mxCell>
+        <mxCell id="C5" value="5 · Backtest Path  (quant_engine — portfolio loop wraps existing per-symbol sim)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="970" width="680" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="C6" value="6 · Live Execution Path  (scheduler · spawn/retire · portfolio risk · OMS)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="760" y="970" width="680" height="330" as="geometry" />
+        </mxCell>
+        <mxCell id="C7" value="7 · Persistence  (PostgreSQL · ai_strategy schema)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=10;fontStyle=1;fontSize=13;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1330" width="1400" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 1: AUTHORING ===================== -->
+        <mxCell id="U1" value="User NL prompt&#10;&quot;top 10 crypto by volume&quot;&#10;&quot;F&amp;O 52W highs, top 10 RS&quot;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="100" width="190" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U2" value="LLM Orchestrator&#10;OpenRouter / Groq / Ollama&#10;strategy_prompt.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="100" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U3" value="StrategySpec (Pydantic)&#10;spec.py — NEW universe block&#10;symbol XOR universe" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="100" width="210" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="U4" value="Validator + repair loop&#10;validator.py / generator.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="760" y="105" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="U5" value="universe&#10;is None?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="975" y="95" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="S1" value="STATIC path (unchanged)&#10;single symbol →&#10;run_backtest / strategy_evaluator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="100" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="API" value="API v1 routes (DYNAMIC branch)&#10;backtest.py / execution.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="240" width="240" height="45" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="LEG" value="Legend:  blue=authoring · green=universe-rule/static · orange=resolver · yellow=data · purple=backtest · red=live · teal=external · cylinder=store/DB&#10;Invariants: reuse-not-rewrite · no look-ahead · fail-closed · bounded memory · hashed snapshots · shared capital in Portfolio Manager" style="text;html=1;whiteSpace=wrap;align=left;verticalAlign=middle;fontSize=10;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="820" y="232" width="600" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 2: UNIVERSE RULE ===================== -->
+        <mxCell id="RSRC" value="SOURCE&#10;Nifty 50/100/500 · Bank Nifty&#10;F&amp;O Stocks · Crypto Universe&#10;Custom Watchlist" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="350" width="250" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="RSCR" value="SCREEN  (per-symbol predicates)&#10;New 52W H/L · ATH/ATL&#10;Break Prev H/L · Gap Up/Down · ORB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="350" y="350" width="290" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="RRANK" value="RANK  (top-N metric)&#10;Top Gainers/Losers · Volume · RS&#10;Momentum · Volatility&#10;Delivery Volume* · OI Change*" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="670" y="350" width="300" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="RBR" value="MARKET CONTEXT / BREADTH  (gate) — NEW&#10;Advance/Decline Ratio&#10;New-High/New-Low Ratio&#10;Sector Strength · Market Trend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="350" width="370" height="95" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 3: RESOLVER ===================== -->
+        <mxCell id="RES1" value="1. Source pool&#10;(point-in-time&#10;constituents)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="540" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="RES2" value="2. Screen&#10;(condition&#10;compiler reuse)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="270" y="540" width="160" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="RES3" value="3. Eligibility&#10;ADV · tradable&#10;not-in-circuit&#10;(FAIL-CLOSED)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="460" y="535" width="180" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="RES4" value="4. Rank +&#10;Take-N" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="670" y="540" width="140" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="RES5" value="5. Breadth gate&#10;(market_context)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="840" y="540" width="170" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="RES6" value="6. Snapshot + hash&#10;→ persist&#10;(reproducible)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="540" width="180" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 4: DATA LAYER ===================== -->
+        <mxCell id="DP" value="DataProvider&#10;lazy · cache · evict" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="750" width="180" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="TA" value="Tier A — SCREENING&#10;DAILY bars, cadence-only&#10;(cheap, all candidates)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="745" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="TB" value="Tier B — EXECUTION&#10;strategy-TF / 1-min (intrabar)&#10;MEMBERS ONLY · streamed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="540" y="745" width="230" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="MC" value="Daily Metrics Cache&#10;rvol · RS · 52w · ADV&#10;delivery · OI" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="290" y="845" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="CS" value="Columnar OHLCV Store&#10;ClickHouse / Parquet&#10;(range-sliced reads)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="1">
+          <mxGeometry x="800" y="745" width="210" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ING" value="Ingestion job&#10;backfill + incremental&#10;(idempotent, rate-limited)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="800" y="850" width="210" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="EXT" value="External Feeds&#10;Upstox · Binance&#10;NSE delivery* · OI*&#10;index constituents" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b0e3e6;strokeColor=#0e8088;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="750" width="280" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 5: BACKTEST ===================== -->
+        <mxCell id="BT1" value="Portfolio Backtest loop&#10;runner.py: run_portfolio_backtest&#10;(stream by time-chunk)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1025" width="290" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="BT2" value="At refresh point →&#10;Resolver(asof, point-in-time)&#10;→ snapshot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1115" width="290" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="BT3" value="Membership diff&#10;spawn(warm-up) / retire(flatten) · evict" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1200" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="BT4" value="Per-symbol sim (REUSED)&#10;simulator · conditions · indicators" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1025" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="BT5" value="Portfolio Manager (backtest)&#10;portfolio.py — shared capital,&#10;max_positions, sizing, sector cap" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1115" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="BT6" value="Portfolio result&#10;equity curve · metrics · snapshots&#10;survivorship_mode · skip reasons" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1200" width="300" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 6: LIVE ===================== -->
+        <mxCell id="LV1" value="Universe Scheduler&#10;universe_scheduler.py (APScheduler)&#10;+ Postgres advisory lock" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="790" y="1025" width="290" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="LV2" value="Refresh: Resolver(live, asof=now)&#10;→ snapshot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="790" y="1115" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="LV3" value="Membership diff&#10;spawn(warm-up) / retire(square-off)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="790" y="1195" width="290" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="LV4" value="Per-member evaluate (REUSED)&#10;strategy_evaluator.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="1025" width="290" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="LV5" value="Portfolio Risk Manager (live)&#10;max_positions · shared capital&#10;sector cap (risk_manager.py)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="1115" width="290" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="LV6" value="OMS fan-out → Brokers&#10;Upstox / Binance · bracket orders&#10;idempotent client IDs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="1200" width="290" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== BAND 7: PERSISTENCE ===================== -->
+        <mxCell id="DB1" value="universe_membership&#10;(point-in-time constituents)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="1">
+          <mxGeometry x="90" y="1375" width="230" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="DB2" value="universe_snapshots&#10;(members + hash + mode)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1375" width="230" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="DB3" value="universe_members&#10;(live runtime state)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="1">
+          <mxGeometry x="650" y="1375" width="230" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="DB4" value="risk_execution_config&#10;(+portfolio scope · rms_sources)" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;boundedLbl=1;backgroundOutline=1;size=12;" vertex="1" parent="1">
+          <mxGeometry x="930" y="1375" width="250" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- ===================== EDGES ===================== -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="U1" target="U2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="U2" target="U3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="U3" target="U4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="U4" target="U5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" value="static" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="U5" target="S1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" value="dynamic" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="U5" target="API"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" value="spec contains universe" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="U3" target="RSRC"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="e8" value="backtest" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="API" target="BT1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e9" value="live deploy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="API" target="LV1"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- rule slots feed resolver -->
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="RSRC" target="RES1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="RSCR" target="RES2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="RRANK" target="RES4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="RBR" target="RES5"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- resolver pipeline -->
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="RES1" target="RES2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="RES2" target="RES3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="RES3" target="RES4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="RES4" target="RES5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="RES5" target="RES6"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- resolver to data + db -->
+        <mxCell id="e19" value="screening reads" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="RES1" target="DP"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e20" value="read constituents" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="RES1" target="DB1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e21" value="write snapshot" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="RES6" target="DB2"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- data layer wiring -->
+        <mxCell id="e22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="DP" target="TA"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e23" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="DP" target="TB"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;" edge="1" parent="1" source="TA" target="MC"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e25" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="TA" target="CS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="TB" target="CS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="ING" target="CS"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="EXT" target="ING"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e29" value="live fetch fallback" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="EXT" target="DP"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- backtest internal -->
+        <mxCell id="e30" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="BT1" target="BT2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e31" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="BT2" target="BT3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e32" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="BT3" target="BT4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e33" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="BT4" target="BT5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e34" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="BT5" target="BT6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e35" value="calls resolver" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="BT2" target="RES1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e36" value="exec data (lazy)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="BT4" target="TB"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <!-- live internal -->
+        <mxCell id="e37" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="LV1" target="LV2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e38" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="LV2" target="LV3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e39" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="LV3" target="LV4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e40" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="LV4" target="LV5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e41" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;" edge="1" parent="1" source="LV5" target="LV6"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e42" value="calls resolver" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="LV2" target="RES1"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e43" value="exec data (lazy)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="LV4" target="TB"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e44" value="active members" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="LV3" target="DB3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e45" value="orders" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;" edge="1" parent="1" source="LV6" target="EXT"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e46" value="risk config" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="LV5" target="DB4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e47" value="snapshots" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;fontSize=10;" edge="1" parent="1" source="BT6" target="DB2"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

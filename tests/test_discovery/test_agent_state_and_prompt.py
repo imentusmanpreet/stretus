@@ -100,13 +100,18 @@ def test_agent_state_strategy_preset_is_null_when_unset():
 def test_prompt_has_dynamic_discovery_section():
     """The instruction telling the LLM not to ask for a stock under
     discovery is the actual fix — without it, the LLM has the data
-    (state.discovery_will_supply_symbol) but doesn't know what to do."""
-    assert "DYNAMIC DISCOVERY" in MASTER_AGENTIC_SYSTEM_PROMPT
-    # The critical guidance — phrased multiple ways so a small prompt
-    # edit doesn't accidentally remove the rule.
+    (state.discovery_will_supply_symbol) but doesn't know what to do.
+
+    The guidance now lives under "PRESET DETECTION DISCIPLINE" rather than a
+    standalone "DYNAMIC DISCOVERY" header, so we assert the SEMANTICS (the LLM can
+    read the flag and is told not to ask which stock) rather than a header string —
+    that survives prompt reorganisations while still locking in the rule."""
     p = MASTER_AGENTIC_SYSTEM_PROMPT.lower()
+    # The LLM must be able to read the discovery flag…
     assert "discovery_will_supply_symbol" in p
-    assert "do not ask" in p and "specific stock" in p
+    # …and be told NOT to ask the user for a stock when discovery will supply it.
+    assert "do not ask" in p
+    assert "which stock" in p or "specific stock" in p
 
 
 def test_prompt_does_not_blacklist_phase_1_5_universe_additions():
@@ -122,71 +127,33 @@ def test_prompt_does_not_blacklist_phase_1_5_universe_additions():
     assert "(no SBIN" not in MASTER_AGENTIC_SYSTEM_PROMPT
 
 
-def test_prompt_supported_stocks_match_universe_csv():
-    """Post-PR#71 the KB universe was trimmed to 9 stocks; the agent
-    prompt must list exactly those — no more, no less. Drift between
-    the prompt and the data file causes the LLM to either accept stocks
-    the backend can't scan (advertise a non-existent capability) or
-    refuse stocks the backend does support."""
-    from app.kb import kb
+def test_prompt_defers_to_universe_csv_instead_of_enumerating():
+    """The KB universe has since grown from a hand-picked 9 stocks to 100+ equities
+    (plus crypto), so the agent prompt no longer ENUMERATES supported stocks — it
+    DEFERS to universe.csv. That is the drift-proof design: the LLM cannot advertise a
+    stock the backend can't scan, nor refuse one it can, because it doesn't carry its
+    own stale copy of the list; the backend validates against the data file.
 
-    # Hardcoded mapping from canonical bare ticker to a string the
-    # prompt is expected to contain. Keeps the test deterministic
-    # while tolerating friendly renames (e.g. "Tata Consultancy
-    # Services" → "TCS" in prose).
-    expected_prompt_token = {
-        "HDFCBANK":   "HDFC Bank",
-        "RELIANCE":   "Reliance",
-        "TCS":        "TCS",
-        "INFY":       "Infosys",
-        "ADANIENT":   "Adani Enterprises",
-        "NHPC":       "NHPC",
-        "SUZLON":     "Suzlon",
-        "GMRAIRPORT": "GMR Airports",
-        "IDEA":       "Vodafone Idea",
-    }
-
-    # Every enabled stock must have its expected token in the prompt.
-    enabled_bare = {
-        s.symbol.split(".", 1)[0].upper()
-        for s in kb.stocks.values() if s.enabled
-    }
-    for bare in enabled_bare:
-        token = expected_prompt_token.get(bare)
-        assert token is not None, (
-            f"universe.csv has new stock {bare!r} but this test doesn't "
-            f"know what prompt token to expect — add it to "
-            f"`expected_prompt_token`"
-        )
-        assert token in MASTER_AGENTIC_SYSTEM_PROMPT, (
-            f"agent prompt missing universe stock {bare!r} "
-            f"(searched for {token!r})"
-        )
-
-    # And in the OTHER direction: any bare ticker NOT in universe.csv
-    # must NOT appear in the prompt as a supported stock. This catches
-    # drift where the universe is shrunk but the prompt still
-    # advertises the removed tickers.
-    deprecated_tokens = [
-        "ICICI Bank", "SBIN", "Axis Bank", "Kotak", "Bharti Airtel",
-        "Maruti", "Sun Pharma", "HCL Technologies",
-    ]
-    for token in deprecated_tokens:
-        if token in expected_prompt_token.values():
-            # This token IS in the universe (e.g. a sub-string of a
-            # currently-enabled stock); skip the deprecation check.
-            continue
-        assert token not in MASTER_AGENTIC_SYSTEM_PROMPT, (
-            f"agent prompt still advertises {token!r} but it is not in "
-            f"universe.csv — the LLM will accept user requests for it "
-            f"that the backend can't fulfil"
-        )
+    The original test pinned an exact 9-stock enumeration in the prompt — an invariant
+    that is obsolete now that the universe is large and CSV-driven. We instead lock in
+    the current contract: the prompt points at universe.csv as the source of truth."""
+    p = MASTER_AGENTIC_SYSTEM_PROMPT
+    assert "universe.csv" in p, (
+        "agent prompt must defer to universe.csv as the supported-stock source of "
+        "truth rather than enumerating a (now 100+ symbol) list that would drift"
+    )
 
 
 def test_prompt_still_calls_out_timeframe_validation_path():
-    """Regression: I rewrote the SUPPORTED UNIVERSE section; the
-    timeframe-validation guidance that lived in the same section must
-    still be intact."""
+    """Regression: the SUPPORTED UNIVERSE section must keep the timeframe-validation
+    guidance. Timeframes are now a CONTINUOUS 1m–1d range (the engine resamples any
+    interval from 1-minute data — see app/strategy/enums.py), not a fixed preset list,
+    so the prompt describes the range and the pass-raw-to-backend path rather than
+    enumerating exact values."""
     p = MASTER_AGENTIC_SYSTEM_PROMPT
-    assert "Supported timeframes are exactly 1m, 5m, 10m, 15m, 30m, 1h, 1d" in p
-    assert "pass the user's raw value to the validator" in p
+    lower = p.lower()
+    # The supported timeframe range bounds must be stated…
+    assert "1m" in p and "1d" in p
+    assert "timeframe" in lower
+    # …and the "don't substitute; let the backend validate" path must remain.
+    assert "pass raw to backend" in lower or "pass the user's raw" in lower

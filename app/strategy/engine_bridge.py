@@ -129,6 +129,26 @@ def pattern_identifiers() -> frozenset[str]:
     return frozenset(_import_conditions()._PATTERN_IDENTIFIERS)
 
 
+def candlestick_names() -> frozenset[str]:
+    """Every TA-Lib candlestick pattern the engine can compute, as ``CDL_*`` aliases.
+
+    Read LIVE from the engine's TA-Lib pattern map (``talib`` Pattern Recognition
+    group), so the prompt and validator know exactly which CDL_* names are real —
+    a name not in this set produces an all-NaN column (⇒ silent zero trades), so
+    the validator rejects it instead of letting it through.
+    """
+    return frozenset(_import_indicators()._CDL_FUNCTIONS.keys())
+
+
+def common_candlestick_names() -> tuple[str, ...]:
+    """A curated subset of frequently-used candlestick patterns, in catalog order.
+
+    Surfaced in the prompt as concrete examples; the full set (``candlestick_names``)
+    remains legal — these are just the ones worth naming explicitly.
+    """
+    return tuple(_import_indicators().COMMON_CANDLESTICK_PATTERNS)
+
+
 def identifier_to_array_keys() -> frozenset[str]:
     """All bare identifiers the evaluator maps to a column (CLOSE, REF_CLOSE, IS_*…)."""
     return frozenset(_import_conditions()._IDENT_TO_ARRAY.keys())

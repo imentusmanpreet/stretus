@@ -39,6 +39,9 @@ yfinance==0.2.44
 pandas==2.2.3
 numpy==1.26.4
 openpyxl>=3.1.2,<4
+# Maintained exchange trading-day/holiday calendars (XBOM = NSE/BSE India). Primary source for
+# live market-session gating in app/services/execution/market_calendar.py; refreshed yearly.
+exchange_calendars==4.13.2
 
 # TA-Lib — official Python wrapper for the TA-Lib C library.
 # Provides 150+ indicators + 60+ candlestick patterns, C-speed (2-4x faster than SWIG).

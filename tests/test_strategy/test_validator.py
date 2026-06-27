@@ -96,3 +96,46 @@ def test_assumed_values_become_notes_not_errors():
     assert result.ok
     codes = {n.code for n in result.notes}
     assert "assumed_stop_loss" in codes and "assumed_take_profit" in codes
+
+
+# ── candlestick grammar teaching (the CDL_ENGULFING == 1 bug) ─────────────────
+
+def test_grammar_prompt_documents_signed_candlestick_domain():
+    """The LLM grammar must state the engine's real CDL value contract (signed
+    +100/-100/0), not the old '0/1' lie that led the model to write `== 1`. We
+    teach the data contract and let the model reason about comparisons — no
+    per-signal recipe is hardcoded into the prompt."""
+    from app.strategy import vocab
+    summary = vocab.grammar_summary_for_prompt()
+    assert "CDL_*" in summary
+    assert "+100" in summary and "-100" in summary
+    assert "resolves to 0/1" not in summary
+
+
+@requires_engine
+def test_real_candlestick_name_passes():
+    """A real TA-Lib pattern (CDL_ENGULFING) is accepted."""
+    result = validator.validate_spec(
+        _spec(entry_condition="EMA(20) > EMA(50) AND CDL_ENGULFING > 0")
+    )
+    assert result.ok, result.as_repair_text()
+
+
+@requires_engine
+def test_fabricated_candlestick_name_is_rejected():
+    """A made-up CDL_* name (not a TA-Lib pattern) computes to all-NaN ⇒ silent zero
+    trades. The validator must reject it as an unknown identifier instead."""
+    result = validator.validate_spec(
+        _spec(entry_condition="EMA(20) > EMA(50) AND CDL_PINBAR > 0")
+    )
+    assert any(e.code == "unknown_identifier" for e in result.errors), result.as_repair_text()
+
+
+def test_grammar_prompt_lists_real_candlestick_names():
+    """The menu must name concrete (real) candlestick patterns so the model picks
+    valid TA-Lib names instead of guessing — and never the old '0/1' lie."""
+    from app.strategy import vocab
+    summary = vocab.grammar_summary_for_prompt()
+    assert "CDL_ENGULFING" in summary  # a real, named example
+    assert "+100" in summary and "-100" in summary
+    assert "resolves to 0/1" not in summary

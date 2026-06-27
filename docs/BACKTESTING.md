@@ -227,7 +227,7 @@ From **daily returns in percent** (`R_pct`):
 
 - **`avg_daily_return`** = `mean(daily decimal returns) * 100`.
 
-- **`max_drawdown`** and related: from the **daily** equity curve, running **peak**; drawdown at t is `((V_t/peak) - 1) * 100%`; the worst drawdown is the **maximum negative** excursion; detailed dates use **trough** then **peak before trough**, and **recovery** is first day after the trough when value ≥ the **pre-drawdown peak**.
+- **`max_drawdown`** and related: from the **daily** equity curve, running **peak**; drawdown at t is `((V_t/peak) - 1) * 100%`; the worst drawdown is the **maximum negative** excursion; detailed dates use the **trough** then the **most recent peak before the trough** (the last new high the curve declined from — not the earliest equal high), and **recovery** is first day after the trough when value ≥ the **pre-drawdown peak**. When the curve never recovers within the window, `recovery_date` is `null` and `recovery_time_days` is `null` (not `0`).
 
 - **`max_drawdown_duration`**: longest **consecutive** stretch of “underwater” (drawdown series < 0), in days in the current implementation.
 - **Calmar** = `annual_return / max_drawdown` (if `max_drawdown > 0`).
@@ -345,8 +345,8 @@ The live window is **one place** in `quant_engine/engine/config.py` (`BACKTEST_M
 | `worst_drawdown_start_date` | Date of the **running peak** of portfolio value that precedes the **trough** where drawdown is worst. |
 | `worst_drawdown_end_date` | Date of the **trough** (min of the percent drawdown series from running peak). |
 | `drawdown_duration_days` | **Calendar** days from peak date to **trough** date (the depth of the *single* worst leg). |
-| `recovery_date` | First day **on or after** the trough when portfolio ≥ that **pre-drawdown** peak. |
-| `recovery_time_days` | Calendar days from trough to `recovery_date`. |
+| `recovery_date` | First day **on or after** the trough when portfolio ≥ that **pre-drawdown** peak; `null` if never recovered. |
+| `recovery_time_days` | Calendar days from trough to `recovery_date`; `null` (not `0`) if never recovered. |
 
 ### 11.3 Monthly performance and `monthly_statistics` (`PerformanceStatistics`)
 

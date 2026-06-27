@@ -26,6 +26,7 @@ from app.db.session import Base
 # Import ALL models so Alembic can detect them for autogenerate
 import app.db.models.strategy   # noqa: F401
 import app.db.models.execution  # noqa: F401
+import app.db.models.universe   # noqa: F401
 
 # ── Alembic config ─────────────────────────────────────────────────────────────
 config = context.config

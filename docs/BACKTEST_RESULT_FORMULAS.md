@@ -436,8 +436,14 @@ max_drawdown = 0
 
 ```text
 trough_date = date where drawdown_pct is minimum
-peak_date   = date of max portfolio value up to trough_date
+peak_date   = MOST RECENT date on/before trough_date where drawdown_pct == 0
+              (i.e. the last equity high the curve declined from)
 ```
+
+Note: `peak_date` is the *last* new high before the trough, not the earliest
+occurrence of the peak value. When an equity curve revisits the same high
+several times before its worst drop, picking the earliest occurrence (e.g. via
+`idxmax`) would overstate the drawdown duration.
 
 ```text
 worst_drawdown_start_date = peak_date
@@ -471,11 +477,14 @@ recovery_date = null
 recovery_time_days = (recovery_date - trough_date).days
 ```
 
-If there is no recovery:
+If there is no recovery (curve still underwater at the end of the window):
 
 ```text
-recovery_time_days = 0
+recovery_time_days = null
 ```
+
+`null` (not `0`) signals "never recovered" so risk classification treats it as
+worst-case rather than as an instant recovery.
 
 ### Max Drawdown Duration
 

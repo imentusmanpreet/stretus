@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from logging_setup import configure_logging
 from engine.metrics import build_execution_error_result
-from engine.runner import run_backtest
+from engine.runner import run_backtest, run_portfolio_backtest
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -260,6 +260,73 @@ async def run_sync(
                 **body.run_config.model_dump(),
             },
         )
+
+
+class RunPortfolioSyncRequest(BaseModel):
+    """Inputs for a dynamic-universe portfolio backtest (§8).
+
+    ``template_yaml`` is the symbol-agnostic strategy YAML (the ``universe:`` sibling is
+    ignored by the engine; the resolver already produced the members). ``member_ohlcv`` maps
+    each resolved member → its execution-tier OHLCV (the API layer fetched it lazily via the
+    DataProvider). ``membership_windows`` restricts each member's trades to its active windows.
+    The portfolio_* fields configure the shared-capital Portfolio Manager (Invariant 9).
+    """
+
+    template_yaml: str
+    member_ohlcv: dict[str, list[dict[str, Any]] | list[list[Any]]]
+    run_config: RunConfig = Field(default_factory=RunConfig)
+    market_data_request: MarketDataRequestPayload
+    membership_windows: Optional[dict[str, list[tuple[str, str]]]] = None
+    starting_capital: float = 100_000.0
+    max_positions: int = 5
+    sizing_mode: str = "equal_weight"
+    risk_per_trade_pct: float = 1.0
+    sector_map: Optional[dict[str, str]] = None
+    sector_cap_pct: Optional[float] = None
+    survivorship_mode: str = "approximate"
+    snapshots: Optional[list[dict[str, Any]]] = None
+    backtest_ref_id: Optional[str] = None
+
+
+@app.post("/run-portfolio-sync")
+async def run_portfolio_sync(body: RunPortfolioSyncRequest):
+    """Synchronous dynamic-universe portfolio backtest — wraps per-member sim under one pool.
+
+    Mirrors ``/run-sync``: runs in an executor and returns the single portfolio result
+    (equity curve, metrics, per-symbol attribution, skip counts, snapshots, survivorship_mode).
+    """
+    if not body.member_ohlcv:
+        raise HTTPException(status_code=400, detail="member_ohlcv is required (no resolved members).")
+
+    logger.info(
+        "🧮 Sync portfolio backtest | ref=%s members=%d max_positions=%d survivorship=%s",
+        body.backtest_ref_id, len(body.member_ohlcv), body.max_positions, body.survivorship_mode,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_portfolio_backtest(
+                body.template_yaml,
+                body.member_ohlcv,
+                body.run_config.model_dump(),
+                body.market_data_request.model_dump(),
+                membership_windows=body.membership_windows,
+                starting_capital=body.starting_capital,
+                max_positions=body.max_positions,
+                sizing_mode=body.sizing_mode,
+                risk_per_trade_pct=body.risk_per_trade_pct,
+                sector_map=body.sector_map,
+                sector_cap_pct=body.sector_cap_pct,
+                survivorship_mode=body.survivorship_mode,
+                snapshots=body.snapshots,
+                backtest_ref_id=body.backtest_ref_id,
+            ),
+        )
+        return result
+    except Exception as exc:
+        logger.exception("❌ Sync portfolio backtest failed | ref=%s", body.backtest_ref_id)
+        raise HTTPException(status_code=500, detail=f"Portfolio backtest failed: {exc}") from exc
 
 
 async def _execute_and_callback(

@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     app_env:        str  = "development"
     app_secret_key: str  = "change-me"
     app_debug:      bool = True
+    # Single-tenant deploy: resolve tenant from ref_data.tenants.code when
+    # x-tenant-id header is absent. Leave empty for multi-tenant (header required
+    # unless legacy env fallback is acceptable). Example: stretus_internal
+    tenant_code:    str  = ""
 
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     database_url:      str = "postgresql+asyncpg://stretus:password@localhost:5432/stretus"
@@ -152,14 +156,38 @@ class Settings(BaseSettings):
     # "low"/"medium"/"high" (OpenRouter effort) or "off"/"none" to disable thinking.
     direct_strategy_reasoning_effort: str = "low"
 
+    # ── Dynamic universe (KB-free direct-StrategySpec path) ───────────────────
+    # A dynamic-universe strategy names a RULE for selecting instruments (re-resolved
+    # on a cadence) rather than one symbol. The whole feature is gated by this flag
+    # and is additive: when False, the static single-symbol path is byte-for-byte
+    # unchanged. See docs/dynamic-universe-implementation.md (§2 invariants, §7.1 cap).
+    dynamic_universe_enabled: bool = False
+    # Hard platform ceiling on how many assets a dynamic strategy actually resolves
+    # and trades, INDEPENDENT of the user's requested `take`. Applied AFTER ranking
+    # (top-N survive) by the resolver, so it is identical in backtest and live (§7.1).
+    # Conservative during rollout; raise via config (no code change) as it proves out.
+    dynamic_universe_max_assets: int = 2
+    # Hard ceiling on concurrent open positions for a dynamic strategy (§7.1).
+    dynamic_universe_max_positions: int = 2
+    # ADV (average-daily-value) floor window, in bars, for fail-closed eligibility.
+    dynamic_universe_adv_window: int = 20
+    # Warm-up bars loaded ahead of a member's activation so indicators are primed.
+    dynamic_universe_warmup_bars: int = 300
+    # Candidate-pool guard: refuse to resolve a pool larger than this (scale guard, §4.5).
+    dynamic_universe_max_pool: int = 5000
+    # Scale guard: the projected execution-tier working set (active members) must not
+    # exceed this; a dynamic backtest that would breach it is refused, never OOM'd (§4.5).
+    dynamic_universe_max_working_set: int = 50
+
     # ── Strategy files ────────────────────────────────────────────────────────
     strategy_folder: str = "./strategies"
 
     # ── Quant Engine ──────────────────────────────────────────────────────────
     quant_engine_url: str = "http://localhost:8001"
 
-    # ── Historical data (Backtest service only) ───────────────────────────────
-    # HTTP fallback: public API / ngrok (User-Gateway → BFF → market data).
+    # ── Internal market data (Backtest + Execution) ───────────────────────────
+    # HTTP fallback: user-gateway base URL (User-Gateway → BFF → market data).
+    # Used by backtest OHLCV fetch and InternalMarketDataClient (live candles/LTP).
     historical_data_url: str = ""
     historical_data_timeout_seconds: float = 120.0
     # In-cluster gRPC to marketdata-ingestion (port 50057). Preferred on EKS.
@@ -191,24 +219,31 @@ class Settings(BaseSettings):
     backtest_user_range_min_padding_days: int = 14
 
     # ── Live market data (Execution / Order Evaluation service only) ──────────
-    # Points to Upstox v2 base URL.  All execution market data comes from here:
-    #   candles  → GET {MARKET_DATA_URL}/historical-candle/{key}/{interval}/...
-    #   LTP      → GET {MARKET_DATA_URL}/market-quote/ltp
-    #   circuit  → GET {MARKET_DATA_URL}/market-quote/quotes
-    # Set MARKET_DATA_URL in .env — never hardcode here.
-    market_data_url: str = "https://api.upstox.com/v2"
+    # Live reads route through HISTORICAL_DATA_URL (user-gateway) via
+    # InternalMarketDataClient. Adding a new broker only requires changes in
+    # stretus-backend; this service and all its callers are unaffected.
     market_data_timeout_seconds: float = 30.0
-    upstox_api_key: str = ""
-    upstox_access_token: str = ""
-    # Binance Spot public REST base URL — used by BinanceClient for crypto
-    # strategy evaluation (candles, LTP, 24h band). No auth required; this is
-    # read-only market data. Override per environment (e.g. for a regional
-    # mirror or a public-test endpoint).
-    crypto_market_data_url: str = "https://api.binance.com"
+    # Equity (NSE/BSE) live market-data source for the execution evaluator. The live broker
+    # feed is reached through the stretus-backend gateway (InternalMarketDataClient):
+    #   * "upstox"        — gateway live feed only (real-time; broker selection owned by gateway).
+    #   * "backtest_feed" — the historical market-data service (HISTORICAL_DATA_URL) only; full
+    #                       backtest/live parity, no broker token (paper/parity). LTP = last close.
+    #   * "resilient"     — gateway primary + backtest_feed fallback (default): live when the gateway
+    #                       is up, transparently degrades to the proven feed on failure so a
+    #                       strategy never goes blind. Every fallback is logged (never silent).
+    # Crypto always routes through the gateway as well and is unaffected by this setting.
+    equity_market_data_source: Literal["upstox", "backtest_feed", "resilient"] = "resilient"
     # In-process cache TTL for execution market data (seconds)
     market_data_cache_ttl_seconds: int = 1
     # Skip entry if LTP is within this fraction of the circuit limit (2% buffer)
     market_data_circuit_threshold_pct: float = 0.98
+    # Legacy direct-broker env vars kept for reference / local dev fallback.
+    # These are no longer used by InternalMarketDataClient but may still be
+    # read by the broker execution adapters (order placement, etc.).
+    market_data_url: str = "https://api.upstox.com/v2"
+    upstox_api_key: str = ""
+    upstox_access_token: str = ""
+    crypto_market_data_url: str = "https://api.binance.com"
 
     def effective_provider(self) -> str:
         """Resolve the actual provider, handling the legacy USE_OPENROUTER flag."""

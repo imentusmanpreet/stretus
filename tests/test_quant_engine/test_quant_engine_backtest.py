@@ -91,11 +91,14 @@ def test_run_backtest_returns_expected_result_shape(tmp_path):
     )
 
     assert result["backtest_ref_id"] == "test-backtest-ref"
-    assert result["backtest_date_range"] == {
-        "from": "2024-01-01",
-        "to": "2026-03-31",
-        "num_days": 821,
-    }
+    # The default backtest window ends at "now" (BACKTEST_MARKET_DATA_TO_UTC is computed
+    # at runtime), so derive the expected range from the SAME source the runner uses
+    # rather than hardcoding a date that drifts as the calendar advances.
+    from engine.metrics import _build_date_range
+
+    assert result["backtest_date_range"] == _build_date_range(
+        BACKTEST_MARKET_DATA_FROM_UTC, BACKTEST_MARKET_DATA_TO_UTC
+    )
     assert set(result.keys()) == {
         "backtest_ref_id",
         "strategy_name",

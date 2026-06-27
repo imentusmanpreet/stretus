@@ -1305,5 +1305,64 @@
     "win_rate": 0.251,
     "total_trades": 17373,
     "last_updated": "2026-06-16"
+  },
+  "ema_cross_up:ETH_USDT:5m": {
+    "signal_name": "ema_cross_up",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 11,
+      "window_slow": 26
+    },
+    "win_rate": 0.1572,
+    "total_trades": 15220,
+    "last_updated": "2026-06-22"
+  },
+  "rsi_oversold:ETH_USDT:5m": {
+    "signal_name": "rsi_oversold",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 21,
+      "threshold": 40.0
+    },
+    "win_rate": 0.1572,
+    "total_trades": 15220,
+    "last_updated": "2026-06-22"
+  },
+  "rsi_overbought:ETH_USDT:5m": {
+    "signal_name": "rsi_overbought",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 21,
+      "threshold": 60.0
+    },
+    "win_rate": 0.1572,
+    "total_trades": 15220,
+    "last_updated": "2026-06-22"
+  },
+  "ema_cross_down:ETH_USDT:5m": {
+    "signal_name": "ema_cross_down",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window_fast": 9,
+      "window_slow": 20
+    },
+    "win_rate": 0.1511,
+    "total_trades": 15715,
+    "last_updated": "2026-06-23"
+  },
+  "price_above_ema:ETH_USDT:5m": {
+    "signal_name": "price_above_ema",
+    "symbol": "ETH_USDT",
+    "timeframe": "5m",
+    "best_params": {
+      "window": 20
+    },
+    "win_rate": 0.1111,
+    "total_trades": 18322,
+    "last_updated": "2026-06-25"
   }
 }

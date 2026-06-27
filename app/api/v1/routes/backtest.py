@@ -6,8 +6,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
+import yaml
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +74,120 @@ async def _mark_backtest_failed(backtest_id: str, exc: Exception) -> None:
             )
 
 
+def _extract_universe_block(yaml_content: str) -> dict | None:
+    """Return the top-level ``universe:`` block from a strategy YAML, else ``None``.
+
+    Plain PyYAML read — the app process detects dynamic mode without importing the engine.
+    Tolerant: malformed/universe-free YAML returns ``None`` (static path unperturbed).
+    """
+    try:
+        data = yaml.safe_load(yaml_content)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    block = data.get("universe")
+    return block if isinstance(block, dict) else None
+
+
+def _backtest_market_fetcher():
+    """Async ``(symbol, interval, from_iso, to_iso) -> records`` over the backtest feed.
+
+    Mirrors ``scanner._default_fetch_ohlcv`` so the dynamic resolver + Tier-B loader reuse the
+    same concurrent/chunked/cached market-data path as the rest of the backtest service.
+    """
+    async def fetch(symbol: str, interval: str, from_utc: str, to_utc: str):
+        from app.services.backtest.market_data import (
+            StrategyMarketDataRequest,
+            fetch_ohlcv_records,
+        )
+        request = StrategyMarketDataRequest(
+            yaml_path="", raw_symbol=symbol,
+            symbol=symbol.replace(".NS", "").replace(".BO", ""),
+            interval=interval, from_utc=from_utc, to_utc=to_utc,
+        )
+        return await fetch_ohlcv_records(request)
+
+    return fetch
+
+
+async def _run_dynamic_backtest_and_persist(
+    *,
+    backtest_id: str,
+    strategy_id: str,
+    yaml_content: str,
+    universe_block: dict,
+    market_data_request,
+    run_request: BacktestTriggerRequest,
+    timer: BacktestTimer,
+) -> None:
+    """Resolve the universe, load member data, run the portfolio backtest, persist the result.
+
+    Reuses the existing result-persistence helpers (``summarize_backtest_for_db`` +
+    ``apply_sanitized_result_to_row``) so the dynamic result lands on the same Backtest row
+    shape (additive — Invariant 10). Failures mark the row failed with the root cause.
+    """
+    from app.core.config import get_settings
+    from app.services.backtest.result_store import (
+        apply_sanitized_result_to_row,
+        summarize_backtest_for_db,
+    )
+    from app.services.universe.backtest_orchestrator import run_dynamic_backtest
+    from app.services.universe.membership import MembershipPoolProvider, SqlMembershipStore
+    from app.strategy.spec import UniverseSpec
+
+    try:
+        # Keep only real UniverseSpec fields — a YAML universe block from an older build may
+        # carry a display-only `summary`, which extra="forbid" would reject.
+        universe_block = {k: v for k, v in (universe_block or {}).items()
+                          if k in set(UniverseSpec.model_fields)}
+        universe = UniverseSpec.model_validate(universe_block)
+        settings = get_settings()
+        window_from = _parse_iso(market_data_request.from_utc)
+        window_to = _parse_iso(market_data_request.to_utc)
+        # index/sector/f_and_o resolve point-in-time from the membership store; watchlist/
+        # crypto_all need no provider (the orchestrator resolves them directly).
+        pool_provider = None
+        if universe.source.kind in ("index", "sector", "f_and_o"):
+            pool_provider = MembershipPoolProvider(SqlMembershipStore(AsyncSessionLocal))
+
+        mdr = {
+            "symbol": market_data_request.symbol, "interval": market_data_request.interval,
+            "from_utc": market_data_request.from_utc, "to_utc": market_data_request.to_utc,
+        }
+        with timer.step("dynamic_universe_portfolio_backtest", {"source": universe.source.kind}):
+            result = await run_dynamic_backtest(
+                universe=universe, template_yaml=yaml_content,
+                window_from=window_from, window_to=window_to,
+                timeframe=market_data_request.interval,
+                fetch_ohlcv=_backtest_market_fetcher(), market_data_request=mdr,
+                run_config={"starting_balance": float(getattr(run_request, "starting_balance", 100000.0) or 100000.0)},
+                pool_provider=pool_provider, settings=settings,
+                warmup_bars=settings.dynamic_universe_warmup_bars,
+                backtest_ref_id=backtest_id, run_id=backtest_id,
+            )
+
+        async with AsyncSessionLocal() as db:
+            backtest = await db.get(Backtest, uuid.UUID(backtest_id))
+            if backtest:
+                strategy = await db.get(Strategy, backtest.strategy_id)
+                sanitized = summarize_backtest_for_db(result) or {}
+                apply_sanitized_result_to_row(backtest=backtest, strategy=strategy, sanitized=sanitized)
+                await db.commit()
+        logger.info(
+            "✅ backtest_orch|stage=dynamic_complete|backtest_id=%s|members=%s|survivorship=%s",
+            backtest_id, len(result.get("members") or []), result.get("survivorship_mode"),
+        )
+    except Exception as exc:  # noqa: BLE001 — surface the root cause on the row
+        logger.exception("💥 backtest_orch|stage=dynamic_failed|backtest_id=%s", backtest_id)
+        await _mark_backtest_failed(backtest_id, exc)
+
+
+def _parse_iso(value: str) -> datetime:
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str, run_request: BacktestTriggerRequest) -> None:
     timer = BacktestTimer(backtest_id)
     
@@ -85,6 +201,21 @@ async def _call_quant_engine(backtest_id: str, strategy_id: str, yaml_path: str,
         # Step 1: Extract market data request from strategy YAML
         with timer.step("extract_market_data_request", {"strategy_id": strategy_id}):
             market_data_request = extract_strategy_market_data_request(yaml_path, overrides=run_request)
+
+        # Dynamic-universe branch: a strategy that names a SELECTION RULE carries a
+        # top-level ``universe:`` block. It runs the portfolio path (resolve → Tier-B load →
+        # /run-portfolio-sync) instead of the single-symbol flow. Detection is a plain YAML
+        # read (the app process needn't import the engine). Static specs fall straight through
+        # unchanged (Invariant 2).
+        yaml_content = Path(yaml_path).read_text(encoding="utf-8")
+        universe_block = _extract_universe_block(yaml_content)
+        if universe_block is not None:
+            await _run_dynamic_backtest_and_persist(
+                backtest_id=backtest_id, strategy_id=strategy_id,
+                yaml_content=yaml_content, universe_block=universe_block,
+                market_data_request=market_data_request, run_request=run_request, timer=timer,
+            )
+            return
 
         # Phase 11: 1-minute execution. AUTO-on for any non-1m strategy (the
         # request flag can force it on/off). When on, the main (and reference)

@@ -89,8 +89,9 @@ strategy:
     }
 
 
-def test_loader_rejects_trailing_stop_and_trailing_tp_together():
-    """A position may trail the stop OR the take-profit, never both."""
+def test_loader_allows_trailing_stop_and_trailing_tp_together():
+    """A position MAY carry BOTH trailing exits — the engine runs both lines and
+    exits on whichever a reversal reaches first (a staged trail)."""
     yaml_content = """
 strategy:
   name: test
@@ -104,13 +105,15 @@ strategy:
     take_profit_percent: 3.0
   trailing_stop:
     type: percent
-    distance_pct: 1.0
+    distance_pct: 2.0
   trailing_take_profit:
     type: percent
-    distance_pct: 1.5
+    distance_pct: 1.0
+    activate_after_pct: 8.0
 """
-    with pytest.raises(ValueError, match="cannot both be set"):
-        load_strategy_from_content(yaml_content)
+    cfg = load_strategy_from_content(yaml_content)
+    assert cfg.trailing_stop_spec["distance_pct"] == 2.0
+    assert cfg.trailing_take_profit_spec["distance_pct"] == 1.0
 
 
 # ── Simulator: LONG ──────────────────────────────────────────────────────────
@@ -327,6 +330,87 @@ def test_no_static_tp_and_no_trailing_raises():
             stop_loss_pct=2.0, take_profit_pct=0.0,    # no static TP and no trailing → invalid
             slippage_bps=0.0, commission_bps=0.0, objective="positional",
         )
+
+
+def test_trailing_stop_alone_supplies_the_exit_and_books_trailing_stop():
+    """"Ride until stopped out": a trailing STOP with no static target must NOT raise
+    (it is a complete exit), and a run-then-pullback books TRAILING_STOP in profit.
+    This is the engine half of the NAUKRI prompt "once up 1%, trail my stop by 0.5%"."""
+    df = _df([
+        (98.0,  98.2,  97.8,  98.0),
+        (100.0, 100.2, 99.8,  100.0),   # entry signal → fill at 100
+        (100.0, 100.2, 99.8,  100.0),
+        (101.5, 101.7, 101.3, 101.5),   # +1.5% → trailing armed (activate 1%)
+        (102.5, 102.7, 102.3, 102.5),
+        (103.5, 103.7, 103.3, 103.5),   # peak 103.7 → floor = 103.7*0.995 = 103.18
+        (102.0, 102.2, 101.8, 102.0),   # low 101.8 <= 103.18 → trailing stop fires
+        (101.0, 101.2, 100.8, 101.0),
+    ])
+
+    trades, _ = simulate_trades(
+        df=df, symbol="TEST.NS", entry_condition=_ENTRY, exit_condition="",
+        stop_loss_pct=2.0, take_profit_pct=0.0,        # <-- no static target
+        slippage_bps=0.0, commission_bps=0.0, warm_up_candles=0,
+        max_holding_candles=20, objective="positional",
+        trailing_stop_spec={"type": "percent", "distance_pct": 0.5, "activate_after_pct": 1.0},
+    )
+    assert len(trades) == 1
+    assert trades[0].exit_reason == "TRAILING_STOP"
+    assert trades[0].pnl_pct > 2.5          # booked the ratcheted gain, not a loss
+
+
+def test_both_trailing_lines_stage_and_tighter_late_line_governs():
+    """A trailing STOP (2%, immediate) AND a trailing TAKE-PROFIT (1%, after +8%) on
+    the same trade: below +8% the wide stop governs; once past +8% the tight TP line
+    is closer to the peak and fires first on a small pull-back → TRAILING_TAKE_PROFIT.
+    Proves both lines run together and the tightest active one wins (staged trail)."""
+    df = _df([
+        (98.0,  98.2,  97.8,  98.0),
+        (100.0, 100.2, 99.8,  100.0),   # entry signal → fill at 100
+        (100.0, 100.2, 99.8,  100.0),
+        (104.0, 104.2, 103.8, 104.0),   # +4% → stop trails (2%); TP not yet armed (<8%)
+        (110.0, 110.5, 109.8, 110.0),   # peak 110.5, +10% → TP armed: line 109.395 > stop line 108.29
+        (109.5, 109.6, 109.0, 109.5),   # low 109.0 <= TP line 109.395 but > stop line 108.29
+    ])
+
+    trades, _ = simulate_trades(
+        df=df, symbol="TEST.NS", entry_condition=_ENTRY, exit_condition="",
+        stop_loss_pct=10.0, take_profit_pct=0.0,       # no static target; trailing supplies it
+        slippage_bps=0.0, commission_bps=0.0, warm_up_candles=0,
+        max_holding_candles=20, objective="positional",
+        trailing_stop_spec={"type": "percent", "distance_pct": 2.0},
+        trailing_take_profit_spec={"type": "percent", "distance_pct": 1.0, "activate_after_pct": 8.0},
+    )
+    assert len(trades) == 1
+    # The tight TP line (1% off the +10% peak) governs — not the wide 2% stop.
+    assert trades[0].exit_reason == "TRAILING_TAKE_PROFIT"
+    assert trades[0].pnl_pct > 8.0
+
+
+def test_loader_makes_take_profit_optional_with_trailing_stop():
+    """A YAML with a trailing_stop and NO take_profit_percent loads with take_profit=0
+    (no static cap injected) — the trailing stop is the exit."""
+    from engine.loader import load_strategy_from_content
+
+    content = """
+strategy:
+  name: t
+  symbol: NAUKRI.NS
+  market: indian_stocks
+  timeframe: 1m
+  entry:
+    condition: "CLOSE > EMA(20)"
+  risk_management:
+    stop_loss_percent: 1.0
+  trailing_stop:
+    type: percent
+    distance_pct: 0.5
+    activate_after_pct: 2.0
+"""
+    cfg = load_strategy_from_content(content)
+    assert cfg.take_profit == 0.0
+    assert cfg.trailing_stop_spec["distance_pct"] == 0.5
+    assert cfg.trailing_take_profit_spec is None
 
 
 def test_loader_makes_take_profit_optional_with_trailing():

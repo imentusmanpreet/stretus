@@ -1447,23 +1447,48 @@ class SemanticExtractor:
         return out
 
     def _extract_partial_exits(self, text: str) -> list[dict]:
-        """Capture partial profit booking instructions: '1.5R', '50% at 2R'."""
+        """Capture partial profit booking instructions: 'exit 30% at 1R, 30% at 2R'."""
         out: list[dict] = []
-        # "partial profit booking at 1.5R", "book 50% at 2R", "exit half at 1R"
+
+        # Primary — leading verb: "exit 30% at 1R", "book 50% at 2R", etc.
+        # "half" is treated as 50%.
+        _HALF_SUB = re.sub(r"\bhalf\b", "50%", text, flags=re.IGNORECASE)
         for m in re.finditer(
-            r"(?:partial\s+(?:profit\s+)?booking|book(?:ing)?\s+(?:profit\s+)?|exit\s+(?:half|partial))"
-            r"\s+(?:of\s+)?(?:(\d+)\s*%\s+)?(?:at|after|on)\s+(\d+(?:\.\d+)?)\s*r\b",
-            text, re.IGNORECASE,
+            r"(?:exit|take|book(?:ing)?|close|sell|partial)\s+(?:profit\s+)?"
+            r"(?:(\d+(?:\.\d+)?)\s*%\s+)?"          # optional size%
+            r"(?:of\s+(?:the\s+)?position\s+)?"
+            r"(?:at|after|on|@)\s+(\d+(?:\.\d+)?)\s*r\b",
+            _HALF_SUB, re.IGNORECASE,
         ):
             entry: dict = {"trigger": "rr_multiple", "value": float(m.group(2))}
             if m.group(1):
-                entry["size_pct"] = int(m.group(1))
+                entry["size_pct"] = float(m.group(1))
             out.append(entry)
-        # Simple "at 1.5R" without explicit "partial"
+
+        # Continuation — verbless items after a comma in a list:
+        # "Exit 30% at 1R, 30% at 2R, 40% at 4R"  ← captures the extra items
+        # Only fire when at least one primary match already found (need a verb anchor).
+        if out:
+            for m in re.finditer(
+                r",\s*(\d+(?:\.\d+)?)\s*%\s+(?:at|after|on|@)\s+(\d+(?:\.\d+)?)\s*r\b",
+                _HALF_SUB, re.IGNORECASE,
+            ):
+                out.append({"trigger": "rr_multiple", "value": float(m.group(2)), "size_pct": float(m.group(1))})
+
+        # Fallback — plain "at 1.5R" list with no explicit exit verb
         if not out:
             for m in re.finditer(r"\bat\s+(\d+(?:\.\d+)?)\s*r\b", text, re.IGNORECASE):
                 out.append({"trigger": "rr_multiple", "value": float(m.group(1))})
-        return out
+
+        # De-duplicate while preserving order
+        seen: set[tuple] = set()
+        deduped: list[dict] = []
+        for e in out:
+            key = (e.get("value"), e.get("size_pct"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(e)
+        return deduped
 
     def _extract_volume_ratio(self, text: str) -> float | None:
         for pattern in self.VOLUME_RATIO_PATTERNS:

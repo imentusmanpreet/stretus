@@ -13,7 +13,7 @@ classify_market_phase(close_series)             → "Uptrend" | "Downtrend" | "R
 classify_alignment(side, market_type, win_rate) → "Strong" | "Moderate" | "Weak"
 classify_entry_condition(df, bar_idx)           → "Bull" | "Bear" | "Sideways" | "Unknown"
 build_market_phase_analysis(df, trades, side)   → list[dict]
-compute_monthly_performance(daily_values, trades) → (list[dict], dict)
+compute_monthly_performance(daily_values, trades, df) → (list[dict], dict)
 """
 from __future__ import annotations
 
@@ -249,10 +249,47 @@ def build_market_phase_analysis(
     return phases
 
 
+def _compute_monthly_benchmark(df: pd.DataFrame) -> dict[str, float]:
+    """
+    For each calendar month in df, compute benchmark return as:
+        (last_day_close - first_day_open) / first_day_open * 100
+
+    Returns a dict keyed by "YYYY-MM" with rounded benchmark pct values.
+    """
+    if df is None or df.empty or "open" not in df.columns or "close" not in df.columns:
+        return {}
+
+    index = df.index
+    if not isinstance(index, pd.DatetimeIndex):
+        try:
+            index = pd.to_datetime(index, utc=True).tz_localize(None)
+        except Exception:
+            try:
+                index = pd.to_datetime(index, utc=True)
+                index = index.tz_localize(None) if index.tz is not None else index
+            except Exception:
+                return {}
+
+    month_keys = index.to_period("M")
+    benchmarks: dict[str, float] = {}
+    for period in month_keys.unique():
+        mask = month_keys == period
+        month_df = df.loc[mask]
+        if month_df.empty:
+            continue
+        open_price  = float(month_df["open"].iloc[0])
+        close_price = float(month_df["close"].iloc[-1])
+        if open_price == 0:
+            continue
+        benchmarks[str(period)] = round((close_price - open_price) / open_price * 100, 4)
+    return benchmarks
+
+
 def compute_monthly_performance(
     daily_values: pd.Series,
     trades: list[Any],  # list[Trade]  — kept for back-compat / arg parity
     entry_ts_sorted: pd.DatetimeIndex | None = None,
+    df: pd.DataFrame | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Compute per-month strategy returns from the daily portfolio equity curve.
@@ -260,7 +297,7 @@ def compute_monthly_performance(
     Returns
     -------
     monthly_list : list[dict]
-        One dict per month: {month, strategy_return_pct, trades_count}
+        One dict per month: {month, strategy_return_pct, benchmark_return_pct, trades_count}
     monthly_statistics : dict
         Aggregate stats: highest/lowest/range monthly gain,
         return-vs-drawdown efficiency, best performing market condition.
@@ -276,6 +313,9 @@ def compute_monthly_performance(
     # Month-end portfolio values → percentage change per month
     monthly_values  = daily_values.resample("ME").last()
     monthly_returns = monthly_values.pct_change().fillna(0.0) * 100.0
+
+    # Benchmark: asset open (first day) → close (last day) per month
+    monthly_benchmarks = _compute_monthly_benchmark(df)
 
     # Count trades entered per calendar month
     trade_month_counts: dict[str, int] = {}
@@ -295,11 +335,14 @@ def compute_monthly_performance(
 
     monthly_list: list[dict] = []
     for month_ts, return_pct in monthly_returns.items():
-        month_key = month_ts.strftime("%Y-%m")
+        month_key       = month_ts.strftime("%Y-%m")
+        benchmark_key   = month_ts.to_period("M")
+        benchmark_val   = monthly_benchmarks.get(str(benchmark_key))
         monthly_list.append({
-            "month":                month_key,
-            "strategy_return_pct":  round(float(return_pct), 4),
-            "trades_count":         trade_month_counts.get(month_key, 0),
+            "month":                 month_key,
+            "strategy_return_pct":   round(float(return_pct), 4),
+            "benchmark_return_pct":  benchmark_val,
+            "trades_count":          trade_month_counts.get(month_key, 0),
         })
 
     if not monthly_list:

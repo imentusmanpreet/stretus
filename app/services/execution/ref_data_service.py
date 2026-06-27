@@ -45,6 +45,7 @@ from typing import Optional, Tuple
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant_context import default_adapter_id_for_context
 from app.schemas.execution import AssetClass
 
 logger = logging.getLogger(__name__)
@@ -61,9 +62,9 @@ _DEFAULT_ADAPTER_BY_ASSET_CLASS: dict[AssetClass, str] = {
 
 
 def default_adapter_id(asset_class: AssetClass) -> str:
-    """Return the adapter_id used by the live market-data path for an asset class."""
+    """Return the adapter_id for live market-data, respecting tenant context when set."""
     try:
-        return _DEFAULT_ADAPTER_BY_ASSET_CLASS[asset_class]
+        return default_adapter_id_for_context(asset_class)
     except KeyError as exc:
         raise ValueError(
             f"No default market-data adapter is registered for asset_class={asset_class!r}."

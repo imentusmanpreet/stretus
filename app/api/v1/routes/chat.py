@@ -18,6 +18,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.errors import build_error_object
 from app.db.session import get_db
 from app.schemas.chat import (
@@ -150,6 +151,49 @@ def _lean_review(draft: dict) -> dict | None:
     }
 
 
+def _annotate_platform_caps(u: dict) -> None:
+    """Add the platform-enforced EFFECTIVE counts to a universe rule, in place.
+
+    The spec keeps the user's INTENT (``take`` / ``max_positions``) verbatim (§7.1), but the
+    platform only trades up to a config ceiling. We surface what will ACTUALLY be used so the
+    response is honest before any backtest runs:
+      • ``effective_take``          = min(take, DYNAMIC_UNIVERSE_MAX_ASSETS)
+      • ``effective_max_positions`` = min(max_positions or take, DYNAMIC_UNIVERSE_MAX_POSITIONS, effective_take)
+      • ``platform_max_assets``     = the configured ceiling (transparency)
+      • ``cap_reason``              = "platform_limit" when clamped, else "none"
+    """
+    s = get_settings()
+    take = int(u.get("take") or 10)
+    max_assets = int(s.dynamic_universe_max_assets)
+    max_positions_cap = int(s.dynamic_universe_max_positions)
+    effective_take = min(take, max_assets)
+    requested_max_pos = int(u.get("max_positions") or take)
+    effective_max_positions = min(requested_max_pos, max_positions_cap, effective_take)
+    u["effective_take"] = effective_take
+    u["effective_max_positions"] = effective_max_positions
+    u["platform_max_assets"] = max_assets
+    u["cap_reason"] = "platform_limit" if effective_take < take else "none"
+
+
+def _universe_fallback_line(u: dict) -> str:
+    """Minimal one-liner built from the RAW universe fields — used only when the AI did not
+    provide its own ``summary`` (``intent_summary``). No hardcoded label tables: it echoes the
+    actual source/metric/values, so any new source kind or rank metric appears automatically."""
+    src = u.get("source") or {}
+    rank = u.get("rank") or {}
+    where = src.get("name") or src.get("kind") or "assets"
+    order = (rank.get("order") or "desc")
+    parts = [f"{'top' if order == 'desc' else 'bottom'} {u.get('take', 10)} {where} by {rank.get('by', 'rank')}"]
+    if u.get("screen"):
+        parts.append("where " + " and ".join(u["screen"]))
+    refresh = u.get("refresh") or {}
+    if refresh.get("cadence"):
+        parts.append(f"refresh {refresh['cadence']}" + (f" at {refresh['at']}" if refresh.get("at") else ""))
+    if u.get("max_positions"):
+        parts.append(f"max {u['max_positions']} positions")
+    return "; ".join(parts)
+
+
 def _lean_strategy_view(draft: dict | None) -> dict:
     """Reduce the full strategy_draft blob to the meaningful API objects:
     {strategy, risk_execution_config, gates, review}. Drops the duplicated
@@ -163,6 +207,31 @@ def _lean_strategy_view(draft: dict | None) -> dict:
             strategy[k] = draft[k]
     if draft.get("indicators"):
         strategy["indicators"] = draft["indicators"]
+
+    # ── Dynamic universe (rule-selected) vs single symbol ─────────────────────
+    # `dynamic_universe` is always present (true only for a universe strategy). A universe
+    # strategy carries the full rule under `universe` (with a human `summary` and, after a
+    # backtest, the `resolved` members) and has NO single symbol.
+    universe = draft.get("universe") if isinstance(draft.get("universe"), dict) else None
+    strategy["dynamic_universe"] = universe is not None
+    if universe is not None:
+        strategy["symbol"] = None  # a universe has no single instrument
+        u = dict(universe)
+        # Surface the platform-effective counts (config cap) alongside the user's intent.
+        _annotate_platform_caps(u)
+        # Summary precedence: the AI's plain-words description (stored separately as
+        # `universe_summary`) → a stray summary on older drafts → a raw fallback line.
+        u["summary"] = (
+            (draft.get("universe_summary") or "").strip()
+            or (u.get("summary") or "").strip()
+            or _universe_fallback_line(u)
+        )
+        resolved = draft.get("universe_resolved")
+        if isinstance(resolved, dict) and resolved:
+            u["resolved"] = resolved
+        strategy["universe"] = u
+    else:
+        strategy["universe"] = None
 
     view: dict = {"strategy": strategy}
 
@@ -180,6 +249,9 @@ def _lean_strategy_view(draft: dict | None) -> dict:
         rec["trailing_take_profit"] = draft["trailing_take_profit_spec"]
     if draft.get("trailing_stop_spec"):
         rec["trailing_stop"] = draft["trailing_stop_spec"]
+    _partial_exits = (draft.get("execution_layers") or {}).get("partial_exits")
+    if _partial_exits:
+        rec["multi_take_profit"] = _partial_exits
     if rec:
         view["risk_execution_config"] = rec
 

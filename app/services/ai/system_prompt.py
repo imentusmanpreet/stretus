@@ -7,6 +7,8 @@ The scope (equity vs crypto vs both) is chosen from the chat's capabilities
 when the session is created. See build_system_instruction().
 """
 
+from __future__ import annotations
+
 from app.services.agent.prompt import build_agentic_system_prompt
 
 

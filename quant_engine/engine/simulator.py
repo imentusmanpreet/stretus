@@ -82,6 +82,10 @@ class Trade:
     # simulator (e.g. unit-test fixtures).
     entry_reason: dict[str, Any] | None = None
     exit_reason_detail: dict[str, Any] | None = None
+    # Per-rung records when multi-TP ladder exits occurred; empty tuple otherwise.
+    # Each dict: {rung_index, price, fill_price, exit_fraction, risk_action,
+    #             bar_timestamp, pnl_pct, pnl_inr, sl_before, sl_after}
+    partial_exits: tuple[dict[str, Any], ...] = ()
 
 
 # ─── Candle diagnostic ────────────────────────────────────────────────────────
@@ -676,9 +680,10 @@ def _resolve_protective_level(
       • a trailing take-profit give-back line.
     For a LONG all three sit *below* price, so the **highest** (tightest) is the
     one a falling price reaches first. For a SHORT they sit *above* price, so the
-    **lowest** wins. trailing_floor and trailing_tp_line are mutually exclusive
-    (the loader rejects configuring both), so at most one trailing line is ever
-    in play — but the merge is written to be correct even if both were present.
+    **lowest** wins. trailing_floor and trailing_tp_line may BOTH be active at once
+    (a strategy can carry a trailing stop AND a trailing take-profit); the tightest
+    active level wins and its kind drives the exit code, which naturally yields a
+    staged trail when the two lines have different distances/activation thresholds.
 
     Returns (level_price, kind) where kind ∈
     {"stop_loss", "trailing_stop", "trailing_take_profit"} and drives the exit
@@ -750,6 +755,26 @@ def build_minute_arrays(df_1m: pd.DataFrame) -> dict[str, np.ndarray]:
     return out
 
 
+def _resolve_tp_rung_price(
+    rung: dict[str, Any],
+    entry_price: float,
+    sl_price: float,
+    is_short: bool,
+) -> float:
+    """Compute the absolute take-profit price for one ladder rung at entry time.
+
+    risk_reward: entry ± value × |entry - sl|  (R-multiple of the initial stop distance)
+    percent:     entry × (1 ± value/100)
+    """
+    rung_type = str(rung.get("type", "risk_reward")).lower()
+    value = float(rung.get("value", 1.0))
+    if rung_type == "risk_reward":
+        risk_per_unit = abs(entry_price - sl_price) or (entry_price * 0.01)
+        return (entry_price - value * risk_per_unit) if is_short else (entry_price + value * risk_per_unit)
+    # percent
+    return (entry_price * (1.0 - value / 100.0)) if is_short else (entry_price * (1.0 + value / 100.0))
+
+
 # ─── Main simulation function ──────────────────────────────────────────────────
 
 def simulate_trades(
@@ -798,6 +823,13 @@ def simulate_trades(
     # Mutually exclusive with trailing_stop_spec (the loader enforces this); when
     # omitted the take-profit is the static `take_profit_pct` alone.
     trailing_take_profit_spec: dict[str, Any] | None = None,
+    # Multi-TP ladder — list of rung dicts, each:
+    #   {rung_index: int, type: "risk_reward"|"percent", value: float,
+    #    exit_fraction: float, risk_action: str}
+    # When set, take_profit_pct must be 0 (loader enforces this). Prices are
+    # resolved at entry time from entry_price + _initial_stop_price so R-multiple
+    # rungs work with any stop type. Mutually exclusive with trailing_take_profit_spec.
+    take_profit_targets: list[dict[str, Any]] | None = None,
     # Phase 5 — higher-timeframe entry gates. When non-empty, every gate's
     # condition must pass on its most recently *closed* HTF bar before an
     # LTF entry signal is allowed to fill. Empty list = no HTF gating.
@@ -873,12 +905,24 @@ def simulate_trades(
     """
     if stop_loss_pct <= 0:
         raise ValueError("stop_loss_pct must be greater than zero.")
-    # The static take-profit is OPTIONAL when a trailing take-profit supplies the
-    # profit exit. Otherwise it is required (a strategy needs some target).
+    # The static take-profit is OPTIONAL when a trailing exit supplies the profit
+    # exit instead — either a trailing take-profit (give-back line) OR a trailing
+    # stop, which ratchets above entry and books the gain on a reversal. A pure
+    # trailing-stop trend strategy ("ride until stopped out", no fixed target) is
+    # legitimate. Otherwise a static target is required.
     has_static_tp = take_profit_pct > 0
-    if not has_static_tp and trailing_take_profit_spec is None:
+    has_multi_tp  = bool(take_profit_targets)
+    if has_multi_tp:
+        has_static_tp = False  # ladder overrides scalar target
+    if (
+        not has_static_tp
+        and trailing_take_profit_spec is None
+        and trailing_stop_spec is None
+        and not has_multi_tp
+    ):
         raise ValueError(
-            "take_profit_pct must be greater than zero (or provide a trailing_take_profit)."
+            "take_profit_pct must be greater than zero, or provide a trailing_take_profit, "
+            "a trailing_stop, or take_profit_targets to supply the exit."
         )
 
     is_intraday = str(objective).lower() == "intraday"
@@ -1060,6 +1104,11 @@ def simulate_trades(
     # SHORT it falls with the trough (sentinel +inf). When the spec is absent it
     # stays at its sentinel and never participates in the exit decision.
     _trailing_tp_line:   float = float("-inf")
+
+    # Multi-TP ladder state — reset on each new trade entry.
+    # None = no multi-TP active; list of remaining (un-fired) rung dicts otherwise.
+    _tp_rungs_remaining: list[dict[str, Any]] | None = None
+    _partial_exits_list: list[dict[str, Any]] = []
 
     # Per-day state (for intraday circuit-breakers).
     # Day key is an int ordinal (days since epoch) — way faster than `date` objects.
@@ -1451,6 +1500,26 @@ def simulate_trades(
                         _trailing_floor   = float("-inf")
                         _trailing_tp_line = float("-inf")
 
+                    # Multi-TP: resolve absolute rung prices at entry from entry + SL.
+                    if take_profit_targets:
+                        _tp_rungs_remaining = sorted(
+                            [
+                                {
+                                    **rung,
+                                    "price": _resolve_tp_rung_price(
+                                        rung, entry_price, _initial_stop_price, is_short
+                                    ),
+                                }
+                                for rung in take_profit_targets
+                            ],
+                            key=lambda r: r["price"],
+                            reverse=is_short,  # SHORT: highest-price rungs first; LONG: lowest first
+                        )
+                        _partial_exits_list = []
+                    else:
+                        _tp_rungs_remaining = None
+                        _partial_exits_list = []
+
                     # ── Capture the structured entry rationale ────────────────
                     signal_indicators = _snapshot_indicators(arrays, i, compiled_entry)
                     signal_close = float(close_arr[i])
@@ -1519,6 +1588,120 @@ def simulate_trades(
         low_price   = float(low_arr[i])
         close_price = float(close_arr[i])
         holding_candles = i - entry_index
+
+        # ── Multi-TP rung check ───────────────────────────────────────────────
+        # Process all rungs whose price level was touched this bar before the
+        # standard stop/TP evaluation. Each fired rung records a partial exit,
+        # may update _initial_stop_price via risk_action, and is removed from
+        # _tp_rungs_remaining. The normal stop check below runs after with the
+        # (possibly updated) SL price so same-bar TP+SL collisions work correctly.
+        _all_tp_rungs_consumed = False
+        if _tp_rungs_remaining:
+            bar_open_for_tp = float(open_arr[i])
+            bar_high_for_tp = float(high_arr[i])
+            bar_low_for_tp  = float(low_arr[i])
+            fired_rung_indices: set[int] = set()
+            for rung_idx, rung in enumerate(_tp_rungs_remaining):
+                rung_price = float(rung["price"])
+                rung_hit = (
+                    (not is_short and bar_high_for_tp >= rung_price) or
+                    (is_short     and bar_low_for_tp  <= rung_price)
+                )
+                if not rung_hit:
+                    continue
+                fired_rung_indices.add(rung_idx)
+                # Gap-fill: if the bar opened past the rung, fill at open price.
+                if not is_short:
+                    rung_fill = max(rung_price, bar_open_for_tp) if bar_open_for_tp > rung_price else rung_price
+                else:
+                    rung_fill = min(rung_price, bar_open_for_tp) if bar_open_for_tp < rung_price else rung_price
+                rung_fill = _exit_fill(rung_fill)
+                rung_pnl_inr = (entry_price - rung_fill) if is_short else (rung_fill - entry_price)
+                rung_pnl_abs = rung_pnl_inr / entry_price if entry_price else 0.0
+                prev_sl = round(_initial_stop_price, 6)
+                risk_action = str(rung.get("risk_action", "none")).lower()
+                if risk_action == "move_sl_to_breakeven":
+                    if is_short:
+                        _initial_stop_price = min(_initial_stop_price, entry_price)
+                    else:
+                        _initial_stop_price = max(_initial_stop_price, entry_price)
+                elif risk_action == "move_sl_to_previous_tp":
+                    prev_tp_price = _partial_exits_list[-1]["price"] if _partial_exits_list else entry_price
+                    if is_short:
+                        _initial_stop_price = min(_initial_stop_price, prev_tp_price)
+                    else:
+                        _initial_stop_price = max(_initial_stop_price, prev_tp_price)
+                _partial_exits_list.append({
+                    "rung_index":    int(rung.get("rung_index", len(_partial_exits_list))),
+                    "price":         round(rung_price, 6),
+                    "fill_price":    round(rung_fill, 6),
+                    "exit_fraction": float(rung.get("exit_fraction", 0.0)),
+                    "risk_action":   risk_action,
+                    "bar_timestamp": str(timestamps_iso[i]),
+                    "pnl_pct":       round(rung_pnl_abs * 100.0, 4),
+                    "pnl_inr":       round(rung_pnl_inr, 4),
+                    "sl_before":     prev_sl,
+                    "sl_after":      round(_initial_stop_price, 6),
+                })
+            _tp_rungs_remaining = [
+                r for idx, r in enumerate(_tp_rungs_remaining) if idx not in fired_rung_indices
+            ]
+            # If all quantity is exited via rungs, book the trade immediately.
+            total_exited = sum(pe["exit_fraction"] for pe in _partial_exits_list)
+            if total_exited >= 1.0 - 1e-9:
+                _all_tp_rungs_consumed = True
+
+        if _all_tp_rungs_consumed:
+            # Blended P&L across all partial exits — the entire position is consumed.
+            total_pnl_abs = sum(pe["exit_fraction"] * pe["pnl_pct"] / 100.0 for pe in _partial_exits_list)
+            final_fill    = _partial_exits_list[-1]["fill_price"]
+            if is_short:
+                mae_pct = (entry_price - _trade_max_high) / entry_price * 100.0 if entry_price else 0.0
+                mfe_pct = (entry_price - _trade_min_low)  / entry_price * 100.0 if entry_price else 0.0
+            else:
+                mae_pct = (_trade_min_low  - entry_price) / entry_price * 100.0 if entry_price else 0.0
+                mfe_pct = (_trade_max_high - entry_price) / entry_price * 100.0 if entry_price else 0.0
+            trades.append(Trade(
+                entry_date=entry_date,
+                exit_date=str(timestamps_iso[i]),
+                symbol=symbol,
+                side=side.upper(),
+                entry_price=round(entry_price, 4),
+                exit_price=round(final_fill, 4),
+                pnl_pct=round(total_pnl_abs * 100.0, 4),
+                pnl_abs=round(total_pnl_abs, 6),
+                pnl_inr=round(total_pnl_abs * entry_price, 4),
+                exit_reason="MULTI_TP_COMPLETE",
+                holding_candles=max(holding_candles, 0),
+                mae_pct=round(mae_pct, 4),
+                mfe_pct=round(mfe_pct, 4),
+                entry_reason=entry_reason_payload,
+                partial_exits=tuple(_partial_exits_list),
+            ))
+            exit_reason_counts["MULTI_TP_COMPLETE"] += 1
+            if is_intraday:
+                _session_cumulative_pnl_pct += total_pnl_abs * 100.0
+                _session_trades_today += 1
+            _portfolio_balance_factor *= (1.0 + total_pnl_abs)
+            _consecutive_losses = (0 if total_pnl_abs >= 0
+                                   else _consecutive_losses + 1)
+            if total_pnl_abs < 0:
+                if max_consecutive_losses > 0 and _consecutive_losses >= max_consecutive_losses:
+                    _consec_loss_pause_until = i + _CONSEC_LOSS_PAUSE_BARS
+                    _consecutive_losses = 0
+                if cooldown_bars_after_loss > 0:
+                    _loss_cooldown_until = i + cooldown_bars_after_loss
+            else:
+                if cooldown_bars_after_profit > 0:
+                    _profit_cooldown_until = i + cooldown_bars_after_profit
+            _signal_consecutive_bars = 0
+            in_trade            = False
+            entry_price         = 0.0
+            entry_index         = -1
+            entry_date          = ""
+            _tp_rungs_remaining = None
+            _partial_exits_list = []
+            continue
 
         # SHORT takes profit when price FALLS, so its target sits below entry.
         # With no static target (trailing TP supplies the exit) the price is pushed
@@ -1893,9 +2076,19 @@ def simulate_trades(
         if exit_price is not None and exit_reason is not None:
             # SHORT profits when the cover price is BELOW the entry, so its P&L
             # is the mirror of a long: entry - exit instead of exit - entry.
-            pnl_inr = (entry_price - exit_price) if is_short else (exit_price - entry_price)
-            pnl_abs = pnl_inr / entry_price             # fractional return (for compounding)
-            pnl_pct = pnl_abs * 100.0
+            if _partial_exits_list:
+                # Blended P&L: partial exits from TP rungs + final exit on remainder.
+                remaining_fraction = max(0.0, 1.0 - sum(pe["exit_fraction"] for pe in _partial_exits_list))
+                partial_pnl_abs = sum(pe["exit_fraction"] * pe["pnl_pct"] / 100.0 for pe in _partial_exits_list)
+                final_pnl_inr   = (entry_price - exit_price) if is_short else (exit_price - entry_price)
+                final_pnl_abs   = (final_pnl_inr / entry_price) * remaining_fraction if entry_price else 0.0
+                pnl_abs = partial_pnl_abs + final_pnl_abs
+                pnl_inr = pnl_abs * entry_price
+                pnl_pct = pnl_abs * 100.0
+            else:
+                pnl_inr = (entry_price - exit_price) if is_short else (exit_price - entry_price)
+                pnl_abs = pnl_inr / entry_price         # fractional return (for compounding)
+                pnl_pct = pnl_abs * 100.0
 
             # MAE/MFE — for a LONG, adverse excursion is the lowest low and
             # favourable the highest high. For a SHORT both flip: the highest
@@ -1940,6 +2133,7 @@ def simulate_trades(
                 mfe_pct=round(mfe_pct, 4),
                 entry_reason=entry_reason_payload,
                 exit_reason_detail=exit_reason_detail,
+                partial_exits=tuple(_partial_exits_list),
             ))
             exit_reason_counts[exit_reason] += 1
 
@@ -1976,10 +2170,12 @@ def simulate_trades(
             # Reset confirmation counter on trade exit so next entry needs fresh confirmation
             _signal_consecutive_bars = 0
 
-            in_trade    = False
-            entry_price = 0.0
-            entry_index = -1
-            entry_date  = ""
+            in_trade            = False
+            entry_price         = 0.0
+            entry_index         = -1
+            entry_date          = ""
+            _tp_rungs_remaining = None
+            _partial_exits_list = []
 
         diagnostics.append(diag)
 
@@ -1990,6 +2186,12 @@ def simulate_trades(
         pnl_inr = (entry_price - last_close) if is_short else (last_close - entry_price)
         pnl_abs = pnl_inr / entry_price
         pnl_pct = pnl_abs * 100.0
+        if _partial_exits_list:
+            remaining_fraction  = max(0.0, 1.0 - sum(pe["exit_fraction"] for pe in _partial_exits_list))
+            partial_pnl_abs_eod = sum(pe["exit_fraction"] * pe["pnl_pct"] / 100.0 for pe in _partial_exits_list)
+            pnl_abs = partial_pnl_abs_eod + pnl_abs * remaining_fraction
+            pnl_inr = pnl_abs * entry_price
+            pnl_pct = pnl_abs * 100.0
         if is_short:
             mae_pct = ((entry_price - _trade_max_high) / entry_price * 100.0) if entry_price else 0.0
             mfe_pct = ((entry_price - _trade_min_low)  / entry_price * 100.0) if entry_price else 0.0
@@ -2029,6 +2231,7 @@ def simulate_trades(
             mfe_pct=round(mfe_pct, 4),
             entry_reason=entry_reason_payload,
             exit_reason_detail=eod_exit_detail,
+            partial_exits=tuple(_partial_exits_list),
         ))
         exit_reason_counts["END_OF_DATA"] += 1
         logger.debug("Exit rationale | %s", eod_exit_detail["summary"])

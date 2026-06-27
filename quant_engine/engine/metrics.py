@@ -394,7 +394,9 @@ def calculate_metrics(
     worst_drawdown_end_date   = drawdown_stats["worst_drawdown_end_date"]
     drawdown_duration_days    = int(drawdown_stats["drawdown_duration_days"])
     recovery_date             = drawdown_stats["recovery_date"]
-    recovery_time_days        = int(drawdown_stats["recovery_time_days"])
+    # None (never recovered) is preserved as-is — not coerced to 0.
+    _recovery_time            = drawdown_stats["recovery_time_days"]
+    recovery_time_days        = int(_recovery_time) if _recovery_time is not None else None
 
     calmar_ratio = (annual_return / max_drawdown) if max_drawdown > 0 else 0.0
 
@@ -418,7 +420,7 @@ def calculate_metrics(
 
     _t = time.perf_counter()
     monthly_performance, monthly_statistics = compute_monthly_performance(
-        daily_values, trades, entry_ts_sorted=entry_ts_sorted,
+        daily_values, trades, entry_ts_sorted=entry_ts_sorted, df=df,
     )
     logger.info(
         "⏱️  TIMING|step=compute_monthly_performance|duration=%.4fs|months=%d",
@@ -556,6 +558,8 @@ def _serialize_backtest_trades(
             # each entry and exit (matched bar, indicator values, prices, costs).
             "entry_reason":          getattr(trade, "entry_reason", None),
             "exit_reason_detail":    getattr(trade, "exit_reason_detail", None),
+            # Multi-TP: per-rung partial exit records. Empty tuple for standard trades.
+            "partial_exits":         list(getattr(trade, "partial_exits", ())),
         })
     return result
 
@@ -699,8 +703,15 @@ def _drawdown_stats(portfolio_values: pd.Series) -> dict[str, Any]:
 
     # Index of worst trough
     trough_idx = drawdowns.idxmin()
-    # Peak before the trough
-    peak_idx   = portfolio_values.loc[:trough_idx].idxmax()
+    # Start of THIS drawdown episode: the most recent equity high (drawdown == 0)
+    # at or before the trough — i.e. the peak the curve actually declined from.
+    # Using idxmax() over the prefix returns the EARLIEST occurrence of the peak
+    # value, which massively overstates the drawdown duration when the curve
+    # revisits the same high several times before its worst drop (e.g. a flat
+    # equity curve that recovers to break-even between drawdowns). The first bar
+    # always has drawdown 0 (value == running peak), so this slice is never empty.
+    dd_to_trough = drawdowns.loc[:trough_idx]
+    peak_idx   = dd_to_trough[dd_to_trough >= 0.0].index[-1]
     peak_value = float(portfolio_values.loc[peak_idx])
 
     # First date after trough where portfolio recovers to peak value
@@ -714,11 +725,14 @@ def _drawdown_stats(portfolio_values: pd.Series) -> dict[str, Any]:
     except Exception:
         dd_duration_days = 0
 
-    # Recovery time: calendar days from trough to recovery
+    # Recovery time: calendar days from trough back to the prior peak. None means
+    # the curve never climbed back to its pre-drawdown peak within the backtest
+    # window — that is NOT an instant/zero recovery, so downstream risk
+    # classification must treat it as worst-case rather than best-case.
     try:
-        recovery_time = int((recovery_idx - trough_idx).days) if recovery_idx is not None else 0
+        recovery_time = int((recovery_idx - trough_idx).days) if recovery_idx is not None else None
     except Exception:
-        recovery_time = 0
+        recovery_time = None
 
     # Max consecutive days spent underwater (below any prior peak)
     underwater        = drawdowns < 0

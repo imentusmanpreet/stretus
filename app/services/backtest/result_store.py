@@ -121,6 +121,12 @@ def sort_backtest_monthly_performance_desc(result: dict[str, Any] | None) -> dic
         if isinstance(backtest_trades, list):
             metrics[_BACKTEST_TRADES_KEY] = _sort_backtest_trades_desc(backtest_trades)
 
+    # Multi-asset results wrap per-asset results in a `results` list — recurse into each.
+    per_asset_results = result.get("results")
+    if isinstance(per_asset_results, list):
+        for asset_result in per_asset_results:
+            sort_backtest_monthly_performance_desc(asset_result)
+
     return result
 
 

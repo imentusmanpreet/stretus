@@ -1212,14 +1212,17 @@ max_drawdown = |min(drawdown)|
 
 **Drawdown duration (calendar days from peak to trough):**
 ```
-peak_idx    = argmax(portfolio_values up to trough date)
 trough_idx  = argmin(drawdown)
+peak_idx    = LAST date on/before trough where drawdown == 0   # most recent high
 dd_duration = (trough_idx - peak_idx).days
 ```
+`peak_idx` is the most recent new high before the trough (the peak the curve
+declined from), not `argmax`'s earliest occurrence — otherwise a curve that
+revisits the same high before its worst drop overstates the duration.
 
-**Recovery date:** First date after trough where `portfolio_value >= peak_value`
+**Recovery date:** First date after trough where `portfolio_value >= peak_value`; `null` if never recovered.
 
-**Recovery time:** `(recovery_idx - trough_idx).days`
+**Recovery time:** `(recovery_idx - trough_idx).days`; `null` (not `0`) if never recovered.
 
 **Max drawdown duration (days underwater):**
 Longest consecutive run of days where `drawdown < 0` (any prior peak not recovered).

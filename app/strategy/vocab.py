@@ -61,26 +61,45 @@ def pattern_identifiers() -> frozenset[str]:
 
 
 @lru_cache(maxsize=1)
+def candlestick_names() -> frozenset[str]:
+    """Every real TA-Lib candlestick pattern (CDL_ENGULFING, CDL_HAMMER, …)."""
+    return engine_bridge.candlestick_names()
+
+
+@lru_cache(maxsize=1)
+def common_candlestick_names() -> tuple[str, ...]:
+    """A curated subset of frequently-used candlestick patterns (for the prompt)."""
+    return engine_bridge.common_candlestick_names()
+
+
+@lru_cache(maxsize=1)
 def all_legal_identifiers() -> frozenset[str]:
     """Every bare identifier (no parentheses) the evaluator can resolve to a value.
 
     Used by the validator to reject fabricated identifiers — the engine's
     ``compile_condition`` rejects unknown *functions* but silently resolves an
-    unknown bare identifier to NaN, so we backstop it here. ``CDL_*`` candlestick
-    identifiers are matched by prefix (see :func:`is_legal_identifier`).
+    unknown bare identifier to NaN, so we backstop it here. The CDL_* candlestick
+    names are the EXACT TA-Lib patterns the engine can compute — a made-up CDL_*
+    name resolves to all-NaN (⇒ silent zero trades), so we list the real ones here
+    and reject the rest in :func:`is_legal_identifier`.
     """
     return (
         engine_bridge.identifier_to_array_keys()
         | scalar_identifiers()
         | pattern_identifiers()
+        | candlestick_names()
         | GRAMMAR_BOOLEANS
         | EXIT_VARIABLES
     )
 
 
 def is_legal_identifier(name: str) -> bool:
-    """True if ``name`` is a resolvable bare identifier (incl. ``CDL_*`` patterns)."""
-    return name in all_legal_identifiers() or name.startswith("CDL_")
+    """True if ``name`` is a resolvable bare identifier (incl. real CDL_* patterns).
+
+    A CDL_* name that TA-Lib does not define is NOT legal: it would compute to an
+    all-NaN column and silently produce zero trades, so we reject it here.
+    """
+    return name in all_legal_identifiers()
 
 
 # ── Risk vocabulary (read live from the engine loader) ────────────────────────
@@ -146,7 +165,10 @@ def grammar_summary_for_prompt() -> str:
         "Exit-only variables (usable in exit conditions):",
         f"  {_fmt(EXIT_VARIABLES)}",
         "",
-        "Candlestick patterns: any CDL_* identifier (e.g. CDL_ENGULFING) resolves to 0/1.",
+        f"Candlestick patterns — {len(candlestick_names())} CDL_* bare identifiers, "
+        "signed pattern strength: +100 bullish, -100 bearish, 0 none (a few combine "
+        "to ±200). Use an EXACT TA-Lib pattern name (made-up names are rejected). "
+        f"Common ones: {', '.join(common_candlestick_names())}.",
         "",
         "Rules: every function/identifier you use MUST come from the lists above. "
         "Do not invent indicators. Conditions must be able to evaluate to true on "

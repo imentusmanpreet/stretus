@@ -38,4 +38,4 @@ def test_build_inputs_snapshot_from_draft_skips_none_placeholders():
     labels = [row["label"] for row in snapshot["summary_rows"]]
 
     assert labels == ["Stock", "Timeframe", "Market view"]
-    assert snapshot["details"]["missing_fields"] == ["objective", "experience", "goal"]
+    assert snapshot["missing_fields"] == ["objective", "experience", "goal"]

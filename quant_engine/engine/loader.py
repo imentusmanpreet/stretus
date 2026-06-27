@@ -329,6 +329,60 @@ def _parse_trailing_take_profit_spec(raw: Any) -> dict[str, Any] | None:
     return spec
 
 
+def _parse_multi_take_profit_spec(raw: Any) -> list[dict[str, Any]] | None:
+    """Validate and normalise the multi_take_profit block.  Returns None when absent.
+
+    Each rung:
+      {"rung_index": int, "type": "risk_reward"|"percent", "value": float,
+       "exit_fraction": float, "risk_action": "none"|"move_sl_to_breakeven"|"move_sl_to_previous_tp"}
+    The simulator resolves rung absolute prices at entry time from entry_price + initial SL.
+    """
+    if raw in (None, "", [], {}):
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("multi_take_profit must be a list of rung mappings or omitted.")
+    _VALID_TYPES   = {"risk_reward", "percent"}
+    _VALID_ACTIONS = {"none", "move_sl_to_breakeven", "move_sl_to_previous_tp"}
+    rungs: list[dict[str, Any]] = []
+    total_fraction = 0.0
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"multi_take_profit[{idx}] must be a mapping.")
+        tp_type = str(item.get("type") or "").lower().strip()
+        if tp_type not in _VALID_TYPES:
+            raise ValueError(
+                f"multi_take_profit[{idx}].type must be one of {sorted(_VALID_TYPES)}, got {tp_type!r}"
+            )
+        value = _to_float(item.get("value"), f"multi_take_profit[{idx}].value", 0.0)
+        if value <= 0:
+            raise ValueError(f"multi_take_profit[{idx}].value must be > 0, got {value}")
+        frac = _to_float(item.get("exit_fraction"), f"multi_take_profit[{idx}].exit_fraction", 0.0)
+        if frac <= 0 or frac > 1:
+            raise ValueError(
+                f"multi_take_profit[{idx}].exit_fraction must be in (0, 1], got {frac}"
+            )
+        total_fraction += frac
+        risk_action = str(item.get("risk_action") or "none").lower().strip()
+        if risk_action not in _VALID_ACTIONS:
+            raise ValueError(
+                f"multi_take_profit[{idx}].risk_action must be one of {sorted(_VALID_ACTIONS)}, "
+                f"got {risk_action!r}"
+            )
+        rungs.append({
+            "rung_index":    idx,
+            "type":          tp_type,
+            "value":         value,
+            "exit_fraction": frac,
+            "risk_action":   risk_action,
+        })
+    if total_fraction > 1.0 + 1e-6:
+        raise ValueError(
+            f"multi_take_profit exit_fraction sum {total_fraction:.4f} exceeds 1.0 — "
+            "rungs must not exceed the full position."
+        )
+    return rungs if rungs else None
+
+
 def _parse_htf_rules(raw: Any) -> tuple[HtfRule, ...]:
     """Parse the htf: block (Phase 5) into a tuple of HtfRule.
 
@@ -487,6 +541,12 @@ class StrategyConfig:
     # the same peak); the loader rejects setting both. Percent-only for now:
     #   {"type": "percent", "distance_pct": 1.5, "activate_after_pct": 3.0}
     trailing_take_profit_spec: dict[str, Any] | None = None
+    # Multi-TP ladder — a list of rung dicts, each:
+    #   {rung_index: int, type: "risk_reward"|"percent", value: float,
+    #    exit_fraction: float, risk_action: "none"|"move_sl_to_breakeven"|"move_sl_to_previous_tp"}
+    # Prices are resolved at entry time in the simulator from entry_price + initial SL price.
+    # Mutually exclusive with trailing_take_profit_spec. When set, take_profit must be 0.0.
+    multi_take_profit: list[dict[str, Any]] | None = None
     # Phase 4 — optional reference symbol whose OHLCV is fetched alongside the
     # trade symbol and joined into the main df with a REF_ prefix. This is what
     # lets formulas reference Nifty/Bank-Nifty/sector indices via REF_CLOSE,
@@ -627,24 +687,31 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         "stop_loss_percent",
         2.0,
     )
-    # A trailing take-profit can supply the profit exit on its own. When it's
-    # present the static target is OPTIONAL and we must NOT inject a default percent —
-    # a low default (e.g. 1%) would fire before the trail engages and starve it. With
-    # no trailing TP the static target is still required and defaults to 5%.
+    # A trailing exit can supply the profit exit on its own — either a trailing
+    # take-profit (give-back line) OR a trailing stop (which ratchets above entry and
+    # books the gain on a reversal, so a pure "ride until stopped out" strategy needs
+    # no fixed target). When one is present the static target is OPTIONAL and we must
+    # NOT inject a default percent — a low default (e.g. 1%) would fire before the
+    # trail engages and starve it. With no trailing exit the static target is still
+    # required and defaults to 5%.
     _has_trailing_tp = bool(strategy.get("trailing_take_profit") or risk.get("trailing_take_profit"))
+    _has_trailing_stop = bool(strategy.get("trailing_stop") or risk.get("trailing_stop"))
+    _has_trailing_exit = _has_trailing_tp or _has_trailing_stop
     _raw_take_profit = risk.get(
         "take_profit_percent", strategy.get("take_profit_pct", variables.get("TAKE_PROFIT_TARGET"))
     )
     if _raw_take_profit is None:
-        take_profit = 0.0 if _has_trailing_tp else 5.0
+        take_profit = 0.0 if _has_trailing_exit else 5.0
     else:
         take_profit = _to_float(_raw_take_profit, "take_profit_percent", 5.0)
 
     if stop_loss <= 0:
         raise ValueError("stop_loss_percent must be greater than zero.")
-    if take_profit <= 0 and not _has_trailing_tp:
+    _has_multi_tp = bool(risk.get("multi_take_profit"))
+    if take_profit <= 0 and not _has_trailing_exit and not _has_multi_tp:
         raise ValueError(
-            "take_profit_percent must be greater than zero (or provide a trailing_take_profit)."
+            "take_profit_percent must be greater than zero (or provide a trailing_take_profit, "
+            "trailing_stop, or multi_take_profit)."
         )
 
     # Default exit formula: include the "PROFIT >= target" clause only when a static
@@ -742,17 +809,27 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
     trailing_take_profit_spec = _parse_trailing_take_profit_spec(
         strategy.get("trailing_take_profit") or risk.get("trailing_take_profit")
     )
-    # A position can trail EITHER the stop OR the take-profit, not both: two
-    # ratcheting lines chasing the same peak would collide and the exit semantics
-    # become ambiguous. Reject the combination up front with a clear message
-    # rather than silently picking one.
-    if trailing_stop_spec is not None and trailing_take_profit_spec is not None:
+    # A position MAY carry BOTH a trailing stop and a trailing take-profit. They do
+    # not conflict: the simulator runs both lines each bar and exits on whichever a
+    # reversal reaches first (_resolve_protective_level picks the tightest active
+    # level). Configured with different distances/activation thresholds this gives a
+    # staged trail. The only degenerate case — one line always tighter AND activating
+    # no later, so the other can never fire — is surfaced to the user as a
+    # non-blocking warning by the chat-layer validator, not rejected here.
+
+    # Multi-TP ladder (mutually exclusive with trailing_take_profit_spec).
+    multi_take_profit = _parse_multi_take_profit_spec(
+        strategy.get("multi_take_profit") or risk.get("multi_take_profit")
+    )
+    if multi_take_profit is not None and trailing_take_profit_spec is not None:
         raise ValueError(
-            "trailing_stop and trailing_take_profit cannot both be set on one "
-            "strategy (they would chase the same peak). Choose one: a trailing "
-            "stop to protect against reversals, or a trailing take-profit to let "
-            "a winner run and capture the pull-back."
+            "multi_take_profit and trailing_take_profit are mutually exclusive — "
+            "use one or the other."
         )
+    # When multi-TP is active, the static take_profit_percent must be 0 so the
+    # engine doesn't fire a single static target before the ladder exits complete.
+    if multi_take_profit is not None and take_profit > 0:
+        take_profit = 0.0
 
     # Phase 4 — optional reference symbol. Whitespace-strip and uppercase so
     # "^nsei" and "^NSEI" are equivalent. None when omitted.
@@ -825,6 +902,15 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         if market_norm == "indian_stocks":
             entry_window_start_utc = _parse_time_to_utc_minutes("09:15", "Asia/Kolkata")
             entry_window_end_utc   = _parse_time_to_utc_minutes("15:30", "Asia/Kolkata")
+
+    # Entry window is an intraday concept. Daily/weekly bar timestamps are
+    # typically midnight UTC (≈05:30 IST), which falls before any intraday
+    # window and would block every entry. Nullify the window for daily+ TFs.
+    _TF_NORM = timeframe.lower().strip()
+    _DAILY_OR_LARGER = {"1d", "2d", "3d", "5d", "1w", "1wk", "1week", "1m", "1mo", "1month", "1y"}
+    if _TF_NORM in _DAILY_OR_LARGER:
+        entry_window_start_utc = None
+        entry_window_end_utc   = None
 
     # Phase 2 — lunch-lull skip. Block new entries inside a midday window where
     # liquidity/edge typically dries up. lunch_lull: {start: "12:00", end:
@@ -994,6 +1080,7 @@ def _build_strategy_config(strategy: dict[str, Any]) -> StrategyConfig:
         stop_loss_spec=stop_loss_spec,
         trailing_stop_spec=trailing_stop_spec,
         trailing_take_profit_spec=trailing_take_profit_spec,
+        multi_take_profit=multi_take_profit,
         reference_symbol=reference_symbol,
         htf_rules=htf_rules,
         patterns=patterns_overrides,
@@ -1060,7 +1147,14 @@ def load_strategy(yaml_path: str) -> StrategyConfig:
 
 
 def load_strategy_from_content(yaml_content: str) -> StrategyConfig:
-    """Parse a strategy directly from YAML text (no filesystem access required)."""
+    """Parse a strategy directly from YAML text (no filesystem access required).
+
+    A dynamic-universe YAML carries a top-level ``universe:`` block ALONGSIDE
+    ``strategy:`` (the strategy body is the symbol-agnostic template stamped per member).
+    The loader reads only ``strategy:`` and IGNORES the ``universe:`` sibling, so a dynamic
+    YAML loads cleanly here while the portfolio orchestrator owns the universe block (§5).
+    Use :func:`extract_universe_block` to read it.
+    """
     data = yaml.safe_load(yaml_content)
 
     if not isinstance(data, dict) or "strategy" not in data:
@@ -1071,3 +1165,21 @@ def load_strategy_from_content(yaml_content: str) -> StrategyConfig:
         raise ValueError("Invalid strategy YAML: 'strategy' must be an object.")
 
     return _build_strategy_config(strategy)
+
+
+def extract_universe_block(yaml_content: str) -> dict[str, Any] | None:
+    """Return the top-level ``universe:`` block from a strategy YAML, or ``None``.
+
+    The presence of this block is how the engine/orchestrator detects a dynamic-universe
+    strategy (vs. the static single-symbol path). Tolerant: returns ``None`` for malformed
+    or universe-free YAML rather than raising — the static path must never be perturbed
+    (Invariant 2).
+    """
+    try:
+        data = yaml.safe_load(yaml_content)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    block = data.get("universe")
+    return block if isinstance(block, dict) else None

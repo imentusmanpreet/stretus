@@ -256,6 +256,106 @@ class TradeManager:
             metadata=metadata,
         )
 
+    def build_multi_tp_bracket_order(
+        self,
+        symbol: str,
+        entry_price: float,
+        stop_loss_price: float,
+        tp_ladder: "TpLadder",
+        strategy_type: str,
+        strategy_id: Optional[str],
+        mode: str,
+        bar_datetime: Optional[str] = None,
+        *,
+        asset_class: AssetClass = AssetClass.equity_cash,
+    ) -> dict:
+        """Build a bracket order with one entry leg, one SL leg, and N TP legs.
+
+        Returns a plain dict (not BracketOrder) because BracketOrder only supports
+        one TP leg. Live/paper callers should submit the legs individually to the OMS.
+
+        Keys:
+          idempotency_key  — str
+          entry_order      — OrderLeg
+          stop_loss_order  — OrderLeg
+          take_profit_orders — list[OrderLeg], one per un-hit rung
+          metadata         — dict
+        """
+        from app.schemas.execution import TpLadder  # avoid module-level circular import
+
+        product    = _product_type(strategy_type, asset_class)
+        validity   = _default_validity(asset_class)
+        is_crypto  = asset_class == AssetClass.crypto_spot
+        prec       = 8 if is_crypto else 4
+
+        idempotency_key = self._idempotency_key(strategy_id, symbol, bar_datetime, asset_class)
+        entry_id = str(uuid.uuid4())
+
+        total_qty   = tp_ladder.total_quantity
+        entry_px    = round(float(entry_price), prec)
+        sl_px       = round(float(stop_loss_price), prec)
+        is_short    = entry_price < stop_loss_price  # SL above entry → short
+
+        entry_order = OrderLeg(
+            order_id=entry_id,
+            parent_order_id=None,
+            order_role=BracketOrderLegRole.entry,
+            symbol=symbol,
+            side="SELL" if is_short else "BUY",
+            quantity=total_qty,
+            price=entry_px,
+            order_type=_entry_order_type(asset_class),
+            product_type=product,
+            validity=validity,
+        )
+
+        sl_order = OrderLeg(
+            order_id=str(uuid.uuid4()),
+            parent_order_id=entry_id,
+            order_role=BracketOrderLegRole.stop_loss_exit,
+            symbol=symbol,
+            side="BUY" if is_short else "SELL",
+            quantity=total_qty,
+            trigger_price=sl_px,
+            price=sl_px,
+            order_type=_stop_loss_order_type(asset_class),
+            product_type=product,
+            validity=validity,
+        )
+
+        tp_orders: list[OrderLeg] = []
+        for rung in tp_ladder.rungs:
+            if rung.hit:
+                continue
+            tp_px = round(float(rung.price), prec)
+            tp_orders.append(OrderLeg(
+                order_id=str(uuid.uuid4()),
+                parent_order_id=entry_id,
+                order_role=BracketOrderLegRole.take_profit_exit,
+                symbol=symbol,
+                side="BUY" if is_short else "SELL",
+                quantity=rung.exit_qty,
+                price=tp_px,
+                order_type=ExchangeOrderType.limit,
+                product_type=product,
+                validity=validity,
+            ))
+
+        return {
+            "idempotency_key":    idempotency_key,
+            "entry_order":        entry_order,
+            "stop_loss_order":    sl_order,
+            "take_profit_orders": tp_orders,
+            "metadata": {
+                "strategy_id":  strategy_id,
+                "mode":         mode,
+                "asset_class":  asset_class.value,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "multi_tp":     True,
+                "rung_count":   len(tp_orders),
+            },
+        }
+
     def build_exit_instruction(
         self,
         position: OpenPosition,

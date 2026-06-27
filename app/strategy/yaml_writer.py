@@ -25,8 +25,18 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+# Placeholder instrument for the symbol-agnostic strategy BODY of a dynamic-universe
+# YAML. The engine ignores it (members are stamped per-resolution at backtest time); it
+# exists only so the strategy body is a valid single-symbol template (§3.1).
+_UNIVERSE_PLACEHOLDER_SYMBOL = "UNIVERSE_MEMBER"
+
+
 def _safe_filename(spec: StrategySpec) -> str:
-    base = f"{spec.symbol}_{spec.timeframe}_{spec.objective}".strip() or spec.name
+    if spec.is_dynamic and spec.universe is not None:
+        src = spec.universe.source
+        base = f"universe_{src.name or src.kind}_{spec.timeframe}_{spec.objective}"
+    else:
+        base = f"{spec.symbol}_{spec.timeframe}_{spec.objective}".strip() or spec.name
     return re.sub(r"[^a-zA-Z0-9]", "_", base).lower() or "strategy"
 
 
@@ -36,7 +46,16 @@ def write_spec_yaml(spec: StrategySpec, *, session_id: str | None = None, turn: 
     Raises AppError(500) only if every candidate folder is unwritable — mirrors the
     legacy generator so the failure mode is identical and observable.
     """
-    document = {"strategy": spec.to_engine_yaml_dict()}
+    # Dynamic-universe spec → emit the symbol-agnostic strategy TEMPLATE plus the
+    # `universe:` block the backtest route detects (§5). Static spec → the single-symbol
+    # body exactly as before (byte-for-byte unchanged — Invariant 2).
+    if spec.is_dynamic and spec.universe is not None:
+        document = {
+            "strategy": spec.to_engine_template_dict(_UNIVERSE_PLACEHOLDER_SYMBOL),
+            "universe": spec.universe.model_dump(mode="json", exclude_none=True),
+        }
+    else:
+        document = {"strategy": spec.to_engine_yaml_dict()}
     filename = f"{_safe_filename(spec)}.yaml"
 
     last_permission_error: PermissionError | None = None

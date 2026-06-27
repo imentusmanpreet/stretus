@@ -277,6 +277,10 @@ def _normalize_symbol_for_market_data(raw_symbol: str) -> str:
     if symbol.endswith(".NS") or symbol.endswith(".BO"):
         symbol = symbol[:-3]
 
+    # Handle underscore variant stored in DB (e.g. RELIANCE_NS, HDFC_BO).
+    if symbol.endswith("_NS") or symbol.endswith("_BO"):
+        symbol = symbol[:-3]
+
     # Canonical crypto pair (BASE_QUOTE) → broker-native (BASEQUOTE).
     # Guarded by a strict regex so we never accidentally collapse a name with
     # a stray underscore that happens to look like a pair.
@@ -987,6 +991,13 @@ async def fetch_ohlcv_records(
     )
     fetch_request = replace(resolved, from_utc=fetch_from_utc)
 
+    if fetch_from_utc != resolved.from_utc:
+        logger.info(
+            "📐 Warm-up padding applied | symbol=%s interval=%s "
+            "sim_from=%s → fetch_from=%s (delta: cache key uses fetch_from)",
+            resolved.symbol, resolved.interval, resolved.from_utc, fetch_from_utc,
+        )
+
     # ── Fix 3: cache hit short-circuits the entire HTTP fetch ─────────────────
     with time_step("check_ohlcv_cache", extra_context={
         "symbol": fetch_request.symbol,
@@ -1113,14 +1124,16 @@ async def fetch_ohlcv_records(
         fetch_duration, resolved.symbol, resolved.interval, len(all_rows), len(chunks),
     )
 
-    # Persist for next time. Best-effort; won't fail the request on cache errors.
+    # Persist for next time using fetch_request keys (same key as the lookup above).
+    # IMPORTANT: must use fetch_request (warm-up extended dates), NOT resolved (sim dates).
+    # Using resolved here was the original bug — lookup key ≠ save key → permanent miss.
     with time_step("save_ohlcv_cache", extra_context={
-        "symbol": resolved.symbol,
-        "interval": resolved.interval,
+        "symbol": fetch_request.symbol,
+        "interval": fetch_request.interval,
         "rows": len(all_rows),
     }):
         save_ohlcv_cache(
-            resolved.symbol, resolved.interval, resolved.from_utc, resolved.to_utc, all_rows,
+            fetch_request.symbol, fetch_request.interval, fetch_request.from_utc, fetch_request.to_utc, all_rows,
         )
 
     return all_rows

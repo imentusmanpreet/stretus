@@ -13,10 +13,9 @@ high-level user intent first.
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 import re
 from typing import Any, Optional, Tuple
-
-import requests
 
 from app.kb.compat import (
     get_all_market_configs,
@@ -39,7 +38,32 @@ try:
 except Exception:  # pragma: no cover - optional runtime dependency
     nse_eq_symbols = None  # type: ignore[assignment]
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MARKET = "indian_stocks"
+
+
+def _sanitize_trailing_for_yaml(spec: Any, label: str) -> dict[str, Any] | None:
+    """Guard the YAML boundary against a malformed trailing block.
+
+    A ``percent`` trailing line is defined by its ``distance_pct`` (how far behind
+    the peak/trough it trails); ``activate_after_pct`` only sets WHEN it engages.
+    Several extraction paths can produce a percent block carrying only an
+    activation and no distance — which the engine loader hard-rejects, crashing the
+    whole backtest. Rather than crash, drop the unusable block (the backtest still
+    runs on its valid parts) and log it loudly so the gap is visible. Well-formed
+    blocks pass through unchanged.
+    """
+    if not isinstance(spec, dict) or not spec:
+        return None
+    if str(spec.get("type") or "").lower() == "percent" and not spec.get("distance_pct"):
+        logger.warning(
+            "⚠️ Dropping %s from strategy YAML — percent trailing needs distance_pct, "
+            "none present (spec=%s). Backtest will run without this trailing leg.",
+            label, spec,
+        )
+        return None
+    return dict(spec)
 CORE_USER_INPUT_FIELDS = (
     "symbol",
     "timeframe",
@@ -248,68 +272,41 @@ def _canonical_timeframe_from_value(value: int, unit: str) -> Optional[str]:
 
 @lru_cache(maxsize=256)
 def _search_indian_equity(query: str, exchange: Optional[str] = None) -> Optional[str]:
+    from app.kb import kb
+
     cleaned_query = re.sub(r"\s+", " ", query).strip()
     if not cleaned_query:
         return None
 
-    try:
-        response = requests.get(
-            "https://query2.finance.yahoo.com/v1/finance/search",
-            params={"q": cleaned_query, "quotesCount": 10, "newsCount": 0},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=4,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except Exception:
-        return None
-
+    resolution = kb.resolve_stock_query(cleaned_query)
     preferred_suffix = ".BO" if exchange == "BO" else ".NS"
-    query_tokens = {token for token in re.findall(r"[A-Z0-9]+", cleaned_query.upper()) if len(token) > 1}
-    best_symbol = None
-    best_score = float("-inf")
 
-    for quote in payload.get("quotes", []):
-        if quote.get("quoteType") != "EQUITY":
-            continue
+    if resolution.stock:
+        stock = resolution.stock
+        # Honour exchange preference when a sibling symbol exists in the KB.
+        if exchange == "BO" and stock.symbol.endswith(".NS"):
+            bse_variant = stock.symbol[:-3] + ".BO"
+            if bse_variant in kb.stocks:
+                return bse_variant
+        elif exchange != "BO" and stock.symbol.endswith(".BO"):
+            nse_variant = stock.symbol[:-3] + ".NS"
+            if nse_variant in kb.stocks:
+                return nse_variant
+        return stock.symbol
 
-        symbol = str(quote.get("symbol") or "").upper().strip()
-        if not symbol.endswith((".NS", ".BO")):
-            continue
+    if resolution.is_ambiguous:
+        # Prefer the candidate that matches the requested exchange.
+        for match in resolution.ambiguous_matches:
+            if match.symbol.endswith(preferred_suffix):
+                return match.symbol
+        return resolution.ambiguous_matches[0].symbol
 
-        score = 0.0
-        exchange_name = str(quote.get("exchange") or "").upper()
-        if symbol.endswith(preferred_suffix):
-            score += 8.0
-        if exchange == "BO" and exchange_name == "BSE":
-            score += 4.0
-        if exchange != "BO" and exchange_name in {"NSI", "NSE"}:
-            score += 4.0
+    # Fuzzy suggestion: only return when the score is high enough to be useful
+    # (resolve_stock_query already guards this via _FUZZY_STOCK_CUTOFF).
+    if resolution.suggestion:
+        return resolution.suggestion.symbol
 
-        base_symbol = _strip_symbol_suffix(symbol)
-        if cleaned_query.upper() == base_symbol:
-            score += 12.0
-
-        names_blob = " ".join(
-            part for part in [
-                str(quote.get("shortname") or ""),
-                str(quote.get("longname") or ""),
-            ] if part
-        ).upper()
-        for token in query_tokens:
-            if token == base_symbol:
-                score += 5.0
-            if token in names_blob:
-                score += 2.0
-
-        if "-" in base_symbol:
-            score -= 1.5
-
-        if score > best_score:
-            best_score = score
-            best_symbol = symbol
-
-    return best_symbol
+    return None
 
 
 def _extract_search_query(text: str) -> str:
@@ -624,6 +621,22 @@ class StrategyBuilder:
         self.discovery_tie_break_options: Optional[list[dict]]   = None
         self.discovery_chosen_method:     Optional[str]          = None
         self.discovered_symbol:           Optional[str]          = None
+        # Dynamic-universe (direct StrategySpec path): True when the user named a
+        # SELECTION RULE ("top 10 by volume", "most active NIFTY500") rather than one
+        # instrument. Like requires_discovery(), it exempts the single-symbol requirement
+        # — but routes to the DIRECT path's universe synthesis, never the KB scanner.
+        # The universe RULE itself is still emitted by the LLM generator (LLM-only).
+        self.universe_intent:             bool                   = False
+        # The resolved universe block (UniverseSpec.model_dump) once synthesis produces it.
+        # Persisted across turns + emitted into the engine YAML so the backtest route
+        # branches to the portfolio path even when assembly happens on a later turn.
+        self.universe:                    Optional[dict]         = None
+        # The AI's plain-words description of the rule (spec.intent_summary). Kept SEPARATE
+        # from `universe` so the latter stays a pure UniverseSpec (re-validated downstream).
+        self.universe_summary:            Optional[str]          = None
+        # The resolution OUTCOME after a backtest (members + cap + survivorship). Surfaced
+        # in the response under strategy.universe.resolved so the UI can show what traded.
+        self.universe_resolved:           Optional[dict]         = None
         # Phase 9h — user-typed tunables that override the preset's
         # discovery `parameters` defaults (e.g. "volume spike 1.2x" sets
         # {"volume_multiplier": 1.2}). Populated by the chat layer
@@ -919,7 +932,10 @@ class StrategyBuilder:
         # (so the chat layer will trigger the scan), we treat the symbol
         # requirement as satisfied for the purpose of moving past input
         # collection.
-        symbol_ok = bool(self.symbol) or bool(self.discovered_symbol) or self.requires_discovery()
+        symbol_ok = (
+            bool(self.symbol) or bool(self.discovered_symbol)
+            or self.requires_discovery() or self.universe_intent
+        )
         if not all([
             symbol_ok,
             _normalize_optional_input_text(self.timeframe),
@@ -954,7 +970,10 @@ class StrategyBuilder:
         fields: list[str] = []
         # Same exemption as is_user_input_complete — discovery-driven presets
         # don't require a user-supplied symbol.
-        if not self.symbol and not self.discovered_symbol and not self.requires_discovery():
+        if (
+            not self.symbol and not self.discovered_symbol
+            and not self.requires_discovery() and not self.universe_intent
+        ):
             fields.append("symbol")
         if not _normalize_optional_input_text(self.timeframe):
             fields.append("timeframe")
@@ -1763,6 +1782,11 @@ class StrategyBuilder:
         if isinstance(semantic_intent, dict) and semantic_intent:
             self.semantic_intent = semantic_intent
 
+        # Restore execution_layers (multi-TP ladder, partial exits) across turns.
+        _el = preview.get("execution_layers")
+        if isinstance(_el, dict) and _el:
+            self.execution_layers = _el
+
         # Phase 10 — restore new strategy parameters
         _p10_str_fields = (
             "direction", "entry_window_start", "entry_window_end",
@@ -1898,6 +1922,24 @@ class StrategyBuilder:
             ]
             self.discovery_universe_override = cleaned_universe or None
 
+        # Dynamic-universe selection-rule intent — sticky once detected (direct path).
+        if preview.get("universe_intent"):
+            self.universe_intent = True
+        _universe = preview.get("universe")
+        if isinstance(_universe, dict) and _universe:
+            # Defensive: older drafts stored `summary` inside the universe dict, which is
+            # not a UniverseSpec field. Strip any such non-spec key on restore so the rule
+            # stays re-validatable; move a stray summary to the dedicated field.
+            _stray_summary = _universe.pop("summary", None) if isinstance(_universe, dict) else None
+            self.universe = _universe
+            if _stray_summary and not self.universe_summary:
+                self.universe_summary = str(_stray_summary)
+        if preview.get("universe_summary"):
+            self.universe_summary = preview["universe_summary"]
+        _universe_resolved = preview.get("universe_resolved")
+        if isinstance(_universe_resolved, dict) and _universe_resolved:
+            self.universe_resolved = _universe_resolved
+
         self._normalize_legacy_signal_conditions()
 
     def to_draft_json(
@@ -1978,6 +2020,15 @@ class StrategyBuilder:
             "discovery_conditions":          self.discovery_conditions,
             "discovery_last_scan_diagnostics": self.discovery_last_scan_diagnostics,
             "discovery_universe_override":   self.discovery_universe_override,
+            # Dynamic-universe (direct path): persist the selection-rule intent so the
+            # agent keeps NOT asking for a single symbol on follow-up turns (the rule is
+            # only in the first message; the builder is rehydrated each turn).
+            "universe_intent":               self.universe_intent,
+            "universe":                      self.universe,
+            "universe_summary":              self.universe_summary,
+            "universe_resolved":             self.universe_resolved,
+            # True only for a dynamic-universe (rule-selected) strategy — the response flag.
+            "dynamic_universe":              self.universe is not None,
             # Semantic intent: plain dict so it round-trips cleanly through JSON.
             "semantic_intent":               self.semantic_intent,
             # Phase 10 — new strategy parameters
@@ -2000,6 +2051,9 @@ class StrategyBuilder:
             # serialise in unspecified order otherwise). The receiver
             # converts back to a set in from_preview_json.
             "_phase10_user_overrides":       sorted(self._phase10_user_overrides),
+            # Multi-TP ladder and other execution-layer extras (partial exits,
+            # risk actions). Stored as a plain dict so it survives JSON round-trips.
+            "execution_layers":              getattr(self, "execution_layers", None) or {},
         }
 
         return draft
@@ -2085,10 +2139,28 @@ class StrategyBuilder:
         # the simulator falls back to the legacy stop_loss_percent.
         if isinstance(self.stop_loss_spec, dict) and self.stop_loss_spec:
             strategy_block["stop_loss"] = dict(self.stop_loss_spec)
-        if isinstance(self.trailing_stop_spec, dict) and self.trailing_stop_spec:
-            strategy_block["trailing_stop"] = dict(self.trailing_stop_spec)
-        if isinstance(self.trailing_take_profit_spec, dict) and self.trailing_take_profit_spec:
-            strategy_block["trailing_take_profit"] = dict(self.trailing_take_profit_spec)
+        _ts = _sanitize_trailing_for_yaml(self.trailing_stop_spec, "trailing_stop")
+        if _ts is not None:
+            strategy_block["trailing_stop"] = _ts
+        _ttp = _sanitize_trailing_for_yaml(self.trailing_take_profit_spec, "trailing_take_profit")
+        if _ttp is not None:
+            strategy_block["trailing_take_profit"] = _ttp
+        # Multi-TP ladder — emit when execution_layers["partial_exits"] carries rungs.
+        # Converts the {trigger, value, size_pct} format stored in the builder into
+        # the {type, value, exit_fraction} format the loader expects.
+        _partial_exits = (getattr(self, "execution_layers", None) or {}).get("partial_exits") or []
+        if _partial_exits:
+            strategy_block["risk_management"]["take_profit_percent"] = 0.0
+            strategy_block["risk_management"]["multi_take_profit"] = [
+                {
+                    "type": "risk_reward" if pe.get("trigger") == "rr_multiple" else "percent",
+                    "value": float(pe.get("value", 0)),
+                    "exit_fraction": round(float(pe.get("size_pct", 0)) / 100, 4),
+                    "risk_action": pe.get("risk_action", "none"),
+                }
+                for pe in _partial_exits
+                if isinstance(pe, dict) and pe.get("value")
+            ]
         if isinstance(self.reference_symbol, str) and self.reference_symbol:
             strategy_block["reference_symbol"] = self.reference_symbol
         if isinstance(self.htf_rules, list) and self.htf_rules:
@@ -2672,45 +2744,11 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             "explicit_timeframe": explicit_tf,
         }
 
-    # ── Trailing stop ─────────────────────────────────────────────────────────
-    # Captures:
-    #   - "trail SL after 2%", "trailing stop 2%", "trail 2%" → distance
-    #   - "trailing stop once trade reaches 2% profit" → ACTIVATION %
-    #   - "activate trailing stop after 1% gain" → activation
-    # We try the activation pattern first because "trailing stop … N% profit"
-    # is unambiguous; only fall back to distance interpretation otherwise.
-    activation_match = re.search(
-        r"\btrail(?:ing)?\s+(?:stop|sl|stop[\s\-]*loss)\s*"
-        r"(?:once|after|when)?[\s\S]{0,40}?"
-        r"(?:reach(?:es)?|hit(?:s)?|cross(?:es)?|exceed(?:s)?|gain(?:s)?|profit\s+of|at)\s+"
-        r"(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s*(?:profit|gain)?"
-        r"|\bactivate\s+trail(?:ing)?\s+(?:stop|sl)?\s*"
-        r"(?:after|when)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)"
-        r"|\btrail(?:ing)?\s+(?:stop|sl)?\s*"
-        r"(?:once|after)\s+(\d+(?:\.\d+)?)\s*(?:%|percent|pct)\s+(?:profit|gain)",
-        text, re.IGNORECASE,
-    )
-    if activation_match:
-        for g in activation_match.groups():
-            if g:
-                try:
-                    rms["trailing_stop_activate_after_pct"] = {
-                        "value": float(g), "source": "user",
-                    }
-                except (TypeError, ValueError):
-                    pass
-                break
-    else:
-        # Plain distance: "trail SL by 2%", "trailing stop 2%"
-        trail_match = re.search(
-            r"\btrail(?:ing)?[\s\-]*(?:stop|sl|stop[\s\-]*loss|stop\s*loss)?\s*"
-            r"(?:after|of|by|at)?\s*(\d+(?:\.\d+)?)\s*(?:%|percent|pct)(?=\s|$|[,.\)])?",
-            text, re.IGNORECASE,
-        )
-        if trail_match:
-            val = float(trail_match.group(1))
-            if val > 0:
-                rms["trailing_stop_pct"] = {"value": val, "source": "user"}
+    # NOTE: Trailing-stop / trailing-take-profit are NOT regex-extracted here.
+    # The trailing family is owned exclusively by the LLM `StrategySpec` path
+    # (direct_strategy_flow) so a single, validated source defines it — see the
+    # project rule "LLM-only RMS". Regex extraction here used to fabricate
+    # malformed (distance-less) trailing specs that crashed the backtest.
 
     # ── Trading window ────────────────────────────────────────────────────────
     # Also accept "only trades between 9:30 AM to 11:30 AM" / "between 9:30 and
@@ -2804,22 +2842,41 @@ def _extract_rms_from_text(text: str) -> dict[str, Any]:
             "type": "structural",
         }
 
-    # ── EMA trailing stop ─────────────────────────────────────────────────────
-    # "trail profits using EMA trailing stop", "EMA trail", "trail by EMA"
-    ema_trail_match = re.search(
-        r"\b(?:ema\s+trail(?:ing)?(?:\s+stop)?|trail(?:ing)?\s+(?:profits?\s+using\s+)?ema"
-        r"|trail\s+(?:using|by|with)\s+ema|ema[\s\-]*based\s+trail(?:ing)?)\b",
-        text, re.IGNORECASE,
-    )
-    if ema_trail_match:
-        period_match = re.search(r"\b(\d+)\s*(?:period\s+)?ema\b", text, re.IGNORECASE)
-        rms["trailing_stop_type"] = {
-            "value": "ema",
-            "period": int(period_match.group(1)) if period_match else 20,
-            "source": "user",
-        }
+    # (EMA / percent / activation trailing-stop regex removed — trailing is owned by
+    # the LLM StrategySpec path only; see the note in the trailing-stop section above.)
 
     return rms
+
+
+# Dynamic-universe ROUTING signal (direct path). This is intent DETECTION only — it
+# decides "the user named a selection rule, not one instrument", so the chat doesn't ask
+# "which symbol?". The universe RULE's actual fields (source/screen/rank/take) are still
+# emitted by the LLM generator from the system prompt (LLM-only — never regex-extracted).
+_UNIVERSE_INTENT_RE = re.compile(
+    r"\b("
+    r"top\s+\d+\b"                                   # "top 10", "top 50"
+    r"|most\s+(active|traded|volatile|liquid)"        # "most active"
+    r"|biggest\s+(gainers?|losers?|movers?)"          # "biggest gainers"
+    r"|top\s+(gainers?|losers?|movers?|volume|coins?|stocks?)"
+    r"|highest\s+(volume|momentum)"
+    r"|strongest\s+(stocks?|coins?|names?)"
+    r"|all\s+(crypto|coins?|stocks?)"                 # "all crypto"
+    r"|every\s+(coin|stock)"
+    r"|nifty\s*\d+\s+stocks?"                          # "nifty 500 stocks" (a basket)
+    r"|stocks?\s+(above|below|near)\b"                # "stocks above their VWAP"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def detect_universe_intent(text: str) -> bool:
+    """True when ``text`` describes a RULE for selecting instruments (a dynamic universe).
+
+    Routing-only heuristic for the direct path; the universe block itself is authored by
+    the LLM. Conservative: it must see explicit selection-rule phrasing, so a plain
+    single-instrument request ("trade BTC", "buy TCS") does NOT trip it.
+    """
+    return bool(text and _UNIVERSE_INTENT_RE.search(text))
 
 
 def extract_strategy_details(text: str, builder: StrategyBuilder):
@@ -2946,38 +3003,11 @@ def extract_strategy_details(text: str, builder: StrategyBuilder):
                 "source": "user",
             }
 
-        # EMA trailing stop → builder.trailing_stop_spec
-        if "trailing_stop_type" in rms and builder.trailing_stop_spec is None:
-            ts_entry = rms["trailing_stop_type"]
-            if ts_entry["value"] == "ema":
-                builder.trailing_stop_spec = {
-                    "type": "ema",
-                    "period": ts_entry.get("period", 20),
-                    "source": "user",
-                }
-        # Percent trailing stop (from trailing_stop_pct)
-        elif "trailing_stop_pct" in rms and builder.trailing_stop_spec is None:
-            builder.trailing_stop_spec = {
-                "type": "percent",
-                "distance_pct": rms["trailing_stop_pct"]["value"],
-                "source": "user",
-            }
-
-        # Trailing-stop activation threshold (no distance given) — the
-        # engine treats `activate_after_pct` as the "kick in once profit
-        # reaches N%" gate. We default distance to 1% if user didn't say.
-        if "trailing_stop_activate_after_pct" in rms:
-            activate = rms["trailing_stop_activate_after_pct"]["value"]
-            if builder.trailing_stop_spec is None:
-                builder.trailing_stop_spec = {
-                    "type": "percent",
-                    "activate_after_pct": activate,
-                    "source": "user",
-                }
-            else:
-                spec = dict(builder.trailing_stop_spec)
-                spec.setdefault("activate_after_pct", activate)
-                builder.trailing_stop_spec = spec
+        # Trailing stop / trailing take-profit are intentionally NOT set here.
+        # The trailing family is owned exclusively by the LLM `StrategySpec` path
+        # (direct_strategy_flow) — a single validated source — so this legacy regex
+        # path no longer fabricates trailing specs (it used to emit distance-less,
+        # backtest-crashing ones). See _extract_rms_from_text for the matching note.
 
         # ATR-based stop loss → builder.stop_loss_spec
         if "atr_stop" in rms and builder.stop_loss_spec is None:

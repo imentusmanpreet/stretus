@@ -227,13 +227,23 @@ def _summary_rows_from_draft(draft: dict[str, Any]) -> list[dict[str, str]]:
         sl = _user_supplied_rms_pct(draft, "stop_loss_pct")
         sl_display = f"{_fmt_num(sl)}%" if sl is not None else None
 
-    # Take profit: prefer the user's risk:reward ("1.5R") over the derived percent.
-    rr = risk.get("risk_reward") if sources.get("risk_reward") in _USER_RMS_SOURCES else None
-    if rr not in (None, 0, 0.0):
-        tp_display = f"{_fmt_num(rr)}R"
+    # Take profit: multi-TP ladder wins over scalar risk_reward / percent.
+    _partial_exits = (draft.get("execution_layers") or {}).get("partial_exits") or []
+    if _partial_exits and sources.get("take_profit_pct") == "multi_tp":
+        _rung_strs = [
+            f"{_fmt_num(pe['value'])}R"
+            + (f"×{int(round(pe['size_pct']))}%" if pe.get("size_pct") else "")
+            for pe in _partial_exits
+            if isinstance(pe, dict) and pe.get("value")
+        ]
+        tp_display = "Multi-TP: " + ", ".join(_rung_strs) if _rung_strs else None
     else:
-        tp = _user_supplied_rms_pct(draft, "take_profit_pct")
-        tp_display = f"{_fmt_num(tp)}%" if tp is not None else None
+        rr = risk.get("risk_reward") if sources.get("risk_reward") in _USER_RMS_SOURCES else None
+        if rr not in (None, 0, 0.0):
+            tp_display = f"{_fmt_num(rr)}R"
+        else:
+            tp = _user_supplied_rms_pct(draft, "take_profit_pct")
+            tp_display = f"{_fmt_num(tp)}%" if tp is not None else None
 
     per_trade_risk = (
         risk.get("per_trade_risk")
@@ -334,13 +344,27 @@ def append_inputs_snapshot(
     *,
     state: str,
     draft: dict[str, Any] | None,
+    display_symbol: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Append summary table and attach ``inputs_snapshot`` on strategy_draft."""
+    """Append summary table and attach ``inputs_snapshot`` on strategy_draft.
+
+    ``display_symbol`` overrides ONLY the rendered "Stock" row (and the snapshot
+    embedded for the UI) when a single-asset backtest ran on a symbol other than
+    the session strategy's own (the run_backtest ``symbols`` override). The
+    persisted ``working_draft["symbol"]`` is left untouched so state restoration
+    keeps the original strategy symbol — the override is purely cosmetic for this
+    one message. None → legacy behaviour.
+    """
     working_draft = _working_draft(draft, builder, state=state)
     snapshot = build_inputs_snapshot_from_draft(
         working_draft,
         missing=builder.missing_user_input_fields(),
     )
+    if display_symbol:
+        for _summary_row in snapshot.get("summary_rows") or []:
+            if _summary_row.get("label") == "Stock":
+                _summary_row["value"] = str(display_symbol)
+                break
     working_draft["inputs_snapshot"] = snapshot
 
     if not snapshot.get("summary_rows"):

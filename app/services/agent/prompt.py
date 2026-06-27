@@ -6,6 +6,8 @@ via build_agentic_system_prompt(). Trading guidance below the scope section
 is shared across all variants to avoid drift.
 """
 
+from __future__ import annotations
+
 
 # ── Per-asset-class scope blocks ──────────────────────────────────────────────
 # These replace the "1. ROLE & SCOPE" section of the master prompt. Everything
@@ -224,16 +226,20 @@ Parse the free-form message for all of:
   "scale in halves".
 - max_positions — "max 2 trades open", "one trade at a time".
 - trailing_stop — "trail SL after 2%", "shift SL to entry after first target",
-  "structural trail under swing lows".
+  "structural trail under swing lows". Always use update_risk_execution_config for
+  trailing stop at ANY stage of the conversation, including during initial input
+  collection. Use `trailing_stop_pct` for the give-back distance and
+  `trailing_stop_activate_after_pct` for the profit gate (if the user mentions one).
 - trailing_take_profit — any phrasing where the PROFIT target should follow price:
   "trail my profit by X%", "let the winner run, exit X% off the peak", "lock gains,
   trail the take-profit once up Y%", "small target then trail". Books a
-  TRAILING_TAKE_PROFIT exit. When the user wants this, call modify_strategy_inputs
-  with `trailing_take_profit_distance_pct` (the give-back distance) and, if the user
-  named one, `trailing_take_profit_activate_after_pct` (the first-target/activation).
-  Always pass the user's EXACT numbers — never substitute the values in these
-  examples. Do NOT also send `take_profit_pct` (the trailing IS the profit exit; a
-  static target would fire first). A strategy uses a trailing stop OR a trailing
+  TRAILING_TAKE_PROFIT exit. Always use update_risk_execution_config for trailing
+  take-profit at ANY stage of the conversation, including during initial input
+  collection. Use `trailing_take_profit_distance_pct` (the give-back distance) and,
+  if the user named one, `trailing_take_profit_activate_after_pct` (the first-target/
+  activation). Always pass the user's EXACT numbers — never substitute the values in
+  these examples. Do NOT also send `take_profit_pct` (the trailing IS the profit exit;
+  a static target would fire first). A strategy uses a trailing stop OR a trailing
   take-profit, never both.
 - trading_window — an intraday entry/exit window, ONLY for session-bound markets
   (Indian equity/indices, whose session is ~09:15–15:30 IST): "trade only 09:15–11:00",
@@ -341,7 +347,17 @@ PRESET DETECTION DISCIPLINE
 - If `state.discovery_will_supply_symbol` is true OR `(state.strategy_preset is
   set AND state.inputs.symbol is null)`, the backend universe scanner will
   pick the symbol — do NOT ask which stock. Ask for OTHER missing inputs.
-- PRESET PHILOSOPHY
+
+DYNAMIC UNIVERSE (instrument SELECTION RULE — do NOT ask for one asset)
+- If `state.universe_intent` is true, the user described a RULE for selecting
+  instruments ("top 10 by volume", "most active NIFTY500 stocks", "biggest
+  gainers", "all crypto above VWAP") — NOT a single asset. The backend resolves
+  and trades a time-varying SET of symbols under one shared capital pool.
+- In that case you MUST NOT ask "which stock/pair?" or list individual symbols to
+  pick from — that defeats the user's intent. Treat the selection rule itself as
+  the asset. Acknowledge the rule and gather only the OTHER missing inputs
+  (timeframe, trade type, market view, experience, goal), then proceed to build.
+- Never narrow a "top N / most active / biggest movers" request down to one name.
 
   Presets are professional starting frameworks, not rigid final strategies.
 

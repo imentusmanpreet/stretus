@@ -34,6 +34,7 @@ from typing import Optional
 
 import pandas as pd
 
+from app.core.tenant_context import get_current_tenant
 from app.schemas.execution import AssetClass
 from app.services.execution.execution_cache import MarketDataCache
 from app.services.execution.market_data import MarketDataClient, get_market_data_client
@@ -73,9 +74,10 @@ class MarketDataService:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _client_for(self, asset_class: AssetClass) -> MarketDataClient:
-        if asset_class == AssetClass.equity_cash:
+        tenant = get_current_tenant()
+        if asset_class == AssetClass.equity_cash and tenant is None:
             return self._equity_client
-        return get_market_data_client(asset_class)
+        return get_market_data_client(asset_class, tenant=tenant)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -137,8 +139,13 @@ class MarketDataService:
         asset_class: AssetClass = AssetClass.equity_cash,
     ) -> float:
         """
-        Return the last traded price. Falls back to the most recent cached
-        candle close when the venue endpoint is unavailable.
+        Return the last traded price — and ONLY a live one.
+
+        Fail-closed by design (identical in paper and live): the LTP is the price a decision
+        trades on, so we never substitute a stale historical/candle close. If the venue can't
+        give a live price we raise, and the caller turns that into a ``no_action`` for the
+        symbol. (Closed candles for indicators may still come from the resilient feed — those
+        are finalized bars, not "the price I trade at".)
         """
         key = _cache_key(symbol, asset_class)
         cached = _cache.get_ltp(key)
@@ -152,26 +159,14 @@ class MarketDataService:
             return ltp
         except Exception as exc:
             logger.warning(
-                "LTP unavailable | asset_class=%s symbol=%s adapter=%s — %s. "
-                "Falling back to candle close.",
+                "⛔ LTP unavailable (FAIL-CLOSED, no stale-close substitution) | "
+                "asset_class=%s symbol=%s adapter=%s — %s",
                 asset_class.value, symbol, client.adapter_id, exc,
             )
-
-        for tf in ("1m", "5m", "15m", "30m", "1h", "1d"):
-            df = _cache.get_candles(key, tf)
-            if df is not None and not df.empty:
-                ltp = float(df["close"].iloc[-1])
-                _cache.set_ltp(key, ltp)
-                logger.info(
-                    "LTP from candle close | asset_class=%s symbol=%s tf=%s ltp=%.10g",
-                    asset_class.value, symbol, tf, ltp,
-                )
-                return ltp
-
-        raise RuntimeError(
-            f"Cannot determine LTP for {symbol} (asset_class={asset_class.value}): "
-            "venue unavailable and no candle cache."
-        )
+            raise RuntimeError(
+                f"No live LTP for {symbol} (asset_class={asset_class.value}): {exc}. "
+                "Failing closed — the platform never decides on a stale price (paper or live)."
+            ) from exc
 
     async def fetch_circuit_limits(
         self,

@@ -24,9 +24,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Source = Literal["user", "assumed"]
+
+
+def _none_to_empty_list(value: Any) -> Any:
+    """Coerce ``None`` → ``[]`` for list fields. LLMs routinely emit ``"field": null`` for
+    an empty list; without this the strict schema rejects the whole spec and burns a (slow)
+    repair round. Non-None values pass through untouched for normal validation."""
+    return [] if value is None else value
 
 
 def _as_float(value: Any) -> float | None:
@@ -62,6 +69,14 @@ class StopLoss(BaseModel):
         return _as_float(self.value)
 
 
+class RiskAction(BaseModel):
+    """SL mutation to apply immediately after a partial-exit rung fires."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["move_sl_to_breakeven", "move_sl_to_previous_tp", "none"] = "none"
+
+
 class TakeProfitTarget(BaseModel):
     """One rung of a scale-out take-profit ladder.
 
@@ -70,6 +85,7 @@ class TakeProfitTarget(BaseModel):
     position to close at this rung — ``None`` means "share the remainder equally"
     (resolved at engine/spec time). The engine computes an R-multiple level against
     the ACTUAL stop distance, so it works with ATR/structural/percent stops alike.
+    ``risk_action`` optionally mutates the stop-loss when this rung fires.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -80,6 +96,7 @@ class TakeProfitTarget(BaseModel):
     window: int | None = Field(default=None, gt=0)
     source: Source = "assumed"
     reason: str = ""
+    risk_action: RiskAction | None = None
 
     def numeric(self) -> float | None:
         return _as_float(self.value)
@@ -105,6 +122,8 @@ class TakeProfit(BaseModel):
     # 1-based index of the rung after which the remainder's stop moves to break-even.
     # 0/None ⇒ OFF (default) — never inject a behaviour the user didn't ask for.
     move_stop_to_breakeven_after: int | None = Field(default=None, ge=0)
+
+    _coerce_targets = field_validator("targets", mode="before")(_none_to_empty_list)
 
     def numeric(self) -> float | None:
         return _as_float(self.value)
@@ -153,6 +172,21 @@ class TrailingStop(BaseModel):
     window: int | None = Field(default=None, gt=0)
     activate_after_pct: float | None = Field(default=None, ge=0)
 
+    @model_validator(mode="after")
+    def _require_distance_for_percent(self) -> "TrailingStop":
+        # distance_pct is the trail distance itself — without it a percent trailing
+        # stop is undefined ("trail by how much?"). activate_after_pct only sets WHEN
+        # trailing engages, not how far it trails. The engine loader hard-rejects this
+        # later (`distance_pct must be > 0 for type=percent`); enforce it here at the
+        # contract so the chat repair loop fixes it instead of crashing the backtest.
+        if self.type == "percent" and self.distance_pct is None:
+            raise ValueError(
+                "trailing_stop with type='percent' requires distance_pct (how far behind "
+                "the running peak/trough the stop trails). activate_after_pct only sets WHEN "
+                "trailing starts, not how far it trails."
+            )
+        return self
+
     def to_engine_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
@@ -162,8 +196,9 @@ class TrailingTakeProfit(BaseModel):
     side. Once the trade is ``activate_after_pct`` in profit, the exit trails
     ``distance_pct`` behind the running peak (long) / trough (short) and fires on
     the pull-back. Phase 1 is percent-only (the validator enforces the engine
-    type set); it is mutually exclusive with ``trailing_stop`` — a position trails
-    EITHER its stop OR its take-profit, never both."""
+    type set). It may coexist with ``trailing_stop`` — the engine runs both lines
+    and exits on whichever a reversal hits first (a staged trail); the validator
+    only WARNS when one line is dominated and can never fire."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -181,6 +216,20 @@ class TrailingTakeProfit(BaseModel):
         description="Profit percent the trade must reach before trailing engages. "
         "Omit for immediate. e.g. 5.0 = only start trailing once up 5%.",
     )
+
+    @model_validator(mode="after")
+    def _require_distance_for_percent(self) -> "TrailingTakeProfit":
+        # distance_pct is the give-back distance itself — without it a percent trailing
+        # take-profit is undefined. activate_after_pct only sets WHEN trailing engages.
+        # The engine loader hard-rejects a missing distance later; enforce it here at
+        # the contract so the chat repair loop fixes it instead of crashing the backtest.
+        if self.type == "percent" and self.distance_pct is None:
+            raise ValueError(
+                "trailing_take_profit with type='percent' requires distance_pct (how far behind "
+                "the running peak/trough the take-profit trails). activate_after_pct only sets WHEN "
+                "trailing starts, not how far it trails."
+            )
+        return self
 
     def to_engine_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.model_dump().items() if v is not None}
@@ -282,6 +331,161 @@ class Gates(BaseModel):
         return out
 
 
+# ── Dynamic-universe blocks (KB-free; direct StrategySpec path) ───────────────
+# A dynamic-universe strategy names a RULE for selecting instruments instead of a
+# single ``symbol``. The rule is re-resolved on a cadence into a time-varying set of
+# members traded under one shared capital pool. These models are LLM-emitted (never
+# regex-extracted — honors the LLM-only rule) and are validated/clamped downstream:
+#   * conditions in ``screen`` compile against the SAME engine grammar as
+#     ``entry_condition`` (app.strategy.validator);
+#   * ``take`` / ``max_positions`` express USER INTENT — the platform clamps the
+#     *effect* at runtime in the resolver (DYNAMIC_UNIVERSE_MAX_ASSETS, §7.1).
+# Nothing here imports the KB / planner (Invariant 11).
+
+# Ranking metrics the resolver knows how to compute. A trailing ``*`` in the spec
+# marks metrics that need feeds not yet wired (delivery/oi) — accepted by the model
+# (intent preserved) and surfaced by the validator as an informational note.
+UniverseRankBy = Literal[
+    "rvol",            # relative volume — "most active"
+    "volume",          # raw traded volume
+    "pct_change",      # period return — "biggest movers" (gainers/losers via order)
+    "rel_strength",    # strength vs a reference index
+    "momentum",        # price momentum over a window
+    "atr_pct",         # ATR as % of price — "most volatile"
+    "distance_52w",    # distance to the 52-week extreme — "near highs"
+    "rsi",             # RSI level — "most oversold/overbought"
+    "delivery_volume", # delivery quantity (needs a delivery feed)
+    "oi_change",       # open-interest change (needs an OI feed)
+]
+
+
+class UniverseSource(BaseModel):
+    """Where the candidate pool comes from — the KB-free universe-source registry.
+
+    ``kind`` selects the registry resolver (app.services.universe.sources):
+      * ``index`` / ``sector`` / ``f_and_o`` → point-in-time constituents
+        (``name`` identifies the index/sector, e.g. ``"NIFTY500"`` / ``"banking"``);
+      * ``crypto_all`` → the exchange's tradable-pairs catalog;
+      * ``watchlist`` → the explicit ``symbols`` list.
+    No field here references the knowledge base.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["index", "sector", "f_and_o", "crypto_all", "watchlist"]
+    name: str | None = None          # index/sector identifier (e.g. "NIFTY500")
+    symbols: list[str] = Field(default_factory=list)  # watchlist members
+
+    _coerce_symbols = field_validator("symbols", mode="before")(_none_to_empty_list)
+
+
+class UniverseRank(BaseModel):
+    """How candidates that pass the screen are ordered before take-N.
+
+    ``by`` is the ranking metric; ``order`` is ``desc`` (top, the usual case) or
+    ``asc`` (bottom — e.g. biggest losers, most oversold). ``window`` is the lookback
+    in bars for window-based metrics (momentum/atr_pct/distance_52w/rel_strength).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    by: UniverseRankBy
+    order: Literal["desc", "asc"] = "desc"
+    window: int | None = Field(default=None, gt=0)
+
+
+class UniverseEligibility(BaseModel):
+    """Fail-closed tradability filter applied BEFORE ranking (Invariant 5).
+
+    A candidate that cannot be confidently shown to be tradable is EXCLUDED — stale
+    or missing input never admits by default. ``min_adv`` is an average-daily-VALUE
+    floor (price×volume) computed from OHLCV (no vendor feed); ``adv_window`` its
+    lookback in bars (defaults to the platform setting when unset).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_adv: float | None = Field(default=None, ge=0)
+    adv_window: int | None = Field(default=None, gt=0)
+    require_tradable: bool = True
+    exclude_in_circuit: bool = True
+
+
+class UniverseBreadthGate(BaseModel):
+    """Optional market-context gate evaluated ONCE per refresh over the Tier-A pool.
+
+    When the gate fails (or its input is stale) the refresh admits NO new members —
+    fail-closed (Invariant 5). ``metric`` selects the breadth measure; ``min_ratio``
+    is the threshold the measure must clear for the gate to pass.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    metric: Literal[
+        "advance_decline", "new_high_new_low", "sector_strength", "market_trend"
+    ]
+    min_ratio: float | None = Field(default=None, ge=0)
+
+
+class UniverseRefresh(BaseModel):
+    """How often membership is re-resolved.
+
+    ``cadence`` is the coarse rhythm; ``at`` is an optional wall-clock time
+    (``"HH:MM"``, exchange tz) for the daily/intraday refresh (e.g. the canonical
+    "one hour after open" → ``"10:15"``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: Literal["daily", "weekly", "intraday"] = "daily"
+    at: str | None = None
+
+
+class UniverseSpec(BaseModel):
+    """The full dynamic-universe rule: source → screen → eligibility → rank → take-N.
+
+    Mutually exclusive with ``StrategySpec.symbol`` (the one-of validator enforces it).
+    The strategy body (``to_engine_template_dict``) is symbol-agnostic and stamped onto
+    each resolved member; this block is the selection rule that produces those members.
+
+    ``take`` / ``max_positions`` are USER INTENT — the resolver clamps the realised
+    count to the platform cap at runtime (§7.1), so saved strategies need no re-validation
+    when the cap changes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: UniverseSource
+    # Boolean screen conditions in the engine grammar (same compiler as entry_condition),
+    # evaluated on daily (or scan_timeframe) bars up to `asof`. A candidate must pass ALL.
+    screen: list[str] = Field(default_factory=list)
+    rank: UniverseRank
+    take: int = Field(default=10, gt=0)        # how many members the USER wants
+    _coerce_screen = field_validator("screen", mode="before")(_none_to_empty_list)
+    max_positions: int | None = Field(default=None, gt=0)  # concurrent cap; None ⇒ take
+    eligibility: UniverseEligibility = Field(default_factory=UniverseEligibility)
+    breadth: UniverseBreadthGate | None = None
+    refresh: UniverseRefresh = Field(default_factory=UniverseRefresh)
+    # Timeframe the screen/rank metrics evaluate on (defaults to daily). The strategy's
+    # own `timeframe` still governs execution (Tier B); this is the Tier-A screen TF.
+    scan_timeframe: str | None = None
+    # What happens to a member that drops out of the universe at a refresh: flatten
+    # immediately (default, intraday-style) or hold the open position until its own exit.
+    removal_policy: Literal["flatten", "hold_until_exit"] = "flatten"
+
+    def effective_max_positions(self, *, cap: int | None = None) -> int:
+        """Concurrent-position cap honoring intent + platform ceiling.
+
+        = min(max_positions or take, take[, cap]). The platform cap is applied by the
+        resolver (§7.1); pass it here only when reducing in one place.
+        """
+        base = self.max_positions if self.max_positions is not None else self.take
+        candidates = [base, self.take]
+        if cap is not None:
+            candidates.append(cap)
+        return max(1, min(candidates))
+
+
 # Engine fallbacks when the rich SL/TP type can't be expressed natively (recorded,
 # never silent — the reduction is surfaced via the validator's notes).
 _DEFAULT_SL_PCT = 2.0
@@ -294,7 +498,11 @@ class StrategySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    symbol: str
+    # Exactly ONE of `symbol` / `universe` is set (the one-of validator enforces it).
+    # `symbol` → the static single-instrument path (unchanged). `universe` → the
+    # dynamic-universe path: a selection RULE re-resolved on a cadence (§3, §7).
+    symbol: str | None = None
+    universe: UniverseSpec | None = None
     market: str
     timeframe: str
     objective: Literal["intraday", "positional"]
@@ -327,6 +535,42 @@ class StrategySpec(BaseModel):
 
     position_sizing_mode: Literal["fixed_fractional", "risk_based", "fixed_units"] = "fixed_fractional"
     max_capital_allocation_pct: float = Field(default=100.0, gt=0, le=100)
+
+    # ── Instrument selection: static symbol XOR dynamic universe ──────────────
+
+    _coerce_lists = field_validator(
+        "indicators", "htf_rules", mode="before"
+    )(_none_to_empty_list)
+
+    @model_validator(mode="after")
+    def _exactly_one_instrument_source(self) -> "StrategySpec":
+        """Enforce the one-of contract: a spec names a single ``symbol`` OR a
+        ``universe`` rule, never both and never neither.
+
+        This keeps the static path identical (every existing spec sets ``symbol``
+        and no ``universe``) while making the dynamic path explicit and unambiguous.
+        Pydantic ``extra='forbid'`` plus this check is the whole gate on which path
+        a spec takes.
+        """
+        has_symbol = bool(self.symbol and self.symbol.strip())
+        has_universe = self.universe is not None
+        if has_symbol and has_universe:
+            raise ValueError(
+                "A strategy names EITHER a single `symbol` OR a `universe` rule, "
+                "not both. Drop one: set `symbol` for a single instrument, or "
+                "`universe` for a dynamic, rule-selected set."
+            )
+        if not has_symbol and not has_universe:
+            raise ValueError(
+                "A strategy must name an instrument: set `symbol` for a single "
+                "instrument, or a `universe` rule for a dynamic, rule-selected set."
+            )
+        return self
+
+    @property
+    def is_dynamic(self) -> bool:
+        """True when this spec uses the dynamic-universe path (no fixed symbol)."""
+        return self.universe is not None
 
     # ── Risk reduction to the engine's runnable subset ────────────────────────
 
@@ -386,6 +630,36 @@ class StrategySpec(BaseModel):
         """The inner ``strategy:`` mapping engine.loader._build_strategy_config reads.
 
         Always formula mode: no ``entry_signals``/``exit_signals``/registry keys.
+
+        Static path: renders against ``self.symbol`` (byte-for-byte unchanged). For a
+        dynamic-universe spec (no fixed symbol) the per-member body is produced by
+        :meth:`to_engine_template_dict` instead — calling this without a symbol is a
+        programming error and raises.
+        """
+        if not (self.symbol and self.symbol.strip()):
+            raise ValueError(
+                "to_engine_yaml_dict() needs a fixed `symbol`; this is a dynamic-"
+                "universe spec — render each member via to_engine_template_dict(symbol)."
+            )
+        return self._render_engine_strategy(self.symbol)
+
+    def to_engine_template_dict(self, member_symbol: str) -> dict[str, Any]:
+        """The symbol-agnostic strategy body stamped onto one resolved universe member.
+
+        Identical to :meth:`to_engine_yaml_dict` except the instrument is supplied by
+        the caller (the resolved member) rather than ``self.symbol``. This is the
+        "strategy template" insight (§3.1): only the ``symbol`` line differs per member;
+        the rest of the body is shared. Reuses the SAME renderer so backtest/live and
+        static/dynamic can never drift.
+        """
+        return self._render_engine_strategy(member_symbol)
+
+    def _render_engine_strategy(self, symbol: str) -> dict[str, Any]:
+        """Render the inner ``strategy:`` mapping for a given instrument symbol.
+
+        The single source of truth for the engine body, shared by the static path
+        (``to_engine_yaml_dict``) and the dynamic per-member path
+        (``to_engine_template_dict``) so they cannot diverge (Invariant 1).
         """
         rm = self.risk_management
         profile: dict[str, Any] = {
@@ -398,7 +672,7 @@ class StrategySpec(BaseModel):
 
         strat: dict[str, Any] = {
             "name": self.name,
-            "symbol": self.symbol,
+            "symbol": symbol,
             "market": self.market,
             "timeframe": self.timeframe,
             "objective": self.objective,
@@ -436,6 +710,22 @@ class StrategySpec(BaseModel):
         sl_spec = self.stop_loss_engine_spec()
         if sl_spec is not None:
             strat["stop_loss"] = sl_spec
+        # Multi-TP ladder — emitted when the spec carries a scale-out targets list.
+        # Zeroing the scalar take_profit_percent prevents the engine from firing a
+        # static target before any rung exits occur.
+        if self.take_profit is not None and self.take_profit.targets:
+            resolved = self.take_profit.resolved_targets()
+            strat["risk_management"]["multi_take_profit"] = [
+                {
+                    "type": t.type,
+                    "value": float(t.numeric() or 0),
+                    "exit_fraction": float(t.exit_fraction or 0),
+                    **({"risk_action": t.risk_action.type} if t.risk_action else {}),
+                }
+                for t in resolved
+            ]
+            strat["risk_management"]["take_profit_percent"] = 0.0
+            strat["variables"]["TAKE_PROFIT_TARGET"] = 0.0
         if self.trailing_stop is not None:
             strat["trailing_stop"] = self.trailing_stop.to_engine_dict()
         if self.trailing_take_profit is not None:

@@ -76,7 +76,10 @@ def build_assessment(metrics: dict[str, Any]) -> dict[str, str]:
     max_drawdown        = float(metrics.get("max_drawdown") or 0.0)
     volatility_pct      = float(metrics.get("volatility_pct") or 0.0)
     var_95_pct          = float(metrics.get("var_95_pct") or 0.0)
-    recovery_time_days  = int(metrics.get("recovery_time_days") or 0)
+    # Preserve None (never recovered) — do NOT coerce to 0, which would read as
+    # an instant recovery and understate the required drawdown tolerance.
+    _recovery_raw       = metrics.get("recovery_time_days")
+    recovery_time_days  = int(_recovery_raw) if _recovery_raw is not None else None
     trades_per_month    = float(metrics.get("trades_per_month") or 0.0)
 
     if total_trades <= 0:
@@ -180,8 +183,11 @@ def _classify_risk_profile(
 def _classify_drawdown_tolerance(
     *,
     max_drawdown: float,
-    recovery_time_days: int,
+    recovery_time_days: int | None,
 ) -> str:
+    # Never recovered to the prior peak within the window → highest tolerance.
+    if recovery_time_days is None:
+        return "High"
     if (
         max_drawdown       <= DRAWDOWN_TOLERANCE_LOW_MAX_PCT
         and recovery_time_days <= DRAWDOWN_TOLERANCE_LOW_MAX_RECOVERY_DAYS

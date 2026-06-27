@@ -1,6 +1,8 @@
 """
 app/services/strategy/yaml_generator.py
 """
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -23,18 +25,38 @@ def _candidate_strategy_folders() -> list[str]:
     return ordered
 
 
-def generate_yaml(builder: StrategyBuilder) -> str:
-    """Write strategy YAML to disk. Returns the file path."""
+def generate_yaml(builder: StrategyBuilder, *, symbol_override: str | None = None) -> str:
+    """Write strategy YAML to disk. Returns the file path.
+
+    ``symbol_override`` swaps only the engine-facing ``strategy.symbol`` so the
+    backtest's trades are tagged with the asset actually being run — used by a
+    single-asset backtest whose symbol was overridden via the run_backtest
+    ``symbols`` arg. The ``builder``/session is NOT mutated; None → builder's own
+    symbol (legacy behaviour, unchanged).
+    """
     data      = builder.to_yaml_dict()
+    if symbol_override:
+        strategy_section = data.get("strategy")
+        if isinstance(strategy_section, dict):
+            strategy_section["symbol"] = str(symbol_override)
     name      = data["strategy"]["name"]
     safe_name = re.sub(r"[^a-zA-Z0-9]", "_", name).lower()
+
+    # Dynamic universe: emit the `universe:` block alongside the strategy template so the
+    # backtest route branches to the portfolio path. The strategy body is symbol-agnostic
+    # (members are stamped per-resolution at backtest time) — stamp a placeholder symbol.
+    universe_block = getattr(builder, "universe", None)
+    if isinstance(universe_block, dict) and universe_block:
+        data["universe"] = universe_block
+        if isinstance(data.get("strategy"), dict):
+            data["strategy"]["symbol"] = data["strategy"].get("symbol") or "UNIVERSE_MEMBER"
 
     strategy_block = data.get("strategy", {}) if isinstance(data, dict) else {}
     signals = strategy_block.get("signals") or strategy_block.get("entry") or []
     logger.info(
         "🏗️  Assembling strategy YAML | name=%s symbol=%s timeframe=%s signals=%s",
         name,
-        getattr(builder, "symbol", None),
+        symbol_override or getattr(builder, "symbol", None),
         getattr(builder, "timeframe", None),
         len(signals) if isinstance(signals, (list, dict)) else signals,
     )

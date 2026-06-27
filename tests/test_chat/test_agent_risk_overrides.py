@@ -41,7 +41,7 @@ def test_apply_agent_risk_param_overrides_updates_builder_and_draft():
     snapshot = build_inputs_snapshot_from_draft(draft)
     sl_row = next(r for r in snapshot["summary_rows"] if r["label"] == "Stop loss")
     tp_row = next(r for r in snapshot["summary_rows"] if r["label"] == "Take profit")
-    assert sl_row["value"] == "5.0%"
+    assert sl_row["value"] == "5%"
     assert tp_row["value"] == "0.4%"
 
 
@@ -62,5 +62,5 @@ def test_snapshot_reads_agent_decision_when_draft_pct_null():
     snapshot = build_inputs_snapshot_from_draft(draft)
     sl_row = next(r for r in snapshot["summary_rows"] if r["label"] == "Stop loss")
     tp_row = next(r for r in snapshot["summary_rows"] if r["label"] == "Take profit")
-    assert sl_row["value"] == "5.0%"
+    assert sl_row["value"] == "5%"
     assert tp_row["value"] == "0.4%"

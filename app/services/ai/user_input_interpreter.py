@@ -556,6 +556,7 @@ async def route_user_message(
         "stop_loss_pct": None,
         "take_profit_pct": None,
         "risk_reward": None,
+        "multi_take_profit": None,
         "per_trade_risk": None,
         "daily_loss_cap": None,
         "max_trades": None,
@@ -634,7 +635,8 @@ async def route_user_message(
                 "- Capture risk-management settings when the user states them, copying the NUMBER exactly as written:\n"
                 "    * stop_loss_pct — stop-loss percent, e.g. 'stop loss 0.5%', 'SL: 1%' → 0.5, 1.\n"
                 "    * take_profit_pct — take-profit/target percent, e.g. 'take profit 1%', 'target 2%' → 1, 2.\n"
-                "    * risk_reward — risk:reward as a single reward-per-risk number; '1:2 RR' or '2R' → 2; '1:3' → 3.\n"
+                "    * risk_reward — risk:reward as a single reward-per-risk number; '1:2 RR' or '2R' → 2; '1:3' → 3. Use this ONLY when the user names a single target with no per-tranche sizes.\n"
+                "    * multi_take_profit — when the user specifies MULTIPLE exit targets with sizes (e.g. 'exit 30% at 1R, 30% at 2R, 40% at 4R' or 'take half at 1.5R, rest at 3R'), emit an array of {\"value\": <R-multiple>, \"exit_fraction\": <0-to-1>} objects in ascending value order. If the user says 'half' treat it as 0.5. If fractions are not stated, distribute equally. Set risk_reward to null when multi_take_profit is non-null.\n"
                 "    * per_trade_risk — percent of capital risked per trade, e.g. 'risk 1% per trade', 'Per Trade Risk: 1%' → 1.\n"
                 "    * daily_loss_cap — daily loss cap percent, e.g. 'daily loss cap 4%', 'stop after 3% daily loss' → 4, 3.\n"
                 "    * max_trades — max trades per day as an integer, e.g. 'max 10 trades per day' → 10.\n"
@@ -723,6 +725,7 @@ async def route_user_message(
                 "\"stop_loss_pct\": null,"
                 "\"take_profit_pct\": null,"
                 "\"risk_reward\": null,"
+                "\"multi_take_profit\": null,"
                 "\"per_trade_risk\": null,"
                 "\"daily_loss_cap\": null,"
                 "\"max_trades\": null"
@@ -801,6 +804,25 @@ async def route_user_message(
         _max_trades = _max_trades.strip()
     _max_trades = _coerce_float(_max_trades)
     result["max_trades"] = int(_max_trades) if _max_trades is not None else None
+
+    # multi_take_profit — a list of {value, exit_fraction} dicts or null.
+    # Validate defensively: keep only well-formed dicts with numeric value.
+    _mtp_raw = payload.get("multi_take_profit")
+    if isinstance(_mtp_raw, list) and len(_mtp_raw) >= 2:
+        _mtp_clean: list[dict] = []
+        for _r in _mtp_raw:
+            if not isinstance(_r, dict):
+                continue
+            try:
+                _v = float(_r.get("value") or 0)
+                _f = float(_r.get("exit_fraction") or 0)
+            except (TypeError, ValueError):
+                continue
+            if _v > 0:
+                _mtp_clean.append({"value": _v, "exit_fraction": max(0.0, min(1.0, _f))})
+        result["multi_take_profit"] = _mtp_clean if len(_mtp_clean) >= 2 else None
+    else:
+        result["multi_take_profit"] = None
 
     recognized_fields: list[str] = []
     if result["stock_query"]:

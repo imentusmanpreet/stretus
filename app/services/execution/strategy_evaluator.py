@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant_context import get_current_tenant
 from app.db.models.execution import ExecutionState
 from app.db.models.strategy import Strategy
 from app.schemas.backtest import TradeEntryReason, TradeExitReason
@@ -143,6 +144,14 @@ class StrategyEvaluator:
 
     async def evaluate(self, req: EvaluateExecuteRequest) -> EvaluateExecuteResponse:
         messages: List[str] = []
+        tenant = get_current_tenant()
+        if tenant is not None:
+            self._emit(
+                messages,
+                f"🏢 tenant | id={tenant.tenant_id} code={tenant.tenant_code or '-'} "
+                f"legacy={tenant.is_legacy} adapters={sorted(tenant.adapters.keys())}",
+            )
+            logger.info("tenant_config|event=evaluate|tenant_id=%s|legacy=%s", tenant.tenant_id, tenant.is_legacy)
 
         try:
             # ── Step 1: Load strategy config ──────────────────────────────────
@@ -432,44 +441,80 @@ class StrategyEvaluator:
 
             # ── Build bracket order ────────────────────────────────────────────
             last_bar_dt = str(df.index[-1]) if hasattr(df.index, "__iter__") else None
-            bracket = self._trade.build_bracket_order(
-                symbol=symbol,
-                quantity=risk_out.position_size,
-                entry_price=ltp,
-                stop_loss_price=risk_out.stop_loss_price,
-                take_profit_price=risk_out.take_profit_price,
-                strategy_type=strategy_type,
-                strategy_id=strategy_id_str,
-                mode=mode.value,
-                bar_datetime=last_bar_dt,
-                asset_class=asset_class,
-                trailing_take_profit=strategy_cfg.sl_tp.trailing_take_profit,
-                trailing_stop=strategy_cfg.sl_tp.trailing_stop,
-            )
-
             sl_pct  = float(getattr(effective_risk_config, "stop_loss_pct", strategy_cfg.sl_tp.stop_loss_pct))
             tp_pct  = float(getattr(effective_risk_config, "take_profit_pct", strategy_cfg.sl_tp.take_profit_pct))
             dlc_pct = float(getattr(effective_risk_config, "daily_loss_cap_pct", 3.0) or 3.0)
             ptr_pct = float(getattr(effective_risk_config, "per_trade_risk_pct", strategy_cfg.risk.max_risk_per_trade_pct))
 
+            _multi_tp_targets = getattr(strategy_cfg.sl_tp, "multi_take_profit", None) or []
+            _use_multi_tp = bool(_multi_tp_targets)
+
+            if _use_multi_tp:
+                tp_ladder = self._risk.compute_tp_ladder(
+                    entry_price=ltp,
+                    stop_loss_price=risk_out.stop_loss_price,
+                    total_quantity=risk_out.position_size,
+                    tp_targets=_multi_tp_targets,
+                    asset_class=asset_class,
+                )
+                multi_tp_bracket = self._trade.build_multi_tp_bracket_order(
+                    symbol=symbol,
+                    entry_price=ltp,
+                    stop_loss_price=risk_out.stop_loss_price,
+                    tp_ladder=tp_ladder,
+                    strategy_type=strategy_type,
+                    strategy_id=strategy_id_str,
+                    mode=mode.value,
+                    bar_datetime=last_bar_dt,
+                    asset_class=asset_class,
+                )
+                bracket = None
+                _rung_summary = ", ".join(
+                    f"TP{r.rung_index + 1}@{currency_sym}{r.price:.2f}×{r.exit_qty}"
+                    for r in tp_ladder.rungs
+                )
+                self._emit(messages,
+                    f"📦 MULTI-TP BRACKET GENERATED | asset_class={asset_class.value}"
+                    f"  qty={risk_out.position_size}"
+                    f"  entry={currency_sym}{ltp:.4f}"
+                    f"  SL={currency_sym}{risk_out.stop_loss_price:.4f} (-{sl_pct}%)"
+                    f"  rungs=[{_rung_summary}]"
+                    f"  principal={currency_sym}{risk_out.principal_amount:,.4f}"
+                )
+            else:
+                bracket = self._trade.build_bracket_order(
+                    symbol=symbol,
+                    quantity=risk_out.position_size,
+                    entry_price=ltp,
+                    stop_loss_price=risk_out.stop_loss_price,
+                    take_profit_price=risk_out.take_profit_price,
+                    strategy_type=strategy_type,
+                    strategy_id=strategy_id_str,
+                    mode=mode.value,
+                    bar_datetime=last_bar_dt,
+                    asset_class=asset_class,
+                    trailing_take_profit=strategy_cfg.sl_tp.trailing_take_profit,
+                    trailing_stop=strategy_cfg.sl_tp.trailing_stop,
+                )
+                multi_tp_bracket = None
+                self._emit(messages,
+                    f"📦 BRACKET ORDER GENERATED | asset_class={asset_class.value}"
+                    f"  qty={risk_out.position_size}"
+                    f"  entry={currency_sym}{ltp:.4f}"
+                    f"  SL={currency_sym}{risk_out.stop_loss_price:.4f} (-{sl_pct}%)"
+                    f"  TP={currency_sym}{risk_out.take_profit_price:.4f} (+{tp_pct}%)"
+                    f"  principal={currency_sym}{risk_out.principal_amount:,.4f}"
+                )
+
             risk_snapshot = RiskSnapshot(
                 stop_loss_pct=sl_pct,
                 take_profit_pct=tp_pct,
                 stop_loss_price=risk_out.stop_loss_price,
-                take_profit_price=risk_out.take_profit_price,
+                take_profit_price=risk_out.take_profit_price if not _use_multi_tp else None,
                 position_size=risk_out.position_size,
                 principal_amount=risk_out.principal_amount,
                 daily_loss_cap_pct=dlc_pct,
                 per_trade_risk_pct=ptr_pct,
-            )
-
-            self._emit(messages,
-                f"📦 BRACKET ORDER GENERATED | asset_class={asset_class.value}"
-                f"  qty={risk_out.position_size}"
-                f"  entry={currency_sym}{ltp:.4f}"
-                f"  SL={currency_sym}{risk_out.stop_loss_price:.4f} (-{sl_pct}%)"
-                f"  TP={currency_sym}{risk_out.take_profit_price:.4f} (+{tp_pct}%)"
-                f"  principal={currency_sym}{risk_out.principal_amount:,.4f}"
             )
 
             signal_bar, indicators = _extract_last_bar(df)
@@ -497,6 +542,7 @@ class StrategyEvaluator:
                 ltp=ltp,
                 mode=mode,
                 bracket_order=bracket,
+                multi_tp_bracket=multi_tp_bracket,
                 risk_snapshot=risk_snapshot,
                 entry_detail=entry_detail,
                 messages=messages,
@@ -615,7 +661,7 @@ class StrategyEvaluator:
             reason: Optional[str] = None
             entry_px = getattr(pos, "entry_price", None)
             pnl_str  = (
-                f"  unrealised_PnL=₹{(ltp - entry_px) * getattr(pos, 'quantity', 1):+,.2f}"
+                f"  unrealised_PnL=₹{(ltp - entry_px) * float(getattr(pos, 'quantity', 1)):+,.2f}"
                 if entry_px else ""
             )
             self._emit(messages,
@@ -627,6 +673,53 @@ class StrategyEvaluator:
                 f"{pnl_str}"
             )
 
+            # 0. Multi-TP ladder — check rungs before the standard SL/TP path.
+            #    Each un-hit rung whose price is reached triggers a partial exit.
+            #    risk_action updates stop_loss_price in-place on the position so the
+            #    SL check below uses the updated value (e.g. moved to breakeven).
+            if pos.take_profit_ladder is not None:
+                is_long = pos.side == "BUY"
+                for rung in pos.take_profit_ladder.rungs:
+                    if rung.hit:
+                        continue
+                    rung_hit = (
+                        (is_long and ltp >= rung.price) or
+                        (not is_long and ltp <= rung.price)
+                    )
+                    if not rung_hit:
+                        continue
+                    rung.hit = True
+                    # Apply risk_action
+                    if rung.risk_action == "move_sl_to_breakeven":
+                        if is_long:
+                            pos.stop_loss_price = max(pos.stop_loss_price or 0.0, pos.entry_price)
+                        else:
+                            pos.stop_loss_price = min(pos.stop_loss_price or float("inf"), pos.entry_price)
+                    elif rung.risk_action == "move_sl_to_previous_tp":
+                        fired = [r for r in pos.take_profit_ladder.rungs if r.hit and r.rung_index < rung.rung_index]
+                        if fired:
+                            prev_price = fired[-1].price
+                            if is_long:
+                                pos.stop_loss_price = max(pos.stop_loss_price or 0.0, prev_price)
+                            else:
+                                pos.stop_loss_price = min(pos.stop_loss_price or float("inf"), prev_price)
+                    exits.append(self._trade.build_exit_instruction(
+                        position=pos,
+                        reason="partial_take_profit",
+                        exit_price=ltp,
+                        strategy_type=strategy_type,
+                        asset_class=asset_class,
+                    ))
+                    exits[-1].quantity = rung.exit_qty
+                    self._emit(messages,
+                        f"  🟡 PARTIAL TP RUNG {rung.rung_index} HIT | "
+                        f"LTP={ltp:.4f} ≥ {rung.price:.4f} | "
+                        f"exit_qty={rung.exit_qty} | risk_action={rung.risk_action}"
+                    )
+                # If all rungs hit → full position exited; skip remaining checks.
+                if all(r.hit for r in pos.take_profit_ladder.rungs):
+                    continue
+
             # 1. Stop loss
             if pos.stop_loss_price is not None and self._rule.check_stop_loss(ltp, pos.stop_loss_price):
                 reason = "stop_loss"
@@ -634,8 +727,8 @@ class StrategyEvaluator:
                     f"  🔴 STOP LOSS HIT | LTP=₹{ltp:.2f} ≤ SL=₹{pos.stop_loss_price:.2f}"
                 )
 
-            # 2. Take profit
-            elif pos.take_profit_price is not None and self._rule.check_take_profit(ltp, pos.take_profit_price):
+            # 2. Take profit (single-TP or remainder when multi-TP is not active)
+            elif pos.take_profit_price is not None and pos.take_profit_ladder is None and self._rule.check_take_profit(ltp, pos.take_profit_price):
                 reason = "take_profit"
                 self._emit(messages,
                     f"  🟢 TAKE PROFIT HIT | LTP=₹{ltp:.2f} ≥ TP=₹{pos.take_profit_price:.2f}"
@@ -846,6 +939,41 @@ def _strategy_config_from_db(
             or runtime_risk_config.take_profit_pct
         )
 
+    # Multi-TP ladder — written by build_strategy_config (strategy_assembler.py)
+    # into sl_tp.multi_take_profit (engine format) for new strategies, or into
+    # execution_layers.partial_exits (chat format) for older ones.
+    _multi_tp: Optional[List[Dict[str, Any]]] = None
+    _raw_mtp = sl_tp_raw.get("multi_take_profit")
+    if not _raw_mtp:
+        # Fallback: execution_layers.partial_exits uses chat format
+        # {trigger, value, size_pct, risk_action} → convert to engine format.
+        _chat_rungs = (raw.get("execution_layers") or {}).get("partial_exits") or []
+        if _chat_rungs and isinstance(_chat_rungs, list):
+            def _chat_to_engine(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                if not isinstance(r, dict):
+                    return None
+                trigger = r.get("trigger", r.get("type", "risk_reward"))
+                tp_type = "risk_reward" if trigger == "rr_multiple" else trigger
+                size_pct = r.get("size_pct")
+                exit_frac = r.get("exit_fraction")
+                if size_pct is not None:
+                    exit_frac = round(float(size_pct) / 100.0, 4)
+                elif exit_frac is not None:
+                    exit_frac = round(float(exit_frac), 4)
+                else:
+                    return None
+                return {
+                    "type": tp_type,
+                    "value": float(r.get("value", 0)),
+                    "exit_fraction": exit_frac,
+                    "risk_action": r.get("risk_action", "none"),
+                }
+            _converted = [_chat_to_engine(r) for r in _chat_rungs]
+            _raw_mtp = [r for r in _converted if r is not None] or None
+    if _raw_mtp and isinstance(_raw_mtp, list) and len(_raw_mtp) >= 2:
+        _multi_tp = _raw_mtp
+        tp_pct = 0.0  # ladder overrides scalar target
+
     # Phase 10 — entry gates. The chat flow persists these under a "gates" key
     # in strategy_config (see app/planner/strategy_assembler.py). Strategies
     # created before Phase 10 have no "gates" key → GatesConfig() defaults all
@@ -888,6 +1016,7 @@ def _strategy_config_from_db(
             take_profit_pct=tp_pct,
             trailing_take_profit=trailing_tp_spec,
             trailing_stop=trailing_st_spec,
+            multi_take_profit=_multi_tp,
         ),
         risk=RiskConfig(
             max_risk_per_trade_pct=float(

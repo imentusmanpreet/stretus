@@ -166,6 +166,38 @@ def build_strategy_config(builder: Any, strategy_payload: dict) -> dict:
         config["trailing_take_profit"] = dict(builder.trailing_take_profit_spec)
     if getattr(builder, "trailing_stop_spec", None):
         config["trailing_stop"] = dict(builder.trailing_stop_spec)
+
+    # Multi-TP ladder — persist execution_layers and a sl_tp block so that
+    # _strategy_config_from_db() can reconstruct SlTpConfig.multi_take_profit
+    # when the strategy is loaded for live eval (Mode 1 / strategy_id path).
+    _partial_exits = (getattr(builder, "execution_layers", None) or {}).get("partial_exits") or []
+    if _partial_exits:
+        config["execution_layers"] = {"partial_exits": copy.deepcopy(_partial_exits)}
+
+        def _to_engine(rung: dict) -> dict:
+            trigger = rung.get("trigger", rung.get("type", "risk_reward"))
+            tp_type = "risk_reward" if trigger == "rr_multiple" else trigger
+            size_pct = rung.get("size_pct")
+            exit_frac = rung.get("exit_fraction")
+            if size_pct is not None:
+                exit_frac = round(float(size_pct) / 100.0, 4)
+            elif exit_frac is not None:
+                exit_frac = round(float(exit_frac), 4)
+            else:
+                exit_frac = 0.0
+            return {
+                "type": tp_type,
+                "value": float(rung.get("value", 0)),
+                "exit_fraction": exit_frac,
+                "risk_action": rung.get("risk_action", "none"),
+            }
+
+        config["sl_tp"] = {
+            "stop_loss_pct": float(getattr(builder, "stop_loss", None) or 0),
+            "take_profit_pct": 0.0,
+            "multi_take_profit": [_to_engine(pe) for pe in _partial_exits],
+        }
+
     return config
 
 

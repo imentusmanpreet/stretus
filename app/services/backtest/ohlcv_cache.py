@@ -24,6 +24,12 @@ Cache size guard:
 
 Cache key:
   MD5 of (symbol, interval, from_utc, to_utc). Deterministic per request.
+  IMPORTANT: key must use the warm-up-extended from_utc (fetch_from), not the
+  simulation start (sim_from). Lookup and save must use the same object.
+
+Atomic writes:
+  We write to a .tmp file first, then rename() to the final path. rename() is
+  atomic on POSIX — a crash mid-write leaves a .tmp file, not a corrupt .pkl.gz.
 """
 from __future__ import annotations
 
@@ -50,13 +56,14 @@ CACHE_TTL_TODAY_SECONDS = int(os.getenv("BACKTEST_CACHE_TTL_TODAY_SECONDS", "360
 CACHE_MAX_BYTES = int(os.getenv("BACKTEST_CACHE_MAX_BYTES", str(5 * 1024 * 1024 * 1024)))
 
 
-def _cache_key(symbol: str, interval: str, from_utc: str, to_utc: str) -> str:
+def _cache_key(symbol: str, interval: str, from_utc: str, to_utc: str) -> tuple[str, str]:
+    """Return (raw_key_string, md5_hex). Raw string logged for debuggability."""
     raw = f"{symbol}|{interval}|{from_utc}|{to_utc}"
-    return hashlib.md5(raw.encode()).hexdigest()
+    return raw, hashlib.md5(raw.encode()).hexdigest()
 
 
-def _cache_path(key: str) -> Path:
-    return CACHE_DIR / f"{key}.pkl.gz"
+def _cache_path(key_hex: str) -> Path:
+    return CACHE_DIR / f"{key_hex}.pkl.gz"
 
 
 def _window_touches_today(to_utc: str) -> bool:
@@ -85,26 +92,50 @@ def get_cached_records(
     symbol: str, interval: str, from_utc: str, to_utc: str,
 ) -> list[dict[str, Any]] | None:
     """Return cached rows if a fresh entry exists for this exact window, else None."""
-    path = _cache_path(_cache_key(symbol, interval, from_utc, to_utc))
-    if not _is_fresh(path, to_utc):
-        if path.exists():
-            logger.info(
-                "🗑️  OHLCV cache stale | symbol=%s interval=%s from=%s to=%s",
-                symbol, interval, from_utc, to_utc,
-            )
+    raw_key, key_hex = _cache_key(symbol, interval, from_utc, to_utc)
+    path = _cache_path(key_hex)
+
+    logger.debug(
+        "🔍 OHLCV cache lookup | symbol=%s interval=%s from=%s to=%s | key=%s | file=%s",
+        symbol, interval, from_utc, to_utc, raw_key, path.name,
+    )
+
+    if not path.exists():
+        logger.info(
+            "❌ OHLCV cache MISS (no file) | symbol=%s interval=%s from=%s to=%s | key=%s",
+            symbol, interval, from_utc, to_utc, raw_key,
+        )
         return None
+
+    if not _is_fresh(path, to_utc):
+        age_seconds = datetime.now().timestamp() - path.stat().st_mtime
+        logger.info(
+            "🗑️  OHLCV cache STALE | symbol=%s interval=%s from=%s to=%s | "
+            "age=%.0fs ttl=%ds | key=%s",
+            symbol, interval, from_utc, to_utc,
+            age_seconds, CACHE_TTL_TODAY_SECONDS, raw_key,
+        )
+        return None
+
     try:
         with gzip.open(path, "rb") as fh:
             rows = pickle.load(fh)
         if not isinstance(rows, list):
             raise TypeError(f"unexpected cache payload type: {type(rows).__name__}")
+        file_kb = path.stat().st_size / 1024
         logger.info(
-            "✅ OHLCV cache HIT | symbol=%s interval=%s from=%s to=%s rows=%d",
-            symbol, interval, from_utc, to_utc, len(rows),
+            "✅ OHLCV cache HIT | symbol=%s interval=%s from=%s to=%s | "
+            "rows=%d file=%.1fKB | key=%s",
+            symbol, interval, from_utc, to_utc, len(rows), file_kb, raw_key,
         )
         return rows
     except Exception as exc:
-        logger.warning("⚠️  OHLCV cache read failed | file=%s error=%s — refetching", path.name, exc)
+        logger.warning(
+            "⚠️  OHLCV cache CORRUPT — evicting | symbol=%s interval=%s | "
+            "file=%s error=%s | key=%s",
+            symbol, interval, path.name, exc, raw_key,
+        )
+        path.unlink(missing_ok=True)
         return None
 
 
@@ -112,40 +143,73 @@ def save_records(
     symbol: str, interval: str, from_utc: str, to_utc: str,
     records: list[dict[str, Any]],
 ) -> None:
-    """Persist the fetched rows. Best-effort — logs and continues on failure."""
+    """Persist the fetched rows atomically. Best-effort — logs and continues on failure."""
     if not records:
         return
-    path = _cache_path(_cache_key(symbol, interval, from_utc, to_utc))
+    raw_key, key_hex = _cache_key(symbol, interval, from_utc, to_utc)
+    path = _cache_path(key_hex)
+    tmp_path = path.with_suffix(".tmp")
+
+    logger.info(
+        "💾 OHLCV cache WRITE | symbol=%s interval=%s from=%s to=%s | "
+        "rows=%d key=%s → %s",
+        symbol, interval, from_utc, to_utc, len(records), raw_key, path.name,
+    )
+
     try:
-        with gzip.open(path, "wb", compresslevel=4) as fh:
+        with gzip.open(tmp_path, "wb", compresslevel=4) as fh:
             pickle.dump(records, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        # Atomic rename — if we crash between open and here, .tmp is left behind
+        # (harmless) but the real .pkl.gz is never corrupted.
+        tmp_path.rename(path)
+        file_kb = path.stat().st_size / 1024
         logger.info(
-            "💾 OHLCV cached | symbol=%s interval=%s from=%s to=%s rows=%d",
-            symbol, interval, from_utc, to_utc, len(records),
+            "✅ OHLCV cache SAVED | symbol=%s interval=%s | rows=%d size=%.1fKB | key=%s",
+            symbol, interval, len(records), file_kb, raw_key,
         )
         _enforce_size_cap()
     except Exception as exc:
-        logger.warning("⚠️  OHLCV cache save failed | symbol=%s interval=%s error=%s", symbol, interval, exc)
+        logger.warning(
+            "⚠️  OHLCV cache save FAILED | symbol=%s interval=%s | "
+            "error=%s | key=%s",
+            symbol, interval, exc, raw_key,
+        )
+        tmp_path.unlink(missing_ok=True)
 
 
 def _enforce_size_cap() -> None:
     """Delete oldest files (by mtime) until directory size is under CACHE_MAX_BYTES."""
     files = sorted(CACHE_DIR.glob("*.pkl.gz"), key=lambda p: p.stat().st_mtime)
     total = sum(f.stat().st_size for f in files)
+    cap_gb = CACHE_MAX_BYTES / (1024 ** 3)
     if total <= CACHE_MAX_BYTES:
+        logger.debug(
+            "📦 OHLCV cache size OK | used=%.2fGB cap=%.2fGB files=%d",
+            total / (1024 ** 3), cap_gb, len(files),
+        )
         return
+    logger.warning(
+        "🚨 OHLCV cache over cap | used=%.2fGB cap=%.2fGB — evicting oldest files",
+        total / (1024 ** 3), cap_gb,
+    )
     deleted = 0
+    freed = 0
     while files and total > CACHE_MAX_BYTES:
         oldest = files.pop(0)
         size = oldest.stat().st_size
         try:
             oldest.unlink()
             total -= size
+            freed += size
             deleted += 1
+            logger.debug("🗑️  Evicted cache file | file=%s size=%.1fKB", oldest.name, size / 1024)
         except OSError as exc:
             logger.warning("⚠️  OHLCV cache eviction failed | file=%s error=%s", oldest.name, exc)
     if deleted:
-        logger.info("🧹 OHLCV cache size cap reached — evicted %d oldest files", deleted)
+        logger.info(
+            "🧹 OHLCV cache eviction done | removed=%d freed=%.2fMB remaining=%.2fGB",
+            deleted, freed / (1024 ** 2), total / (1024 ** 3),
+        )
 
 
 def clear_cache() -> int:

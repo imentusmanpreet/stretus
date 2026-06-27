@@ -410,6 +410,7 @@ def run_backtest(
             stop_loss_spec=cfg.stop_loss_spec,
             trailing_stop_spec=cfg.trailing_stop_spec,
             trailing_take_profit_spec=cfg.trailing_take_profit_spec,
+            take_profit_targets=cfg.multi_take_profit,
             htf_contexts=htf_contexts,
             time_exit_spec=cfg.time_exit_spec,
             # Phase 10 — new entry gates and circuit breakers
@@ -525,6 +526,12 @@ def run_backtest(
         metrics_duration,
     )
 
+    # Additive, OFF by default: the dynamic-universe portfolio orchestrator consumes the
+    # raw per-member Trade objects in-process (it never posts this result). The static
+    # path leaves this unset, so its result dict is byte-for-byte unchanged (Invariant 2/10).
+    if run_config.get("return_trades"):
+        result["trades"] = list(trades)
+
     pipeline_duration = time.perf_counter() - pipeline_start
     n_trades = int(result["metrics"].get("total_trades") or 0)
     logger.info(
@@ -539,6 +546,127 @@ def run_backtest(
         result["pass"],
     )
     return result
+
+
+def _stamp_member_yaml(template_yaml: str, member_symbol: str) -> str:
+    """Render the symbol-agnostic strategy template YAML for one resolved member.
+
+    Sets ``strategy.symbol`` to ``member_symbol`` and drops the ``universe:`` sibling
+    (the per-member run is a plain single-symbol backtest — Invariant 1: reuse the engine
+    unchanged). Returns YAML text ready for :func:`run_backtest`.
+    """
+    import yaml as _yaml
+
+    data = _yaml.safe_load(template_yaml)
+    if not isinstance(data, dict) or not isinstance(data.get("strategy"), dict):
+        raise ValueError("portfolio template YAML must contain a 'strategy' mapping")
+    data = dict(data)
+    data.pop("universe", None)
+    strat = dict(data["strategy"])
+    strat["symbol"] = member_symbol
+    data["strategy"] = strat
+    return _yaml.safe_dump(data, sort_keys=False)
+
+
+def run_portfolio_backtest(
+    template_yaml: str,
+    member_ohlcv: dict[str, list[dict[str, Any]] | list[list[Any]]],
+    run_config: dict[str, Any],
+    market_data_request: dict[str, Any],
+    *,
+    membership_windows: dict[str, list[tuple[str, str]]] | None = None,
+    starting_capital: float = 100_000.0,
+    max_positions: int = 5,
+    sizing_mode: str = "equal_weight",
+    risk_per_trade_pct: float = 1.0,
+    sector_map: dict[str, str] | None = None,
+    sector_cap_pct: float | None = None,
+    survivorship_mode: str = "approximate",
+    snapshots: list[dict[str, Any]] | None = None,
+    backtest_ref_id: str | None = None,
+) -> dict:
+    """Portfolio-level dynamic-universe backtest (§8): wrap per-member sim under one pool.
+
+    Runs the EXISTING single-symbol :func:`run_backtest` once per member (reuse, not
+    rewrite — Invariant 1), collects each member's raw trades, restricts them to the
+    member's membership windows (a symbol only trades while it is in the universe), and
+    arbitrates them through :class:`engine.portfolio.PortfolioManager` — the single
+    authority for shared capital + the ``max_positions`` cap (Invariant 9). Produces ONE
+    portfolio result: equity curve, metrics, per-symbol attribution, skip counts, the
+    resolved snapshots, and ``survivorship_mode`` (Invariant 7/10).
+
+    ``member_ohlcv`` maps each resolved member symbol → its execution-tier OHLCV (fetched
+    lazily/streamed by the caller via the DataProvider — bounded memory, Invariant 6).
+    """
+    from engine.portfolio import CandidateTrade, PortfolioManager, candidate_from_trade
+
+    member_cfg = dict(run_config)
+    member_cfg["return_trades"] = True
+
+    candidates: list[CandidateTrade] = []
+    per_member_diag: dict[str, str] = {}
+    for symbol, ohlcv in member_ohlcv.items():
+        if not ohlcv:
+            per_member_diag[symbol] = "no_data"
+            continue
+        member_request = dict(market_data_request)
+        member_request["symbol"] = symbol
+        try:
+            result = run_backtest(
+                _stamp_member_yaml(template_yaml, symbol),
+                ohlcv,
+                member_cfg,
+                member_request,
+                backtest_ref_id=None,
+            )
+        except Exception as exc:  # noqa: BLE001 — per-member tolerance, never sink the run
+            logger.warning("portfolio|member_failed|symbol=%s|err=%s", symbol, exc)
+            per_member_diag[symbol] = f"error:{type(exc).__name__}"
+            continue
+        windows = membership_windows.get(symbol) if membership_windows else None
+        for trade in result.get("trades", []):
+            cand = candidate_from_trade(
+                trade, sector=(sector_map or {}).get(symbol),
+            )
+            if windows and not _entry_in_windows(cand.entry_ts, windows):
+                continue
+            candidates.append(cand)
+
+    pm = PortfolioManager(
+        starting_capital=starting_capital,
+        max_positions=max_positions,
+        sizing_mode=sizing_mode,  # type: ignore[arg-type]
+        risk_per_trade_pct=risk_per_trade_pct,
+        sector_cap_pct=sector_cap_pct,
+    )
+    pf = pm.run(candidates)
+
+    out = pf.to_dict()
+    out["backtest_ref_id"] = backtest_ref_id or str(uuid.uuid4())
+    out["survivorship_mode"] = survivorship_mode
+    out["snapshots"] = snapshots or []
+    out["members"] = sorted(member_ohlcv.keys())
+    out["member_diagnostics"] = per_member_diag
+    out["max_positions"] = max_positions
+    logger.info(
+        "portfolio|backtest_complete|members=%d|candidates=%d|fills=%d|return=%.2f%%|survivorship=%s",
+        len(member_ohlcv), len(candidates), len(pf.fills),
+        pf.metrics.get("total_return_pct", 0.0), survivorship_mode,
+    )
+    return out
+
+
+def _entry_in_windows(entry_ts, windows: list[tuple[str, str]]) -> bool:
+    """True when ``entry_ts`` falls inside any [from, to] membership window."""
+    ts = pd.to_datetime(entry_ts)
+    if getattr(ts, "tzinfo", None) is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    for start, end in windows:
+        start_ts = _parse_window_timestamp(start)
+        end_ts = _parse_window_timestamp(end)
+        if start_ts <= ts <= end_ts:
+            return True
+    return False
 
 
 def _check_data_sufficiency(df, required_warmup: int, symbol: str) -> None:

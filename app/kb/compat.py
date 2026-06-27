@@ -117,4 +117,8 @@ async def resolve_supported_stock(query: str) -> dict | None:
         "display_name": stock.display_name,
         "exchange":     stock.exchange,
         "sector":       stock.sector,
+        # How the query matched. Callers that re-feed free-form chat into the
+        # resolver (e.g. the chat salvage net) use this to adopt only STRONG
+        # matches and ignore weak short-prefix hits like "it"->ITC / "go"->GODREJCP.
+        "match_kind":   resolution.match_kind,
     }

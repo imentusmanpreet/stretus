@@ -110,15 +110,48 @@ class TestMarketDataFactory:
     def setup_method(self) -> None:
         reset_market_data_clients()
 
-    def test_equity_returns_upstox_client(self) -> None:
-        client = get_market_data_client(AssetClass.equity_cash)
-        assert isinstance(client, UpstoxClient)
-        assert client.adapter_id == "upstox_rest"
+    def _force_settings(self, monkeypatch, policy: str) -> None:
+        # Live market data flows through the stretus-backend gateway (InternalMarketDataClient),
+        # so the factory AND the gateway client must see the same forced settings — independent of
+        # any ambient .env. The gateway client reads historical_data_url at construction time.
+        import app.services.execution.market_data.factory as fac
+        import app.services.execution.market_data.internal_client as internal
+        fake_settings = type("S", (), {
+            "equity_market_data_source": policy,
+            "historical_data_url": "http://gateway.test",
+            "market_data_timeout_seconds": 5.0,
+        })()
+        monkeypatch.setattr(fac, "get_settings", lambda: fake_settings)
+        monkeypatch.setattr(internal, "get_settings", lambda: fake_settings)
+        fac.reset_market_data_clients()
 
-    def test_crypto_returns_binance_client(self) -> None:
+    def test_equity_uses_gateway_primary_under_default_resilient_policy(self, monkeypatch) -> None:
+        # The resilient policy wraps the live gateway client in a gateway→backtest_feed fallback
+        # chain, with the gateway (InternalMarketDataClient) as the primary.
+        from app.services.execution.market_data.backtest_feed_client import BacktestFeedClient
+        from app.services.execution.market_data.internal_client import InternalMarketDataClient
+        from app.services.execution.market_data.resilient_client import ResilientMarketDataClient
+
+        self._force_settings(monkeypatch, "resilient")
+        client = get_market_data_client(AssetClass.equity_cash)
+        assert isinstance(client, ResilientMarketDataClient)
+        assert isinstance(client._clients[0], InternalMarketDataClient)
+        assert isinstance(client._clients[1], BacktestFeedClient)
+
+    def test_equity_source_policy_upstox_only(self, monkeypatch) -> None:
+        # "upstox" = live broker feed, now reached through the gateway (no fallback wrapping).
+        from app.services.execution.market_data.internal_client import InternalMarketDataClient
+
+        self._force_settings(monkeypatch, "upstox")
+        assert isinstance(get_market_data_client(AssetClass.equity_cash), InternalMarketDataClient)
+
+    def test_crypto_returns_gateway_client(self, monkeypatch) -> None:
+        # Crypto also routes through the gateway; the gateway owns broker (Binance) selection.
+        from app.services.execution.market_data.internal_client import InternalMarketDataClient
+
+        self._force_settings(monkeypatch, "resilient")
         client = get_market_data_client(AssetClass.crypto_spot)
-        assert isinstance(client, BinanceClient)
-        assert client.adapter_id == "binance_rest"
+        assert isinstance(client, InternalMarketDataClient)
 
     def test_factory_caches_per_asset_class(self) -> None:
         a = get_market_data_client(AssetClass.crypto_spot)
@@ -354,10 +387,10 @@ class TestBinanceKlineNormalisation:
             [1_700_000_060_000, "101.0", "101.7", "100.5", "100.9", "13.1"],
         ]
         df = _binance_klines_to_df(klines)
-        assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
+        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
         assert len(df) == 2
         assert df.index.tz is not None and str(df.index.tz) == "UTC"
-        assert df["Close"].iloc[-1] == 100.9
+        assert df["close"].iloc[-1] == 100.9
 
     def test_empty_klines_raise(self) -> None:
         with pytest.raises(ValueError):
@@ -463,7 +496,7 @@ class TestBinanceClientNetwork:
         assert captured["params"]["symbol"] == "BTCUSDT"
         assert captured["params"]["interval"] == "5m"
         assert len(df) == 2
-        assert df["Close"].iloc[-1] == 101.0
+        assert df["close"].iloc[-1] == 101.0
 
         # Restore for any later tests.
         monkeypatch.setattr(_StubAsyncClient, "get", original_get)

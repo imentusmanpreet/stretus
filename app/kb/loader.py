@@ -46,6 +46,17 @@ class StockLookupResolution:
     # user rather than adopt silently. Left None for exact/prefix/alias/token
     # resolutions; only set by the last-resort fuzzy tier.
     suggestion: Stock | None = None
+    # How the query matched, so callers can weigh match STRENGTH without
+    # re-deriving it. Purely informational — it never changes which stock (or
+    # ambiguity) is returned. One of:
+    #   "exact"     symbol or normalized name hit the exact index
+    #   "alias"     manual or auto-derived alias hit
+    #   "prefix"    single loose startswith match (weak signal)
+    #   "token"     single order-independent token-set match
+    #   "fuzzy"     last-resort difflib suggestion (paired with `suggestion`)
+    #   "ambiguous" more than one candidate (paired with `ambiguous_matches`)
+    #   ""          no match
+    match_kind: str = ""
 
     @property
     def is_ambiguous(self) -> bool:
@@ -365,29 +376,33 @@ class KB:
         # Direct symbol match (e.g. "HDFCBANK.NS")
         for symbol, stock in self.stocks.items():
             if symbol.lower() == q_lower:
-                return StockLookupResolution(stock=stock)
+                return StockLookupResolution(stock=stock, match_kind="exact")
 
         exact_symbol = self._stock_exact_index.get(q_key)
         if exact_symbol:
             stock = self.stocks.get(exact_symbol)
             if stock is not None:
-                return StockLookupResolution(stock=stock)
+                return StockLookupResolution(stock=stock, match_kind="exact")
 
         prefix_matches = self.prefix_stock_matches(raw)
         if len(prefix_matches) > 1:
-            return StockLookupResolution(ambiguous_matches=tuple(prefix_matches))
+            return StockLookupResolution(
+                ambiguous_matches=tuple(prefix_matches), match_kind="ambiguous"
+            )
         if len(prefix_matches) == 1:
-            return StockLookupResolution(stock=prefix_matches[0])
+            return StockLookupResolution(stock=prefix_matches[0], match_kind="prefix")
 
         # Manual aliases are a fallback only after prefix ambiguity has been
         # ruled out, so broad aliases like "hdfc" cannot silently pick a stock.
         if q_lower in self.aliases:
             sym = self.aliases[q_lower]
-            return StockLookupResolution(stock=self.stocks.get(sym))
+            return StockLookupResolution(stock=self.stocks.get(sym), match_kind="alias")
 
         # Auto-derived aliases
         if q_lower in self._auto_aliases:
-            return StockLookupResolution(stock=self.stocks.get(self._auto_aliases[q_lower]))
+            return StockLookupResolution(
+                stock=self.stocks.get(self._auto_aliases[q_lower]), match_kind="alias"
+            )
 
         # Order-independent token-set fallback. Rescues reordered / space-variant
         # multi-word names (e.g. "idea vodafone" → "Vodafone Idea") once the
@@ -397,18 +412,22 @@ class KB:
         if token_symbols:
             token_stocks = [self.stocks[s] for s in token_symbols if s in self.stocks]
             if len(token_stocks) > 1:
-                return StockLookupResolution(ambiguous_matches=tuple(token_stocks))
+                return StockLookupResolution(
+                    ambiguous_matches=tuple(token_stocks), match_kind="ambiguous"
+                )
             if len(token_stocks) == 1:
-                return StockLookupResolution(stock=token_stocks[0])
+                return StockLookupResolution(stock=token_stocks[0], match_kind="token")
 
         # Fuzzy "did you mean" — last resort for typos. A single hit becomes a
         # suggestion the caller asks the user to confirm; multiple hits reuse the
         # ambiguous picker. Never auto-adopted by lookup_stock().
         fuzzy_matches = self._fuzzy_stock_matches(q_key)
         if len(fuzzy_matches) > 1:
-            return StockLookupResolution(ambiguous_matches=tuple(fuzzy_matches))
+            return StockLookupResolution(
+                ambiguous_matches=tuple(fuzzy_matches), match_kind="ambiguous"
+            )
         if len(fuzzy_matches) == 1:
-            return StockLookupResolution(suggestion=fuzzy_matches[0])
+            return StockLookupResolution(suggestion=fuzzy_matches[0], match_kind="fuzzy")
 
         return StockLookupResolution()
 

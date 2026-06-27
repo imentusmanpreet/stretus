@@ -148,8 +148,16 @@ async def generate_strategy(
             )
         else:
             logger.info(
-                "📥 generator | reply received | attempt=%d | elapsed=%.0fms | raw_len=%d | preview=%r",
-                attempt, _elapsed, _raw_len, _preview,
+                "📥 generator | reply received | attempt=%d | elapsed=%.0fms | raw_len=%d",
+                attempt, _elapsed, _raw_len,
+            )
+            # FULL, untrimmed AI response — so the exact StrategySpec JSON the model
+            # produced is visible during testing (no preview truncation).
+            logger.info(
+                "\n┌─🧠 AI RESPONSE (attempt %d) ─────────────────────────────────────────\n"
+                "%s\n"
+                "└──────────────────────────────────────────────────────────────────────",
+                attempt, raw,
             )
 
         spec, parse_error = _parse_spec(raw)
@@ -174,7 +182,18 @@ async def generate_strategy(
                 step_logger.PASS, step_logger.PROPOSE, session_id, turn,
                 "spec_generated", attempt=attempt, notes=len(result.notes), symbol=spec.symbol,
             )
-            logger.info("✅ generator | valid spec on attempt=%d | symbol=%s tf=%s", attempt, spec.symbol, spec.timeframe)
+            _kind = "🌌 DYNAMIC UNIVERSE" if spec.is_dynamic else "📈 single-symbol"
+            logger.info(
+                "✅ generator | valid spec on attempt=%d | %s | symbol=%s tf=%s dir=%s",
+                attempt, _kind, spec.symbol, spec.timeframe, spec.direction,
+            )
+            # FULL validated StrategySpec — the exact contract handed downstream.
+            logger.info(
+                "\n┌─📋 STRATEGY SPEC (validated) ────────────────────────────────────────\n"
+                "%s\n"
+                "└──────────────────────────────────────────────────────────────────────",
+                spec.model_dump_json(indent=2, exclude_none=True),
+            )
             return spec, result
 
         # ── repair ────────────────────────────────────────────────────────────

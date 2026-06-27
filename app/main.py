@@ -5,6 +5,8 @@ Stretus FastAPI application factory.
 
 Startup loads the structured KB (app/kb) into memory. No ChromaDB / embeddings.
 """
+from __future__ import annotations
+
 # quant_engine/ has 26 internal cross-imports of the form `from engine.*`.
 # They resolve only when `quant_engine/` is itself on sys.path. tests/conftest.py
 # does this for pytest; production Uvicorn startup needs the same injection or
@@ -28,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logging_setup import configure_logging
+from app.core.tenant_middleware import TenantContextMiddleware
 from app.core.errors import install_exception_handlers
 from app.api.v1.routes import chat, strategy, backtest, execution
 from app.db.session import AsyncSessionLocal
@@ -67,9 +70,15 @@ async def lifespan(app: FastAPI):
     llm = LLMService()
     info = llm.info()
     logger.info(
-        "🚀 Stretus API ready | provider=%s model=%s",
+        "🚀 Stretus API ready | provider=%s model=%s tenant_code=%s",
         info["provider"].upper(),
         info["active_model"],
+        settings.tenant_code or "(multi-tenant — use x-tenant-id)",
+    )
+    logger.info(
+        "tenant_config|event=startup|tenant_code=%s|market_data_grpc=%s",
+        settings.tenant_code or "",
+        settings.market_data_grpc_target or "(not set)",
     )
     logger.info("  🚀 🚀  LLM details | %s", {k: v for k, v in info.items() if k != "provider"})
     logger.info("the info is %s", info)
@@ -127,6 +136,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 install_exception_handlers(app)
+
+app.add_middleware(TenantContextMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

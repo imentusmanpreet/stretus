@@ -46,7 +46,10 @@ from app.core.config import get_settings
 from app.services.execution.market_data.base import MarketDataClient
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
+
+
+def _default_settings():
+    return get_settings()
 
 
 # ── Timeframe helpers ─────────────────────────────────────────────────────────
@@ -198,10 +201,25 @@ class UpstoxClient(MarketDataClient):
 
     adapter_id = "upstox_rest"
 
-    def __init__(self) -> None:
-        self._base    = settings.market_data_url.rstrip("/")
-        self._token   = settings.upstox_access_token
-        self._timeout = settings.market_data_timeout_seconds
+    def __init__(
+        self,
+        *,
+        base_url: Optional[str] = None,
+        access_token: Optional[str] = None,
+        timeout: Optional[float] = None,
+        adapter_id: str = "upstox_rest",
+    ) -> None:
+        settings = _default_settings()
+        self.adapter_id = adapter_id
+        self._base = (base_url or settings.market_data_url or "https://api.upstox.com/v2").rstrip("/")
+        self._token = access_token if access_token is not None else settings.upstox_access_token
+        self._timeout = timeout if timeout is not None else settings.market_data_timeout_seconds
+        logger.debug(
+            "tenant_config|event=upstox_client_init|adapter_id=%s|base_url=%s|has_token=%s",
+            self.adapter_id,
+            self._base,
+            bool(self._token),
+        )
 
     def _headers(self) -> dict:
         return {

@@ -94,6 +94,11 @@ def build_agent_state(
         discovery_active = builder.requires_discovery()
     except Exception:
         discovery_active = False
+    # Dynamic-universe (direct path): the user named a SELECTION RULE ("top 10 by
+    # volume"), not one instrument. Like discovery, this means the backend supplies the
+    # instruments — so the agent must NOT ask "which symbol?". Fold it into the existing
+    # flag so the agent's current "don't ask for a stock" guidance applies unchanged.
+    universe_intent = bool(getattr(builder, "universe_intent", False))
     return {
         "session_id": session_id,
         "mode": previous_state or builder.get_mode(),
@@ -114,7 +119,10 @@ def build_agent_state(
         # NOT to ask the user for a specific stock when the backend will
         # scan the universe and pick one automatically.
         "strategy_preset": getattr(builder, "strategy_preset", None),
-        "discovery_will_supply_symbol": bool(discovery_active),
+        "discovery_will_supply_symbol": bool(discovery_active or universe_intent),
+        # Explicit signal the agent reads: the user gave an instrument-SELECTION RULE,
+        # so a dynamic universe will be resolved — do not ask for a single asset.
+        "universe_intent": universe_intent,
         "strategy": {
             "strategy_id": context.get("strategy_id"),
             "yaml_path": context.get("yaml_path"),

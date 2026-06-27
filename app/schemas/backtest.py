@@ -190,7 +190,7 @@ class BacktestMetrics(BaseModel):
     worst_drawdown_end_date: Optional[str] = None
     drawdown_duration_days: int = 0
     recovery_date: Optional[str] = None
-    recovery_time_days: int = 0
+    recovery_time_days: Optional[int] = None   # None = never recovered within the window
 
     # Monthly performance (embedded in metrics for convenience)
     monthly_performance: list[dict[str, Any]] = Field(default_factory=list)
@@ -313,8 +313,8 @@ class BacktestResultPayload(BaseModel):
 class AssetBacktestSummary(BaseModel):
     """One comparison row per asset for the multi-asset summary.
 
-    The four metrics are lifted verbatim from each asset's BacktestMetrics; no
-    new computation happens here.
+    The metrics are lifted verbatim from each asset's BacktestMetrics and the
+    grade/labels from its BacktestAssessment; no new computation happens here.
     """
     model_config = ConfigDict(populate_by_name=True)
 
@@ -324,6 +324,15 @@ class AssetBacktestSummary(BaseModel):
     annual_return: float = 0.0      # metrics.annual_return
     volatility_pct: float = 0.0     # metrics.volatility_pct
     max_drawdown: float = 0.0       # metrics.max_drawdown
+    # Additional per-asset metrics for the comparison table (lifted from metrics)
+    sharpe_ratio: float = 0.0       # metrics.sharpe_ratio
+    win_rate: float = 0.0           # metrics.win_rate
+    total_trades: int = 0           # metrics.total_trades
+    # Assessment labels (lifted from assessment; "" when no assessment ran)
+    overall_grade: str = ""         # assessment.overall_grade
+    return_potential: str = ""      # assessment.return_potential
+    risk_profile: str = ""          # assessment.risk_profile
+    recommendation: str = ""        # assessment.recommended_for
     pass_: bool = Field(default=False, alias="pass")
     failure_reason: str = ""
 

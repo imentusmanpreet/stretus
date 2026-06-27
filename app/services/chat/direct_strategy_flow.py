@@ -35,6 +35,56 @@ from app.strategy.yaml_writer import write_spec_yaml
 logger = logging.getLogger(__name__)
 
 
+def _apply_universe_to_builder(builder: Any, spec: StrategySpec) -> None:
+    """Store the universe RULE (pure ``UniverseSpec`` dump — must stay re-validatable) and
+    the AI's own plain-words ``intent_summary`` SEPARATELY on the builder.
+
+    The summary is kept OFF the universe dict on purpose: ``builder.universe`` is fed back into
+    ``UniverseSpec.model_validate`` (resolver + YAML), which is ``extra='forbid'`` — any stray
+    key would crash validation. The response layer merges the summary back in for display.
+    """
+    builder.universe = spec.universe.model_dump(mode="json", exclude_none=True)
+    builder.universe_summary = (spec.intent_summary or "").strip() or None
+
+
+def _log_spec_breakdown(spec: StrategySpec, *, session_id: str | None, stage: str) -> None:
+    """Pretty, human-readable breakdown of the spec the AI authored — universe highlighted.
+
+    Logged at INFO so a tester can see, at a glance, exactly what was built (instrument vs
+    selection rule, the conditions, the risk) without digging through the raw JSON.
+    """
+    lines = [
+        f"┌─🧠 STRATEGY AUTHORED ({stage}) | session={session_id} ─────────────────",
+        f"│  name        : {spec.name}",
+        f"│  market/tf   : {spec.market} / {spec.timeframe}  ({spec.objective}, {spec.direction})",
+    ]
+    if spec.is_dynamic and spec.universe is not None:
+        u = spec.universe
+        lines += [
+            "│  🌌 UNIVERSE  : DYNAMIC (rule-selected, no fixed symbol)",
+            f"│     source    : {u.source.kind}" + (f" '{u.source.name}'" if u.source.name else ""),
+            f"│     rank by   : {u.rank.by} ({u.rank.order})"
+            + (f", window={u.rank.window}" if u.rank.window else ""),
+            f"│     screen    : {u.screen or '(none)'}",
+            f"│     take      : {u.take}   max_positions: {u.max_positions or u.take}",
+            f"│     refresh   : {u.refresh.cadence}" + (f" @ {u.refresh.at}" if u.refresh.at else ""),
+        ]
+        if u.source.kind == "watchlist" and u.source.symbols:
+            lines.append(f"│     symbols   : {u.source.symbols}")
+    else:
+        lines.append(f"│  📈 SYMBOL    : {spec.symbol}")
+    lines += [
+        f"│  entry       : {spec.entry_condition}",
+        f"│  exit        : {spec.exit_condition or '(none)'}",
+        f"│  stop_loss   : {spec.stop_loss.type} = {spec.stop_loss.value}"
+        + (f" (window {spec.stop_loss.window})" if spec.stop_loss.window else ""),
+        f"│  take_profit : {(spec.take_profit.type + ' = ' + str(spec.take_profit.value)) if spec.take_profit else '(trailing/none)'}",
+        f"│  intent      : {(spec.intent_summary or '')[:200]}",
+        "└──────────────────────────────────────────────────────────────────────",
+    ]
+    logger.info("\n%s", "\n".join(lines))
+
+
 @dataclass
 class DirectSynthesisResult:
     """Outcome of the direct synthesis step, consumed by the chat router."""
@@ -80,7 +130,21 @@ def _builder_context_message(builder: Any) -> str:
     rms_sources = (g("risk_execution_config") or {}).get("rms_sources", {}) or {}
     if rms_sources.get("stop_loss_pct") == "user":
         _add("stop_loss_pct (user-specified)", g("stop_loss"))
-    if rms_sources.get("take_profit_pct") == "user":
+
+    # Multi-TP ladder: include rungs instead of the (now-zeroed) scalar.
+    # rms_sources["take_profit_pct"] == "multi_tp" is set by constraint_compiler
+    # when a partial-exit ladder is detected — suppress the scalar in that case.
+    partial_exits = (getattr(builder, "execution_layers", None) or {}).get("partial_exits")
+    if partial_exits:
+        _add(
+            "multi_take_profit_ladder (user-specified)",
+            "; ".join(
+                f"rung {i+1}: {pe.get('trigger')}={pe.get('value')}"
+                + (f" exit={pe['size_pct']}%" if pe.get("size_pct") else "")
+                for i, pe in enumerate(partial_exits)
+            ),
+        )
+    elif rms_sources.get("take_profit_pct") == "user":
         _add("take_profit_pct (user-specified)", g("take_profit"))
 
     known_block = "\n".join(known) if known else "- (none gathered yet)"
@@ -104,9 +168,13 @@ def _reconcile_identity(spec: StrategySpec, builder: Any) -> StrategySpec:
     persisted strategy_object (from the builder) describing the same instrument.
     """
     updates: dict[str, Any] = {}
-    confirmed_symbol = builder.format_symbol() if hasattr(builder, "format_symbol") else getattr(builder, "symbol", None)
-    if confirmed_symbol:
-        updates["symbol"] = confirmed_symbol
+    # Dynamic-universe specs own NO single symbol — the universe rule is the instrument
+    # selector. Never force a symbol onto them (it would erase the universe and break the
+    # one-of contract). Only non-dynamic specs reconcile their confirmed symbol.
+    if not spec.is_dynamic:
+        confirmed_symbol = builder.format_symbol() if hasattr(builder, "format_symbol") else getattr(builder, "symbol", None)
+        if confirmed_symbol:
+            updates["symbol"] = confirmed_symbol
     if getattr(builder, "timeframe", None):
         updates["timeframe"] = builder.timeframe
     if getattr(builder, "market", None):
@@ -132,6 +200,10 @@ def populate_builder_from_spec(builder: Any, spec: StrategySpec) -> None:
     builder.short_entry_condition = spec.short_entry_condition or None
     builder.short_exit_condition = spec.short_exit_condition or None
     builder.direction = spec.direction
+    # Dynamic universe: carry the rule onto the builder so it persists across turns and
+    # the engine YAML emits the `universe:` block (backtest route → portfolio path).
+    if spec.is_dynamic and spec.universe is not None:
+        _apply_universe_to_builder(builder, spec)
 
     # Risk (properties backed by the builder's risk store).
     builder.stop_loss = spec.resolved_stop_loss_pct()
@@ -233,6 +305,9 @@ def apply_spec_extras_to_builder(builder: Any, spec: StrategySpec) -> None:
     builder.direction = spec.direction
     builder.stop_loss = spec.resolved_stop_loss_pct()
     builder.take_profit = spec.resolved_take_profit_pct()
+    # Dynamic universe: carry the rule (persisted → emitted into the engine YAML).
+    if spec.is_dynamic and spec.universe is not None:
+        _apply_universe_to_builder(builder, spec)
     # The spec is the source of truth now — keep risk provenance accurate so the
     # read-back/config shows the right value AND who set it (user vs assumed).
     store = getattr(builder, "risk_execution_config", None)
@@ -319,7 +394,11 @@ async def plan_via_direct(
     apply_spec_extras_to_builder(builder, spec)
     builder._direct_spec = spec
     builder._direct_notes = _notes_for_user(result)
-    logger.info("✅ direct_flow | plan_via_direct ok | session=%s | symbol=%s", session_id, spec.symbol)
+    _log_spec_breakdown(spec, session_id=session_id, stage="plan_via_direct")
+    logger.info(
+        "✅ direct_flow | plan_via_direct ok | session=%s | %s",
+        session_id, ("universe=" + spec.universe.source.kind) if spec.is_dynamic else ("symbol=" + str(spec.symbol)),
+    )
     return spec, spec_to_plan(spec), None
 
 
@@ -404,6 +483,7 @@ async def synthesize(
 
     spec = _reconcile_identity(spec, builder)
     populate_builder_from_spec(builder, spec)
+    _log_spec_breakdown(spec, session_id=session_id, stage="synthesize")
 
     try:
         yaml_path = write_spec_yaml(spec, session_id=session_id, turn=turn)

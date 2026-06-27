@@ -59,9 +59,11 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
             "Create or update strategy inputs. Use whenever the user provides or changes "
             "stock, timeframe, objective, sentiment, experience, goal, or strategy preset. "
             "Also use when the user mentions risk settings (SL, TP, RR, per-trade risk, "
-            "daily cap, position sizing, trailing stop, trading window) for the FIRST time "
-            "during input collection — the backend extracts them automatically from the raw "
-            "user message, so you do not need to parse them yourself. "
+            "daily cap, position sizing, trading window) for the FIRST time during input "
+            "collection — the backend extracts them automatically from the raw user message, "
+            "so you do not need to parse them yourself. "
+            "Do NOT use for trailing stop or trailing take-profit — always route those to "
+            "update_risk_execution_config instead, at every stage of the conversation. "
             "Do NOT use this for entry/exit signal conditions or indicator formulas "
             "(e.g. 'EMA(8) > EMA(21) AND RSI(14) > 50') — those edit the signal plan and "
             "must go to modify_signal_selection, not the captured input fields."
@@ -367,9 +369,12 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
         AgentToolName.UPDATE_RISK_EXECUTION_CONFIG,
         (
             "Update or confirm risk and execution settings: stop loss, take profit, "
-            "risk:reward ratio, daily loss cap, per-trade risk, max trades, trailing stop, "
+            "risk:reward ratio, daily loss cap, per-trade risk, max trades, trailing stop "
+            "(distance and activation), trailing take-profit (distance and activation), "
             "or trading window. Use when the user explicitly provides or changes any of these "
-            "values AFTER inputs are already collected, or when confirming proposed defaults."
+            "values at ANY stage of the conversation — including during initial input collection "
+            "— or when confirming proposed defaults. Always use this tool for trailing stop and "
+            "trailing take-profit regardless of the current conversation state."
         ),
         {
             "type": "object",
@@ -402,7 +407,19 @@ AGENT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "trailing_stop_pct": {
                     "type": "number",
-                    "description": "Trailing stop distance as a percentage, e.g. 2.0 for 2%.",
+                    "description": (
+                        "Trailing STOP give-back distance as a percentage — how far below "
+                        "the running peak the stop trails, e.g. 2.0 for 2%. Use the EXACT "
+                        "number the user states. Pairs with trailing_stop_activate_after_pct."
+                    ),
+                },
+                "trailing_stop_activate_after_pct": {
+                    "type": "number",
+                    "description": (
+                        "Profit percent at which the trailing STOP engages, e.g. 1.0 for 1%. "
+                        "Use the EXACT number stated. Send on its own to change only the "
+                        "activation threshold, leaving the trailing-stop distance unchanged."
+                    ),
                 },
                 "trailing_take_profit_distance_pct": {
                     "type": "number",
